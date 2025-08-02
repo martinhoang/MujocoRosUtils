@@ -3,6 +3,7 @@
 #include <mujoco/mujoco.h>
 
 #include <iostream>
+#include <cstdlib>
 
 namespace MujocoRosUtils
 {
@@ -253,8 +254,14 @@ ImagePublisher::ImagePublisher(const mjModel * m,
     rclcpp::init(argc, argv);
   }
   rclcpp::NodeOptions node_options;
+  
+  node_options.parameter_overrides({
+      {"use_sim_time", true}, // Force use simulation time
+  });
 
-  nh_ = rclcpp::Node::make_shared("mujoco_ros", node_options);
+  std::string node_name = mj_id2name(m, mjOBJ_SENSOR, sensor_id);
+
+  nh_ = rclcpp::Node::make_shared(node_name, node_options);
   color_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(color_topic_name, 1);
   depth_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(depth_topic_name, 1);
   info_pub_ = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(info_topic_name, 1);

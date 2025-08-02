@@ -109,9 +109,9 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
                                  std::string topic_name)
 : actuator_id_(actuator_id)
 {
+  std::string actuator_name = std::string(mj_id2name(m, mjOBJ_ACTUATOR, actuator_id));
   if(topic_name.empty())
   {
-    std::string actuator_name = std::string(mj_id2name(m, mjOBJ_ACTUATOR, actuator_id));
     topic_name = "mujoco/" + actuator_name;
   }
 
@@ -123,7 +123,7 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
   }
   rclcpp::NodeOptions node_options;
 
-  nh_ = rclcpp::Node::make_shared("actuator_command", node_options);
+  nh_ = rclcpp::Node::make_shared(actuator_name + "_actuator_command_plugin", node_options);
   sub_ = nh_->create_subscription<std_msgs::msg::Float64>(
       topic_name, 1, std::bind(&ActuatorCommand::callback, this, std::placeholders::_1));
   // // Use a dedicated queue so as not to call callbacks of other modules

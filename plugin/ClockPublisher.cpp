@@ -134,7 +134,7 @@ ClockPublisher::ClockPublisher(const mjModel * m,
   }
   rclcpp::NodeOptions node_options;
 
-  nh_ = rclcpp::Node::make_shared("mujoco_ros", node_options);
+  nh_ = rclcpp::Node::make_shared("_clock_publisher", node_options);
   pub_ = nh_->create_publisher<rosgraph_msgs::msg::Clock>(topic_name, 1);
   // nh_->setParam("/use_sim_time", use_sim_time_);
 }

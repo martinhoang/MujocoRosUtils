@@ -76,13 +76,10 @@
       <config key="vel_topic_name" value="/vel"/>
       <config key="publish_rate" value="30"/>
       <config key="output_tf" value="false"/>
-      <!-- <config key="tf_child_frame_id" value="object"/> -->
     </plugin>
 
     <plugin name="tf_publisher" plugin="MujocoRosUtils::PosePublisher" objtype="xbody" objname="camera_frame">
       <config key="frame_id" value="map"/>
-      <!-- <config key="pose_topic_name" value="/pose"/> -->
-      <!-- <config key="vel_topic_name" value="/vel"/> -->
       <config key="publish_rate" value="30"/>
       <config key="output_tf" value="true"/>
       <config key="tf_child_frame_id" value="camera"/>

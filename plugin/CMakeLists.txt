@@ -28,6 +28,12 @@ add_library(MujocoRosUtilsPlugin SHARED Plugin.cpp)
 target_include_directories(MujocoRosUtilsPlugin PRIVATE ${MUJOCO_INCLUDE_DIR})
 target_link_libraries(MujocoRosUtilsPlugin PUBLIC MujocoRosUtils)
 
+set_target_properties(
+  MujocoRosUtils MujocoRosUtilsPlugin
+  PROPERTIES
+  INSTALL_RPATH "$ORIGIN"
+)
+
 install(
   TARGETS MujocoRosUtils MujocoRosUtilsPlugin
   EXPORT "${TARGETS_EXPORT_NAME}"

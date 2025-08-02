@@ -191,7 +191,12 @@ PosePublisher::PosePublisher(const mjModel * m,
   }
   rclcpp::NodeOptions node_options;
 
-  nh_ = rclcpp::Node::make_shared("mujoco_ros", node_options);
+  node_options.parameter_overrides({
+    {"use_sim_time", true}, // Force use simulation time
+  });
+  std::string node_name = body_name + "_pose_publisher";
+  nh_ = rclcpp::Node::make_shared(node_name, node_options);
+  
   if(output_tf_)
   {
     tf_br_ = std::make_unique<tf2_ros::TransformBroadcaster>(nh_);

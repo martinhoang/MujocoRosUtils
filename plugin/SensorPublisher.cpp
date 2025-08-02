@@ -165,9 +165,10 @@ SensorPublisher::SensorPublisher(const mjModel * m,
   {
     frame_id_ = "map";
   }
+
+  std::string sensor_name = std::string(mj_id2name(m, mjOBJ_SENSOR, sensor_id_));
   if(topic_name_.empty())
   {
-    std::string sensor_name = std::string(mj_id2name(m, mjOBJ_SENSOR, sensor_id_));
     topic_name_ = "mujoco/" + sensor_name;
   }
 
@@ -178,8 +179,11 @@ SensorPublisher::SensorPublisher(const mjModel * m,
     rclcpp::init(argc, argv);
   }
   rclcpp::NodeOptions node_options;
+  node_options.parameter_overrides({
+      {"use_sim_time", true}, // Force use simulation time
+  });
 
-  nh_ = rclcpp::Node::make_shared("mujoco_ros", node_options);
+  nh_ = rclcpp::Node::make_shared(sensor_name + "_sensor_publisher", node_options);
   if(msg_type_ == MsgScalar)
   {
     pub_ = nh_->create_publisher<mujoco_ros_utils::msg::ScalarStamped>(topic_name_, 1);

@@ -13,7 +13,7 @@ set(CMAKE_COLOR_DIAGNOSTICS ON)
 
 option(INSTALL_DOCUMENTATION "Generate and install the documentation" OFF)
 
-include(cmake/base.cmake)
+# include(cmake/base.cmake)
 project(${PROJECT_NAME})
 
 # MuJoCo
@@ -83,11 +83,14 @@ rosidl_generate_interfaces(
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
+# Do this to allow for loading xml according to the instructions in the README
+# However, it is normally not done that way.
+install(DIRECTORY xml DESTINATION share)
+
 ament_export_dependencies(rosidl_default_runtime)
 
 ament_package()
 add_subdirectory(plugin)
-add_subdirectory(xml)
 
 if(INSTALL_DOCUMENTATION)
   add_subdirectory(doc)

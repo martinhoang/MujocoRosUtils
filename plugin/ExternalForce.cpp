@@ -109,7 +109,7 @@ ExternalForce * ExternalForce::Create(const mjModel * m, mjData * d, int plugin_
   return new ExternalForce(m, d, body_id, topic_name, vis_scale);
 }
 
-ExternalForce::ExternalForce(const mjModel *, // m
+ExternalForce::ExternalForce(const mjModel * m,
                              mjData *, // d
                              int body_id,
                              const std::string & topic_name,
@@ -129,7 +129,8 @@ ExternalForce::ExternalForce(const mjModel *, // m
   }
   rclcpp::NodeOptions node_options;
 
-  nh_ = rclcpp::Node::make_shared("mujoco_ros", node_options);
+  std::string body_name = std::string(mj_id2name(m, mjOBJ_BODY, body_id_));
+  nh_ = rclcpp::Node::make_shared(body_name + "_external_force_plugin", node_options);
   sub_ = nh_->create_subscription<mujoco_ros_utils::msg::ExternalForce>(
       topic_name, 1, std::bind(&ExternalForce::callback, this, std::placeholders::_1));
   // Use a dedicated queue so as not to call callbacks of other modules
