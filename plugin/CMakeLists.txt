@@ -1,7 +1,14 @@
 add_library(
   MujocoRosUtils SHARED
-  ClockPublisher.cpp PosePublisher.cpp ImagePublisher.cpp ActuatorCommand.cpp
-  ExternalForce.cpp SensorPublisher.cpp mujoco_utils.cpp)
+  ClockPublisher.cpp
+  PosePublisher.cpp
+  ImagePublisher.cpp
+  ActuatorCommand.cpp
+  ExternalForce.cpp
+  SensorPublisher.cpp
+  mujoco_utils.cpp
+  # mujoco_ros2_control.cpp
+  )
 target_include_directories(
   MujocoRosUtils PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
                         $<INSTALL_INTERFACE:include>)
@@ -16,7 +23,9 @@ ament_target_dependencies(
   visualization_msgs
   tf2_ros
   sensor_msgs
-  builtin_interfaces)
+  builtin_interfaces
+  hardware_interface
+  controller_manager)
 add_dependencies(MujocoRosUtils ${PROJECT_NAME})
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME}
                               "rosidl_typesupport_cpp")
@@ -31,11 +40,8 @@ set_target_properties(
   MujocoRosUtils MujocoRosUtilsPlugin
   PROPERTIES INSTALL_RPATH "${MUJOCO_BIN_DIR}:${MUJOCO_LIB_DIR}")
 
-set_target_properties(
-  MujocoRosUtils MujocoRosUtilsPlugin
-  PROPERTIES
-  INSTALL_RPATH "$ORIGIN"
-)
+set_target_properties(MujocoRosUtils MujocoRosUtilsPlugin
+                      PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 install(
   TARGETS MujocoRosUtils MujocoRosUtilsPlugin

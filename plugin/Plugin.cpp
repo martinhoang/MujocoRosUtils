@@ -7,6 +7,8 @@
 #include "PosePublisher.h"
 #include "SensorPublisher.h"
 
+#include "mujoco_ros2_control.hpp"
+
 namespace MujocoRosUtils
 {
 
@@ -18,6 +20,7 @@ mjPLUGIN_LIB_INIT
   ActuatorCommand::RegisterPlugin();
   ExternalForce::RegisterPlugin();
   SensorPublisher::RegisterPlugin();
+  // MujocoRos2Control::RegisterPlugin();
 }
 
 } // namespace MujocoRosUtils

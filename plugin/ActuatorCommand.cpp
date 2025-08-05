@@ -1,12 +1,15 @@
 #include "ActuatorCommand.h"
-#include "mujoco_utils.hpp"
 
 #include <mujoco/mujoco.h>
+
+#include "mujoco_utils.hpp"
 
 #include <iostream>
 
 namespace MujocoRosUtils
 {
+
+constexpr char ATTR_JOINT[] = "joint";
 
 void ActuatorCommand::RegisterPlugin()
 {
@@ -20,10 +23,10 @@ void ActuatorCommand::RegisterPlugin()
   plugin.capabilityflags |= mjPLUGIN_ACTUATOR;
   plugin.capabilityflags |= mjPLUGIN_PASSIVE;
 
-  const char * attributes[] = {"actuator_name", "topic_name"};
+  std::vector<const char *> attributes = {ATTR_JOINT};
 
-  plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
-  plugin.attributes = attributes;
+  plugin.nattribute = attributes.size();
+  plugin.attributes = attributes.data();
 
   plugin.nstate = +[](const mjModel *, // m
                       int // plugin_id
@@ -40,13 +43,13 @@ void ActuatorCommand::RegisterPlugin()
   {
     int nplugin = m->nplugin;
     // print_info("[ActuatorCommand.init] creating plugin instance with id: %d / %d\n", plugin_id, nplugin);
-    auto * plugin_instance = ActuatorCommand::Create(m, d, plugin_id);
+    auto plugin_instance = ActuatorCommand::Create(m, d, plugin_id);
     if(!plugin_instance)
     {
       return -1;
     }
-    // print_info("[ActuatorCommand.init] plugin created with id: %d / %d\n", plugin_id, nplugin);
-    d->plugin_data[plugin_id] = reinterpret_cast<uintptr_t>(plugin_instance);
+    print_info("[ActuatorCommand.init] plugin created with id: %d / Total: %d\n", plugin_id, nplugin);
+    d->plugin_data[plugin_id] = reinterpret_cast<uintptr_t>(plugin_instance.release());
     return 0;
   };
 
@@ -75,41 +78,66 @@ void ActuatorCommand::RegisterPlugin()
   print_info("ActuatorCommand plugin registered\n");
 }
 
-ActuatorCommand * ActuatorCommand::Create(const mjModel * m, mjData * d, int plugin_id)
+std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjData * d, int plugin_id)
 {
   // actuator_name
-  const char * actuator_name_char = mj_getPluginConfig(m, plugin_id, "actuator_name");
-  if(strlen(actuator_name_char) == 0)
+  const char * joint_name_char = mj_getPluginConfig(m, plugin_id, "joint");
+
+  if(!joint_name_char)
   {
-    mju_error("[ActuatorCommand] `actuator_name` is missing.");
+    mju_error("[ActuatorCommand] plugin id %d: `joint` is missing.", plugin_id);
     return nullptr;
   }
-  int actuator_id = 0;
-  for(; actuator_id < m->nu; actuator_id++)
+
+  if(strlen(joint_name_char) == 0)
   {
-    const char* name = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
-    if (name && strcmp(actuator_name_char, name) == 0)
+    mju_error("[ActuatorCommand] plugin id %d: `joint` is missing.", plugin_id);
+    return nullptr;
+  }
+
+  int joint_id = 0;
+  for(; joint_id < m->njnt; joint_id++)
+  {
+    const char * name = mj_id2name(m, mjOBJ_JOINT, joint_id);
+    if(name && strcmp(joint_name_char, name) == 0)
     {
       break;
     }
   }
+
+  if(joint_id == m->njnt)
+  {
+    mju_error("[ActuatorCommand] Joint '%s' not found.", joint_name_char);
+    return nullptr;
+  }
+
+  // Check to see if there exists an (position) actuator of a joint whose name matches that of the joint definition
+  int actuator_id = 0;
+  const char * actuator_name_char{NULL};
+
+  for(; actuator_id < m->nu; actuator_id++)
+  {
+    actuator_name_char = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
+    if(actuator_name_char && strcmp(joint_name_char, actuator_name_char) == 0)
+    {
+      break;
+    }
+  }
+
   if(actuator_id == m->nu)
   {
-    mju_error("[ActuatorCommand] The actuator with the specified name not found.");
+    mju_error("[ActuatorCommand] Actuator for joint '%s' not found.", joint_name_char);
     return nullptr;
   }
 
   // topic_name
-  const char * topic_name_char = mj_getPluginConfig(m, plugin_id, "topic_name");
-  std::string topic_name = "";
-  if(strlen(topic_name_char) > 0)
+  std::string topic_name = mj_getPluginConfig(m, plugin_id, "topic_name");
+  if(topic_name.empty())
   {
-    topic_name = std::string(topic_name_char);
+    topic_name = std::string(actuator_name_char) + "/command";
   }
 
-  print_confirm("[ActuatorCommand] Create.\n");
-
-  return new ActuatorCommand(m, d, actuator_id, topic_name);
+  return std::unique_ptr<ActuatorCommand>(new ActuatorCommand(m, d, actuator_id, topic_name));
 }
 
 ActuatorCommand::ActuatorCommand(const mjModel * m,
@@ -118,7 +146,7 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
                                  std::string topic_name)
 : actuator_id_(actuator_id)
 {
-  const char* name = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
+  const char * name = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
   std::string actuator_name = name ? std::string(name) : "";
   if(topic_name.empty())
   {
@@ -152,7 +180,7 @@ void ActuatorCommand::compute(const mjModel *, // m
                               int // plugin_id
 )
 {
-  if (!rclcpp::ok())
+  if(!rclcpp::ok())
   {
     mju_error("[ActuatorCommand] rclcpp is not ok, cannot compute actuator command.");
     return;

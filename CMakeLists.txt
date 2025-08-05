@@ -76,6 +76,9 @@ find_package(visualization_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(hardware_interface REQUIRED)
+find_package(controller_manager REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(
   ${PROJECT_NAME}
