@@ -78,7 +78,13 @@ SensorPublisher * SensorPublisher::Create(const mjModel * m, mjData * d, int plu
   int sensor_id = 0;
   for(; sensor_id < m->nsensor; sensor_id++)
   {
-    if(strcmp(sensor_name_char, mj_id2name(m, mjOBJ_SENSOR, sensor_id)) == 0)
+    std::string sensor_name = mj_id2name(m, mjOBJ_SENSOR, sensor_id);
+    if(sensor_name.empty())
+    {      
+      mju_error("[SensorPublisher] The sensor with the specified ID not found.");
+      return nullptr;
+    }
+    else if(strcmp(sensor_name_char, sensor_name.c_str()) == 0)
     {
       break;
     }

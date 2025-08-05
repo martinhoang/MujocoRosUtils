@@ -1,4 +1,5 @@
 #include "ActuatorCommand.h"
+#include "mujoco_utils.hpp"
 
 #include <mujoco/mujoco.h>
 
@@ -11,6 +12,8 @@ void ActuatorCommand::RegisterPlugin()
 {
   mjpPlugin plugin;
   mjp_defaultPlugin(&plugin);
+
+  print_info("Registering ActuatorCommand plugin\n");
 
   plugin.name = "MujocoRosUtils::ActuatorCommand";
   // Allow plugins to be placed on either the body element or the actuator element
@@ -35,11 +38,14 @@ void ActuatorCommand::RegisterPlugin()
 
   plugin.init = +[](const mjModel * m, mjData * d, int plugin_id)
   {
+    int nplugin = m->nplugin;
+    // print_info("[ActuatorCommand.init] creating plugin instance with id: %d / %d\n", plugin_id, nplugin);
     auto * plugin_instance = ActuatorCommand::Create(m, d, plugin_id);
     if(!plugin_instance)
     {
       return -1;
     }
+    // print_info("[ActuatorCommand.init] plugin created with id: %d / %d\n", plugin_id, nplugin);
     d->plugin_data[plugin_id] = reinterpret_cast<uintptr_t>(plugin_instance);
     return 0;
   };
@@ -65,6 +71,8 @@ void ActuatorCommand::RegisterPlugin()
   };
 
   mjp_registerPlugin(&plugin);
+
+  print_info("ActuatorCommand plugin registered\n");
 }
 
 ActuatorCommand * ActuatorCommand::Create(const mjModel * m, mjData * d, int plugin_id)
@@ -79,7 +87,8 @@ ActuatorCommand * ActuatorCommand::Create(const mjModel * m, mjData * d, int plu
   int actuator_id = 0;
   for(; actuator_id < m->nu; actuator_id++)
   {
-    if(strcmp(actuator_name_char, mj_id2name(m, mjOBJ_ACTUATOR, actuator_id)) == 0)
+    const char* name = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
+    if (name && strcmp(actuator_name_char, name) == 0)
     {
       break;
     }
@@ -98,7 +107,7 @@ ActuatorCommand * ActuatorCommand::Create(const mjModel * m, mjData * d, int plu
     topic_name = std::string(topic_name_char);
   }
 
-  std::cout << "[ActuatorCommand] Create." << std::endl;
+  print_confirm("[ActuatorCommand] Create.\n");
 
   return new ActuatorCommand(m, d, actuator_id, topic_name);
 }
@@ -109,7 +118,8 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
                                  std::string topic_name)
 : actuator_id_(actuator_id)
 {
-  std::string actuator_name = std::string(mj_id2name(m, mjOBJ_ACTUATOR, actuator_id));
+  const char* name = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
+  std::string actuator_name = name ? std::string(name) : "";
   if(topic_name.empty())
   {
     topic_name = "mujoco/" + actuator_name;
@@ -142,6 +152,11 @@ void ActuatorCommand::compute(const mjModel *, // m
                               int // plugin_id
 )
 {
+  if (!rclcpp::ok())
+  {
+    mju_error("[ActuatorCommand] rclcpp is not ok, cannot compute actuator command.");
+    return;
+  }
   // Call ROS callback
   executor_->spin_once(std::chrono::seconds(0));
 

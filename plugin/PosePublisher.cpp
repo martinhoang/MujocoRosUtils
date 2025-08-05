@@ -165,7 +165,7 @@ PosePublisher::PosePublisher(const mjModel * m,
   vel_topic_name_(vel_topic_name), publish_skip_(std::max(static_cast<int>(1.0 / (publish_rate * m->opt.timestep)), 1)),
   output_tf_(output_tf), tf_child_frame_id_(tf_child_frame_id)
 {
-  std::string body_name = std::string(mj_id2name(m, mjOBJ_XBODY, body_id_));
+  std::string body_name = mj_id2name(m, mjOBJ_XBODY, body_id_);
   if(frame_id_.empty())
   {
     frame_id_ = "map";
