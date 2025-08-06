@@ -28,7 +28,7 @@ void print_confirm(const char* format, ...)
 {
   va_list args;
   va_start(args, format);
-  print_base(stdout, MAGENTA, "[INFO] ", format, args);
+  print_base(stdout, MAGENTA, "[CONFIRM] ", format, args);
   va_end(args);
 }
 

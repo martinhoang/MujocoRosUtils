@@ -48,7 +48,7 @@ void ActuatorCommand::RegisterPlugin()
     {
       return -1;
     }
-    print_info("[ActuatorCommand.init] plugin created with id: %d / Total: %d\n", plugin_id, nplugin);
+    print_info("[ActuatorCommand.init] plugin created with id: %d / Total: %d plugins\n", plugin_id, nplugin);
     d->plugin_data[plugin_id] = reinterpret_cast<uintptr_t>(plugin_instance.release());
     return 0;
   };
@@ -80,64 +80,75 @@ void ActuatorCommand::RegisterPlugin()
 
 std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjData * d, int plugin_id)
 {
-  // actuator_name
-  const char * joint_name_char = mj_getPluginConfig(m, plugin_id, "joint");
-
-  if(!joint_name_char)
-  {
-    mju_error("[ActuatorCommand] plugin id %d: `joint` is missing.", plugin_id);
-    return nullptr;
-  }
-
-  if(strlen(joint_name_char) == 0)
-  {
-    mju_error("[ActuatorCommand] plugin id %d: `joint` is missing.", plugin_id);
-    return nullptr;
-  }
-
-  int joint_id = 0;
-  for(; joint_id < m->njnt; joint_id++)
-  {
-    const char * name = mj_id2name(m, mjOBJ_JOINT, joint_id);
-    if(name && strcmp(joint_name_char, name) == 0)
-    {
-      break;
-    }
-  }
-
-  if(joint_id == m->njnt)
-  {
-    mju_error("[ActuatorCommand] Joint '%s' not found.", joint_name_char);
-    return nullptr;
-  }
-
-  // Check to see if there exists an (position) actuator of a joint whose name matches that of the joint definition
-  int actuator_id = 0;
-  const char * actuator_name_char{NULL};
-
-  for(; actuator_id < m->nu; actuator_id++)
-  {
-    actuator_name_char = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
-    if(actuator_name_char && strcmp(joint_name_char, actuator_name_char) == 0)
-    {
-      break;
-    }
-  }
-
-  if(actuator_id == m->nu)
-  {
-    mju_error("[ActuatorCommand] Actuator for joint '%s' not found.", joint_name_char);
-    return nullptr;
-  }
-
   // topic_name
-  std::string topic_name = mj_getPluginConfig(m, plugin_id, "topic_name");
-  if(topic_name.empty())
+  const char * topic_name_str = mj_getPluginConfig(m, plugin_id, "topic_name");
+  std::string topic_name = topic_name_str ? std::string(topic_name_str) : "";
+
+  int actuator_id = -1;
+
+  for(int i = 0; i < m->nu; ++i)
   {
-    topic_name = std::string(actuator_name_char) + "/command";
+    if(m->actuator_plugin[i] == plugin_id)
+    {
+      actuator_id = i;
+      break;
+    }
   }
 
-  return std::unique_ptr<ActuatorCommand>(new ActuatorCommand(m, d, actuator_id, topic_name));
+  print_debug("Creating 'ActuatorCommand' actuator id %d with plugin id %d\n", actuator_id, plugin_id);
+
+  print_debug("Number of actuators in the model: %d\n", m->nu);
+
+  const char * actuator_name_char = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
+  if(actuator_name_char && strlen(actuator_name_char) > 0)
+  {
+    print_debug("Actuator %d: %s\n", actuator_id, actuator_name_char);
+  }
+  else
+  {
+    print_warning("Actuator %d does not have a name, skipping.\n", actuator_id);
+  }
+
+  // transmission id, trnid is nu x 2, i.e. two times number of actuator, so need to indexing with step of 2
+  int joint_id = m->actuator_trnid[2 * actuator_id];
+  const char * joint_name_at_actuator = mj_id2name(m, mjOBJ_JOINT, joint_id);
+  if(joint_name_at_actuator && strlen(joint_name_at_actuator) > 0)
+  {
+    print_debug("Joint name '%s' is associated with this actuator %d.\n", joint_name_at_actuator, actuator_id);
+  }
+  else
+  {
+    print_warning("Actuator id %d does not have a valid joint name, skipping.\n", actuator_id);
+  }
+
+  // Trick: check if there is a "position" actuator for that joint already
+  // by checking if gain_type is mjGAIN_FIXED and bias_type is mjBIAS_AFFINE
+  int active_actuator_id = -1;
+  for(int idx = 0; idx < m->nu; ++idx)
+  {
+    if(m->actuator_trnid[2 * idx] == joint_id)
+    {
+      print_info("Actuator id %d is associated with joint '%s'\n", idx, joint_name_at_actuator);
+      int gain_type = m->actuator_gaintype[idx];
+      int bias_type = m->actuator_biastype[idx];
+
+      if(gain_type == mjGAIN_FIXED && bias_type == mjBIAS_AFFINE)
+      {
+        active_actuator_id = idx;
+      }
+    }
+  }
+  if(active_actuator_id < 0)
+  {
+    mju_error("[ActuatorCommand] No active actuator found for joint '%s' with id %d", joint_name_at_actuator, joint_id);
+  }
+  else
+  {
+    print_confirm("Found active actuator id %d associated with 'ActuatorCommand' plugin id %d and joint '%s'\n",
+               active_actuator_id, plugin_id, joint_name_at_actuator);
+  }
+
+  return std::unique_ptr<ActuatorCommand>(new ActuatorCommand(m, d, active_actuator_id, topic_name));
 }
 
 ActuatorCommand::ActuatorCommand(const mjModel * m,
@@ -146,27 +157,69 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
                                  std::string topic_name)
 : actuator_id_(actuator_id)
 {
-  const char * name = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
-  std::string actuator_name = name ? std::string(name) : "";
-  if(topic_name.empty())
+  actuators_.push_back(actuator_id);
+
+  const char * node_name_char = mj_getPluginConfig(m, 0, "node_name");
+  std::string node_name = node_name_char ? std::string(node_name_char) : "";
+
+  if(node_name.empty())
   {
-    topic_name = "mujoco/" + actuator_name;
+    node_name = "actuator_command_plugin";
   }
 
-  int argc = 0;
-  char ** argv = nullptr;
-  if(!rclcpp::ok())
+  if(!nh_)
   {
-    rclcpp::init(argc, argv);
-  }
-  rclcpp::NodeOptions node_options;
+    print_debug("First time creating ActuatorCommand plugin, initializing ROS node.\n");
 
-  nh_ = rclcpp::Node::make_shared(actuator_name + "_actuator_command_plugin", node_options);
-  sub_ = nh_->create_subscription<std_msgs::msg::Float64>(
-      topic_name, 1, std::bind(&ActuatorCommand::callback, this, std::placeholders::_1));
-  // // Use a dedicated queue so as not to call callbacks of other modules
-  executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
-  executor_->add_node(nh_);
+    int argc = 0;
+    char ** argv = nullptr;
+
+    if(!rclcpp::ok())
+    {
+      rclcpp::init(argc, argv);
+    }
+
+    rclcpp::NodeOptions node_options;
+
+    nh_ = rclcpp::Node::make_shared(node_name, node_options);
+
+    if(topic_name.empty())
+    {
+      topic_name = node_name + "/command";
+    }
+    sub_ = nh_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        topic_name, 1, std::bind(&ActuatorCommand::callback, this, std::placeholders::_1));
+    // Use a dedicated queue so as not to call callbacks of other modules
+    executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+    executor_->add_node(nh_);
+  }
+  else
+  {
+    print_debug("Reusing existing ActuatorCommand plugin ROS node.\n");
+  }
+
+  int number_of_actuators = static_cast<int>(actuators_.size());
+  ctrl_.resize(number_of_actuators, std::numeric_limits<mjtNum>::quiet_NaN());
+  print_debug("Number of actuators: %d\n", number_of_actuators);
+  print_debug("Number of controls: %zu\n", ctrl_.size());
+}
+
+ActuatorCommand::~ActuatorCommand()
+{
+  if(nh_)
+  {
+    print_confirm("Shutting down ActuatorCommand plugin ROS node...\n");
+    rclcpp::shutdown();
+    sub_.reset();
+    nh_.reset();
+    executor_.reset();
+    actuators_.clear();
+    ctrl_.clear();
+  }
+  else
+  {
+    print_confirm("ActuatorCommand plugin ROS node was not initialized, nothing to shut down.\n");
+  }
 }
 
 void ActuatorCommand::reset(const mjModel *, // m
@@ -177,28 +230,41 @@ void ActuatorCommand::reset(const mjModel *, // m
 
 void ActuatorCommand::compute(const mjModel *, // m
                               mjData * d,
-                              int // plugin_id
-)
+                              int plugin_id)
 {
   if(!rclcpp::ok())
   {
     mju_error("[ActuatorCommand] rclcpp is not ok, cannot compute actuator command.");
-    return;
   }
+
+  // print_debug("[ActuatorCommand.compute] Executing compute for plugin ID: %d\n", plugin_id);
+
   // Call ROS callback
   executor_->spin_once(std::chrono::seconds(0));
 
   // Set actuator command
-  if(!std::isnan(ctrl_))
+  for(size_t i = 0; i < actuators_.size(); ++i)
   {
-    d->ctrl[actuator_id_] = ctrl_;
-    ctrl_ = std::numeric_limits<mjtNum>::quiet_NaN();
+    if(!std::isnan(ctrl_[i]))
+    {
+      d->ctrl[actuators_[i]] = ctrl_[i];
+    }
   }
 }
 
-void ActuatorCommand::callback(const std_msgs::msg::Float64::SharedPtr msg)
+void ActuatorCommand::callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-  ctrl_ = msg->data;
+  if(msg->data.size() == ctrl_.size())
+  {
+    print_debug("Received actuator command with size %zu for %zu num of actuators\n", msg->data.size(),
+                actuators_.size());
+    ctrl_ = msg->data;
+  }
+  else
+  {
+    mju_warning("[ActuatorCommand] Received command size (%zu) does not match actuator count (%zu).", msg->data.size(),
+              ctrl_.size());
+  }
 }
 
 } // namespace MujocoRosUtils

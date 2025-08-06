@@ -2,6 +2,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 
 #include <mujoco/mjdata.h>
 #include <mujoco/mjmodel.h>
@@ -13,6 +14,27 @@
 
 namespace MujocoRosUtils
 {
+
+  //* USAGE */
+  // <mujoco>
+  //
+  // <extension>
+  //   <plugin plugin="MujocoRosUtils::ActuatorCommand">
+  //     <instance name="ros2_control" />
+  //   </plugin>
+  //   ... other plugins ...
+  // </extension>
+  //
+  // <worldbody>
+  // ...
+  // </worldbody>
+  //
+  // <actuator>
+  //   <position name="target_joint" joint="target_joint" kp="100" ctrlrange="-3.14159 3.14159" forcelimited="true" forcerange="-1000 1000" />
+  //   <plugin plugin="MujocoRosUtils::ActuatorCommand" joint="target_joint" instance="ros2_control"/>
+  // </actuator>
+  // ... other actuators ...
+  // </mujoco>
 
 /** \brief Plugin to send a command to an actuator via ROS topic. */
 class ActuatorCommand
@@ -31,6 +53,7 @@ public:
 public:
   /** \brief Copy constructor. */
   ActuatorCommand(ActuatorCommand &&) = default;
+  ~ActuatorCommand();
 
   /** \brief Reset.
       \param m model
@@ -57,20 +80,21 @@ protected:
   /** \brief Constructor.
       \param msg command message
   */
-  void callback(const std_msgs::msg::Float64::SharedPtr msg);
+  void callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
 protected:
   //! Actuator ID
   int actuator_id_ = -1;
+  static inline std::vector<int> actuators_;
 
   //! Actuator command (NaN for no command)
-  mjtNum ctrl_ = std::numeric_limits<mjtNum>::quiet_NaN();
+  static inline std::vector<mjtNum> ctrl_;
 
   //! ROS variables
   //! @{
-  rclcpp::Node::SharedPtr nh_;
-  rclcpp::executors::SingleThreadedExecutor::SharedPtr executor_;
-  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr sub_;
+  static inline rclcpp::Node::SharedPtr nh_;
+  static inline rclcpp::executors::SingleThreadedExecutor::SharedPtr executor_;
+  static inline rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_;
   //! @}
 };
 

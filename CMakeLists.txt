@@ -17,7 +17,7 @@ option(INSTALL_DOCUMENTATION "Generate and install the documentation" OFF)
 project(${PROJECT_NAME})
 
 # MuJoCo
-if(NOT DEFINED MUJOCO_ROOT_DIR AND DEFINED $ENV{MUJOCO_PATH})
+if(NOT DEFINED MUJOCO_ROOT_DIR)
   set(MUJOCO_ROOT_DIR $ENV{MUJOCO_PATH})
   message(STATUS "Using MuJoCo path from environment variable: ${MUJOCO_ROOT_DIR}")
 endif()
