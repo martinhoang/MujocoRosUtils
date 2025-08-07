@@ -100,6 +100,7 @@ ament_export_dependencies(rosidl_default_runtime)
 
 ament_package()
 add_subdirectory(plugin)
+add_subdirectory(test)
 
 if(INSTALL_DOCUMENTATION)
   add_subdirectory(doc)

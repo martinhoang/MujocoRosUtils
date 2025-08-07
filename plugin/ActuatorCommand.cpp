@@ -320,10 +320,13 @@ void ActuatorCommand::jointTrajectoryCallback(const trajectory_msgs::msg::JointT
 {
   if (msg->points.empty())
   {
+    print_warning("[ActuatorCommand] Received empty JointTrajectory message, ignoring.\n");
     return;
   }
 
   // Update control based on the first point in the trajectory
+  bool is_valid = true;
+  std::vector<mjtNum> new_ctrl(ctrl_.size(), std::numeric_limits<mjtNum>::quiet_NaN());
   const auto &point = msg->points[0];
   for (size_t i = 0; i < msg->joint_names.size(); ++i)
   {
@@ -332,11 +335,27 @@ void ActuatorCommand::jointTrajectoryCallback(const trajectory_msgs::msg::JointT
     if (it != active_joint_names_.end())
     {
       size_t index = std::distance(active_joint_names_.begin(), it);
-      if (index < ctrl_.size() && i < point.positions.size())
+      if (index < new_ctrl.size() && i < point.positions.size())
       {
-        ctrl_[index] = point.positions[i];
+        new_ctrl[index] = point.positions[i];
       }
     }
+    else {
+      is_valid = false;
+      std::stringstream ss;
+      for (const auto &active_joint : active_joint_names_)
+      {
+        ss << "- " << active_joint << "\n";
+      }
+      print_warning("[ActuatorCommand] Joint '%s' not found in active joints, skipping.\nOnly these joints are allowed:\n%s", joint_name.c_str(), ss.str().c_str());
+      break;
+    }
+  }
+
+  if (is_valid)
+  {
+    print_confirm("[ActuatorCommand] Received JointTrajectory command\n");
+    ctrl_ = std::move(new_ctrl);
   }
 }
 
