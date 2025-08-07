@@ -3,6 +3,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include <mujoco/mjdata.h>
 #include <mujoco/mjmodel.h>
@@ -75,26 +76,35 @@ protected:
       \param actuator_id actuator ID
       \param topic_name topic name
   */
-  ActuatorCommand(const mjModel * m, mjData * d, int actuator_id, std::string topic_name);
+  ActuatorCommand(const mjModel * m, mjData * d, std::vector<int> actuator_ids, std::string topic_name);
 
   /** \brief Constructor.
       \param msg command message
   */
   void callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
+  /** \brief Callback for joint trajectory commands.
+      \param msg command message
+  */
+  void jointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg);
+
 protected:
   //! Actuator ID
   int actuator_id_ = -1;
-  static inline std::vector<int> actuators_;
+  std::vector<int> actuators_;
 
   //! Actuator command (NaN for no command)
-  static inline std::vector<mjtNum> ctrl_;
+  std::vector<mjtNum> ctrl_;
+
+  //! Joint names asssociated with the actuators
+  std::vector<std::string> active_joint_names_;
 
   //! ROS variables
   //! @{
-  static inline rclcpp::Node::SharedPtr nh_;
-  static inline rclcpp::executors::SingleThreadedExecutor::SharedPtr executor_;
-  static inline rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_;
+  rclcpp::Node::SharedPtr nh_;
+  rclcpp::executors::SingleThreadedExecutor::SharedPtr executor_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_trajectory_sub_;
   //! @}
 };
 

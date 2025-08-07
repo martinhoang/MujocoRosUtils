@@ -23,6 +23,7 @@ ament_target_dependencies(
   visualization_msgs
   tf2_ros
   sensor_msgs
+  trajectory_msgs
   builtin_interfaces
   hardware_interface
   controller_manager)

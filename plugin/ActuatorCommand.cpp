@@ -84,80 +84,115 @@ std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjDa
   const char * topic_name_str = mj_getPluginConfig(m, plugin_id, "topic_name");
   std::string topic_name = topic_name_str ? std::string(topic_name_str) : "";
 
-  int actuator_id = -1;
+  std::vector<int> actuator_ids;
 
+  ///@note: 1 plugin can share multiple actuators, so get all actuators that are associated with this plugin_id
   for(int i = 0; i < m->nu; ++i)
   {
     if(m->actuator_plugin[i] == plugin_id)
     {
-      actuator_id = i;
-      break;
+      actuator_ids.push_back(i);
     }
   }
 
-  print_debug("Creating 'ActuatorCommand' actuator id %d with plugin id %d\n", actuator_id, plugin_id);
+  if(actuator_ids.empty())
+  {
+    mju_error("[ActuatorCommand] No plugin definition in <actuator> found for plugin ID %d. Check your plugin "
+              "definition again.\n",
+              plugin_id);
+  }
 
   print_debug("Number of actuators in the model: %d\n", m->nu);
 
-  const char * actuator_name_char = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
-  if(actuator_name_char && strlen(actuator_name_char) > 0)
-  {
-    print_debug("Actuator %d: %s\n", actuator_id, actuator_name_char);
-  }
-  else
-  {
-    print_warning("Actuator %d does not have a name, skipping.\n", actuator_id);
-  }
+  std::vector<int> active_actuator_ids;
+  std::vector<const char *> joint_names;
 
-  // transmission id, trnid is nu x 2, i.e. two times number of actuator, so need to indexing with step of 2
-  int joint_id = m->actuator_trnid[2 * actuator_id];
-  const char * joint_name_at_actuator = mj_id2name(m, mjOBJ_JOINT, joint_id);
-  if(joint_name_at_actuator && strlen(joint_name_at_actuator) > 0)
+  //* For each actuator IDs associated with this plugin_id,
+  //* find their corresponding joint and check if they are actively controlled
+  //* by an existing position PID controller. If so, add the position PID actuator
+  //* to the active_actuator_ids vector.
+  for(const auto & actuator_id : actuator_ids)
   {
-    print_debug("Joint name '%s' is associated with this actuator %d.\n", joint_name_at_actuator, actuator_id);
-  }
-  else
-  {
-    print_warning("Actuator id %d does not have a valid joint name, skipping.\n", actuator_id);
-  }
+    print_debug("Creating 'ActuatorCommand' actuator id %d with plugin id %d\n", actuator_id, plugin_id);
 
-  // Trick: check if there is a "position" actuator for that joint already
-  // by checking if gain_type is mjGAIN_FIXED and bias_type is mjBIAS_AFFINE
-  int active_actuator_id = -1;
-  for(int idx = 0; idx < m->nu; ++idx)
-  {
-    if(m->actuator_trnid[2 * idx] == joint_id)
+    // Get the actuator name for debugging purposes
+    const char * actuator_name_char = mj_id2name(m, mjOBJ_ACTUATOR, actuator_id);
+    if(actuator_name_char && strlen(actuator_name_char) > 0)
     {
-      print_info("Actuator id %d is associated with joint '%s'\n", idx, joint_name_at_actuator);
-      int gain_type = m->actuator_gaintype[idx];
-      int bias_type = m->actuator_biastype[idx];
+      print_debug("Actuator %d: %s\n", actuator_id, actuator_name_char);
+    }
+    else
+    {
+      print_warning("Actuator %d does not have a name, skipping.\n", actuator_id);
+    }
 
-      if(gain_type == mjGAIN_FIXED && bias_type == mjBIAS_AFFINE)
+    //* Get the joint name associated with this actuator
+    ///@note: transmission id, trnid is nu x 2, i.e. two times number of actuator, so need to indexing with step of 2
+    int joint_id = m->actuator_trnid[2 * actuator_id];
+    // Get the joint name
+    const char * joint_name_at_actuator = mj_id2name(m, mjOBJ_JOINT, joint_id);
+    if(joint_name_at_actuator && strlen(joint_name_at_actuator) > 0)
+    {
+      print_debug("Joint name '%s' is associated with this actuator %d.\n", joint_name_at_actuator, actuator_id);
+    }
+    else
+    {
+      print_warning("Actuator id %d does not have a valid joint name, skipping.\n", actuator_id);
+      // skip this actuator
+      continue;
+    }
+
+    //* Get the "position" PID actuator corresponding with this actuator-plugin-joint pair
+    // since I dont know how to make a PID controller yet
+    // I latched on to the logics of the existing built-in position PID controller
+    // Trick: check if there is a "position" actuator for that joint already
+    // by checking if gain_type is mjGAIN_FIXED and bias_type is mjBIAS_AFFINE
+    bool is_found = false;
+    for(int idx = 0; idx < m->nu; ++idx)
+    {
+      // If the actuator is associated with this joint
+      if(m->actuator_trnid[2 * idx] == joint_id)
       {
-        active_actuator_id = idx;
+        print_info("Actuator id %d is associated with joint '%s'\n", idx, joint_name_at_actuator);
+        int gain_type = m->actuator_gaintype[idx];
+        int bias_type = m->actuator_biastype[idx];
+
+        if(gain_type == mjGAIN_FIXED && bias_type == mjBIAS_AFFINE)
+        {
+          active_actuator_ids.push_back(idx);
+          is_found = true;
+          break; // No need to check further, we found the actuator
+        }
       }
     }
-  }
-  if(active_actuator_id < 0)
-  {
-    mju_error("[ActuatorCommand] No active actuator found for joint '%s' with id %d", joint_name_at_actuator, joint_id);
-  }
-  else
-  {
-    print_confirm("Found active actuator id %d associated with 'ActuatorCommand' plugin id %d and joint '%s'\n",
-               active_actuator_id, plugin_id, joint_name_at_actuator);
+
+    if(!is_found)
+    {
+      print_warning("No actively-controlled actuator found for joint '%s' with id %d, skipping. Did you forget to add "
+                    "a position PID controller for this joint, e.g. <actuator><position></position></actuator>?\n",
+                    joint_name_at_actuator, joint_id);
+      continue; // Skip to the next actuator
+    }
+
+    print_info("Found active actuator id %d for joint '%s' with plugin id %d\n", active_actuator_ids.back(),
+               joint_name_at_actuator, plugin_id);
   }
 
-  return std::unique_ptr<ActuatorCommand>(new ActuatorCommand(m, d, active_actuator_id, topic_name));
+  if(active_actuator_ids.empty())
+  {
+    mju_error("[ActuatorCommand] No actuator/joint found for this plugin id %d. Check your plugin definition again.\n",
+              plugin_id);
+  }
+
+  return std::unique_ptr<ActuatorCommand>(new ActuatorCommand(m, d, std::move(active_actuator_ids), topic_name));
 }
 
 ActuatorCommand::ActuatorCommand(const mjModel * m,
                                  mjData *, // d
-                                 int actuator_id,
+                                 std::vector<int> actuator_ids,
                                  std::string topic_name)
-: actuator_id_(actuator_id)
 {
-  actuators_.push_back(actuator_id);
+  actuators_ = std::move(actuator_ids);
 
   const char * node_name_char = mj_getPluginConfig(m, 0, "node_name");
   std::string node_name = node_name_char ? std::string(node_name_char) : "";
@@ -189,6 +224,9 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
     }
     sub_ = nh_->create_subscription<std_msgs::msg::Float64MultiArray>(
         topic_name, 1, std::bind(&ActuatorCommand::callback, this, std::placeholders::_1));
+    // Subscriber for JointTrajectory messages
+    joint_trajectory_sub_ = nh_->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+        topic_name + "_trajectory", 1, std::bind(&ActuatorCommand::jointTrajectoryCallback, this, std::placeholders::_1));
     // Use a dedicated queue so as not to call callbacks of other modules
     executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     executor_->add_node(nh_);
@@ -201,7 +239,13 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
   int number_of_actuators = static_cast<int>(actuators_.size());
   ctrl_.resize(number_of_actuators, std::numeric_limits<mjtNum>::quiet_NaN());
   print_debug("Number of actuators: %d\n", number_of_actuators);
-  print_debug("Number of controls: %zu\n", ctrl_.size());
+  for(const auto & actuator_id : actuators_)
+  {
+    const char * joint_name_char = mj_id2name(m, mjOBJ_JOINT, m->actuator_trnid[2 * actuator_id]);
+    std::string joint_name = joint_name_char ? std::string(joint_name_char) : "UNKNOWN";
+    print_debug("- Actuator ID: %d\tJoint:%s\n", actuator_id, joint_name.c_str());
+    active_joint_names_.push_back(joint_name);
+  }
 }
 
 ActuatorCommand::~ActuatorCommand()
@@ -211,6 +255,7 @@ ActuatorCommand::~ActuatorCommand()
     print_confirm("Shutting down ActuatorCommand plugin ROS node...\n");
     rclcpp::shutdown();
     sub_.reset();
+    joint_trajectory_sub_.reset();
     nh_.reset();
     executor_.reset();
     actuators_.clear();
@@ -262,8 +307,36 @@ void ActuatorCommand::callback(const std_msgs::msg::Float64MultiArray::SharedPtr
   }
   else
   {
-    mju_warning("[ActuatorCommand] Received command size (%zu) does not match actuator count (%zu).", msg->data.size(),
-              ctrl_.size());
+    if(msg->data.size() != ctrl_.size())
+    {
+      print_warning("[ActuatorCommand] Msg Size (%zu) != Ctrl Size (%zu). Only apply what is possible\n",
+                  msg->data.size(), ctrl_.size());
+      copy_arrays_no_resize<double>(ctrl_, msg->data);
+    }
+  }
+}
+
+void ActuatorCommand::jointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg)
+{
+  if (msg->points.empty())
+  {
+    return;
+  }
+
+  // Update control based on the first point in the trajectory
+  const auto &point = msg->points[0];
+  for (size_t i = 0; i < msg->joint_names.size(); ++i)
+  {
+    const auto &joint_name = msg->joint_names[i];
+    auto it = std::find(active_joint_names_.begin(), active_joint_names_.end(), joint_name);
+    if (it != active_joint_names_.end())
+    {
+      size_t index = std::distance(active_joint_names_.begin(), it);
+      if (index < ctrl_.size() && i < point.positions.size())
+      {
+        ctrl_[index] = point.positions[i];
+      }
+    }
   }
 }
 
