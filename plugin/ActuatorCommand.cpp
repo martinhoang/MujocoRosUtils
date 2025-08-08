@@ -9,7 +9,8 @@
 namespace MujocoRosUtils
 {
 
-constexpr char ATTR_JOINT[] = "joint";
+constexpr char ATTR_NODE_NAME[] = "node_name";
+constexpr char ATTR_TOPIC_NAME[] = "topic_name";
 constexpr char ATTR_PUBLISH_RATE[] = "publish_rate";
 
 void ActuatorCommand::RegisterPlugin()
@@ -24,7 +25,7 @@ void ActuatorCommand::RegisterPlugin()
   plugin.capabilityflags |= mjPLUGIN_ACTUATOR;
   plugin.capabilityflags |= mjPLUGIN_PASSIVE;
 
-  std::vector<const char *> attributes = {ATTR_JOINT, ATTR_PUBLISH_RATE};
+  std::vector<const char *> attributes = {ATTR_NODE_NAME, ATTR_TOPIC_NAME, ATTR_PUBLISH_RATE};
 
   plugin.nattribute = attributes.size();
   plugin.attributes = attributes.data();
@@ -43,13 +44,12 @@ void ActuatorCommand::RegisterPlugin()
   plugin.init = +[](const mjModel * m, mjData * d, int plugin_id)
   {
     int nplugin = m->nplugin;
-    // print_info("[ActuatorCommand.init] creating plugin instance with id: %d / %d\n", plugin_id, nplugin);
     auto plugin_instance = ActuatorCommand::Create(m, d, plugin_id);
     if(!plugin_instance)
     {
       return -1;
     }
-    print_info("[ActuatorCommand.init] plugin created with id: %d / Total: %d plugins\n", plugin_id, nplugin);
+    print_debug("[ActuatorCommand.init] plugin created with id: %d / Total: %d plugins\n", plugin_id, nplugin);
     d->plugin_data[plugin_id] = reinterpret_cast<uintptr_t>(plugin_instance.release());
     return 0;
   };
@@ -82,7 +82,7 @@ void ActuatorCommand::RegisterPlugin()
 std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjData * d, int plugin_id)
 {
   // topic_name
-  const char * topic_name_str = mj_getPluginConfig(m, plugin_id, "topic_name");
+  const char * topic_name_str = mj_getPluginConfig(m, plugin_id, ATTR_TOPIC_NAME);
   std::string topic_name = topic_name_str ? std::string(topic_name_str) : "";
 
   std::vector<int> actuator_ids;
@@ -185,7 +185,7 @@ std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjDa
               plugin_id);
   }
 
-  const char * publish_rate_char = mj_getPluginConfig(m, 0, "publish_rate");
+  const char * publish_rate_char = mj_getPluginConfig(m, 0, ATTR_PUBLISH_RATE);
   double publish_rate = 100.0;
   if(publish_rate_char && strlen(publish_rate_char) > 0)
   {
@@ -209,7 +209,7 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
 {
   actuators_ = std::move(actuator_ids);
 
-  const char * node_name_char = mj_getPluginConfig(m, 0, "node_name");
+  const char * node_name_char = mj_getPluginConfig(m, 0, ATTR_NODE_NAME);
   std::string node_name = node_name_char ? std::string(node_name_char) : "";
 
   if(node_name.empty())
@@ -309,7 +309,8 @@ void ActuatorCommand::reset(const mjModel *, // m
 
 void ActuatorCommand::compute(const mjModel *, // m
                               mjData * d,
-                              int plugin_id)
+                              int // plugin_id
+)
 {
   if(!rclcpp::ok())
   {
@@ -391,7 +392,7 @@ void ActuatorCommand::jointCommandCallback(std::vector<std::string> & names, std
 
   // Update control based on the first point in the trajectory
   bool is_valid = true;
-  std::vector<mjtNum> new_ctrl(names.size(), std::numeric_limits<mjtNum>::quiet_NaN());
+  std::vector<mjtNum> new_ctrl(ctrl_.size(), std::numeric_limits<mjtNum>::quiet_NaN());
 
   for(size_t i = 0; i < names.size(); ++i)
   {
@@ -400,10 +401,7 @@ void ActuatorCommand::jointCommandCallback(std::vector<std::string> & names, std
     if(it != active_joint_names_.end())
     {
       size_t index = std::distance(active_joint_names_.begin(), it);
-      if(index < new_ctrl.size() && i < positions.size())
-      {
-        new_ctrl[index] = positions[i];
-      }
+      new_ctrl[index] = positions[i];
     }
     else
     {

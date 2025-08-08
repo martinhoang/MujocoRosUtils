@@ -7,6 +7,7 @@ add_library(
   ExternalForce.cpp
   SensorPublisher.cpp
   mujoco_utils.cpp
+  MimicJoint.cpp
   # mujoco_ros2_control.cpp
   )
 target_include_directories(
