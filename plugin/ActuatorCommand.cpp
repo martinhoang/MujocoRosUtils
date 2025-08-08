@@ -10,6 +10,7 @@ namespace MujocoRosUtils
 {
 
 constexpr char ATTR_JOINT[] = "joint";
+constexpr char ATTR_PUBLISH_RATE[] = "publish_rate";
 
 void ActuatorCommand::RegisterPlugin()
 {
@@ -23,7 +24,7 @@ void ActuatorCommand::RegisterPlugin()
   plugin.capabilityflags |= mjPLUGIN_ACTUATOR;
   plugin.capabilityflags |= mjPLUGIN_PASSIVE;
 
-  std::vector<const char *> attributes = {ATTR_JOINT};
+  std::vector<const char *> attributes = {ATTR_JOINT, ATTR_PUBLISH_RATE};
 
   plugin.nattribute = attributes.size();
   plugin.attributes = attributes.data();
@@ -184,13 +185,27 @@ std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjDa
               plugin_id);
   }
 
-  return std::unique_ptr<ActuatorCommand>(new ActuatorCommand(m, d, std::move(active_actuator_ids), topic_name));
+  const char * publish_rate_char = mj_getPluginConfig(m, 0, "publish_rate");
+  double publish_rate = 100.0;
+  if(publish_rate_char && strlen(publish_rate_char) > 0)
+  {
+    publish_rate = std::stod(publish_rate_char);
+  }
+  else
+  {
+    print_warning("No publish_rate specified in plugin config, using default value of %d.\n", publish_rate);
+  }
+
+  return std::unique_ptr<ActuatorCommand>(
+      new ActuatorCommand(m, d, std::move(active_actuator_ids), topic_name, publish_rate));
 }
 
 ActuatorCommand::ActuatorCommand(const mjModel * m,
-                                 mjData *, // d
+                                 mjData * d,
                                  std::vector<int> actuator_ids,
-                                 std::string topic_name)
+                                 std::string topic_name,
+                                 double publish_rate)
+: model_(m), data_(d), publish_rate_(publish_rate)
 {
   actuators_ = std::move(actuator_ids);
 
@@ -222,11 +237,28 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
     {
       topic_name = node_name + "/command";
     }
-    sub_ = nh_->create_subscription<std_msgs::msg::Float64MultiArray>(
-        topic_name, 1, std::bind(&ActuatorCommand::callback, this, std::placeholders::_1));
+    joint_cmd_array_sub_ = nh_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        topic_name + "_array", 1, std::bind(&ActuatorCommand::callback, this, std::placeholders::_1));
     // Subscriber for JointTrajectory messages
     joint_trajectory_sub_ = nh_->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-        topic_name + "_trajectory", 1, std::bind(&ActuatorCommand::jointTrajectoryCallback, this, std::placeholders::_1));
+        topic_name + "_trajectory", 1,
+        [&](const trajectory_msgs::msg::JointTrajectory::SharedPtr msg)
+        {
+          if(msg->points.empty())
+          {
+            print_warning("[ActuatorCommand] Received empty JointTrajectory message, ignoring.\n");
+            return;
+          }
+          jointCommandCallback(msg->joint_names, msg->points[0].positions);
+        });
+
+    joint_cmd_joint_state_sub_ = nh_->create_subscription<sensor_msgs::msg::JointState>(
+        topic_name, 1,
+        [&](const sensor_msgs::msg::JointState::SharedPtr msg) { jointCommandCallback(msg->name, msg->position); });
+
+    // Publisher for JointState messages
+    joint_state_pub_ = nh_->create_publisher<sensor_msgs::msg::JointState>(node_name + "/joint_states", 1);
+
     // Use a dedicated queue so as not to call callbacks of other modules
     executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     executor_->add_node(nh_);
@@ -254,8 +286,10 @@ ActuatorCommand::~ActuatorCommand()
   {
     print_confirm("Shutting down ActuatorCommand plugin ROS node...\n");
     rclcpp::shutdown();
-    sub_.reset();
+    joint_cmd_array_sub_.reset();
     joint_trajectory_sub_.reset();
+    joint_cmd_joint_state_sub_.reset();
+    joint_state_pub_.reset();
     nh_.reset();
     executor_.reset();
     actuators_.clear();
@@ -295,6 +329,29 @@ void ActuatorCommand::compute(const mjModel *, // m
       d->ctrl[actuators_[i]] = ctrl_[i];
     }
   }
+
+  if(joint_state_pub_)
+  {
+    auto time_now = nh_->get_clock()->now();
+
+    // TODO: the publish rate is rate-limited by the render loop rate as this function is called there.
+    if((time_now - last_joint_state_publish_time_).seconds() >= (1.0 / publish_rate_))
+    {
+      sensor_msgs::msg::JointState joint_state_msg;
+      joint_state_msg.header.stamp = time_now;
+      joint_state_msg.name = active_joint_names_;
+      joint_state_msg.position.resize(active_joint_names_.size());
+
+      for(size_t i = 0; i < actuators_.size(); ++i)
+      {
+        int joint_id = model_->actuator_trnid[2 * actuators_[i]];
+        joint_state_msg.position[i] = std::isnan(data_->qpos[joint_id]) ? 0.0 : data_->qpos[joint_id];
+      }
+
+      joint_state_pub_->publish(joint_state_msg);
+      last_joint_state_publish_time_ = time_now;
+    }
+  }
 }
 
 void ActuatorCommand::callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
@@ -310,49 +367,60 @@ void ActuatorCommand::callback(const std_msgs::msg::Float64MultiArray::SharedPtr
     if(msg->data.size() != ctrl_.size())
     {
       print_warning("[ActuatorCommand] Msg Size (%zu) != Ctrl Size (%zu). Only apply what is possible\n",
-                  msg->data.size(), ctrl_.size());
+                    msg->data.size(), ctrl_.size());
       copy_arrays_no_resize<double>(ctrl_, msg->data);
     }
   }
 }
 
-void ActuatorCommand::jointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg)
+// void ActuatorCommand::jointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg)
+void ActuatorCommand::jointCommandCallback(std::vector<std::string> & names, std::vector<double> & positions)
 {
-  if (msg->points.empty())
+  if(names.empty() || positions.empty())
   {
-    print_warning("[ActuatorCommand] Received empty JointTrajectory message, ignoring.\n");
+    print_warning("[ActuatorCommand] Received empty JointCommand message, ignoring.\n");
+    return;
+  }
+
+  if(names.size() != positions.size())
+  {
+    print_warning("[ActuatorCommand] Joint names and positions size mismatch: %zu vs %zu, ignoring.\n", names.size(),
+                  positions.size());
     return;
   }
 
   // Update control based on the first point in the trajectory
   bool is_valid = true;
-  std::vector<mjtNum> new_ctrl(ctrl_.size(), std::numeric_limits<mjtNum>::quiet_NaN());
-  const auto &point = msg->points[0];
-  for (size_t i = 0; i < msg->joint_names.size(); ++i)
+  std::vector<mjtNum> new_ctrl(names.size(), std::numeric_limits<mjtNum>::quiet_NaN());
+
+  for(size_t i = 0; i < names.size(); ++i)
   {
-    const auto &joint_name = msg->joint_names[i];
+    const auto & joint_name = names[i];
     auto it = std::find(active_joint_names_.begin(), active_joint_names_.end(), joint_name);
-    if (it != active_joint_names_.end())
+    if(it != active_joint_names_.end())
     {
       size_t index = std::distance(active_joint_names_.begin(), it);
-      if (index < new_ctrl.size() && i < point.positions.size())
+      if(index < new_ctrl.size() && i < positions.size())
       {
-        new_ctrl[index] = point.positions[i];
+        new_ctrl[index] = positions[i];
       }
     }
-    else {
+    else
+    {
       is_valid = false;
       std::stringstream ss;
-      for (const auto &active_joint : active_joint_names_)
+      for(const auto & active_joint : active_joint_names_)
       {
         ss << "- " << active_joint << "\n";
       }
-      print_warning("[ActuatorCommand] Joint '%s' not found in active joints, skipping.\nOnly these joints are allowed:\n%s", joint_name.c_str(), ss.str().c_str());
+      print_warning(
+          "[ActuatorCommand] Joint '%s' not found in active joints, skipping.\nOnly these joints are allowed:\n%s",
+          joint_name.c_str(), ss.str().c_str());
       break;
     }
   }
 
-  if (is_valid)
+  if(is_valid)
   {
     print_confirm("[ActuatorCommand] Received JointTrajectory command\n");
     ctrl_ = std::move(new_ctrl);

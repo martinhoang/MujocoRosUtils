@@ -1,6 +1,7 @@
 #pragma once
 
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
@@ -16,26 +17,27 @@
 namespace MujocoRosUtils
 {
 
-  //* USAGE */
-  // <mujoco>
-  //
-  // <extension>
-  //   <plugin plugin="MujocoRosUtils::ActuatorCommand">
-  //     <instance name="ros2_control" />
-  //   </plugin>
-  //   ... other plugins ...
-  // </extension>
-  //
-  // <worldbody>
-  // ...
-  // </worldbody>
-  //
-  // <actuator>
-  //   <position name="target_joint" joint="target_joint" kp="100" ctrlrange="-3.14159 3.14159" forcelimited="true" forcerange="-1000 1000" />
-  //   <plugin plugin="MujocoRosUtils::ActuatorCommand" joint="target_joint" instance="ros2_control"/>
-  // </actuator>
-  // ... other actuators ...
-  // </mujoco>
+//* USAGE */
+// <mujoco>
+//
+// <extension>
+//   <plugin plugin="MujocoRosUtils::ActuatorCommand">
+//     <instance name="ros2_control" />
+//   </plugin>
+//   ... other plugins ...
+// </extension>
+//
+// <worldbody>
+// ...
+// </worldbody>
+//
+// <actuator>
+//   <position name="target_joint" joint="target_joint" kp="100" ctrlrange="-3.14159 3.14159" forcelimited="true"
+//   forcerange="-1000 1000" /> <plugin plugin="MujocoRosUtils::ActuatorCommand" joint="target_joint"
+//   instance="ros2_control"/>
+// </actuator>
+// ... other actuators ...
+// </mujoco>
 
 /** \brief Plugin to send a command to an actuator via ROS topic. */
 class ActuatorCommand
@@ -76,7 +78,11 @@ protected:
       \param actuator_id actuator ID
       \param topic_name topic name
   */
-  ActuatorCommand(const mjModel * m, mjData * d, std::vector<int> actuator_ids, std::string topic_name);
+  ActuatorCommand(const mjModel * m,
+                  mjData * d,
+                  std::vector<int> actuator_ids,
+                  std::string topic_name,
+                  double publish_rate = 100.0);
 
   /** \brief Constructor.
       \param msg command message
@@ -86,12 +92,16 @@ protected:
   /** \brief Callback for joint trajectory commands.
       \param msg command message
   */
-  void jointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg);
+  void jointCommandCallback(std::vector<std::string> & names, std::vector<double> & positions);
 
 protected:
   //! Actuator ID
   int actuator_id_ = -1;
   std::vector<int> actuators_;
+  double publish_rate_ = 100.0; // Hz
+  rclcpp::Time last_joint_state_publish_time_{0, 0, RCL_ROS_TIME};
+  const mjModel * model_ = nullptr;
+  mjData * data_ = nullptr;
 
   //! Actuator command (NaN for no command)
   std::vector<mjtNum> ctrl_;
@@ -103,8 +113,10 @@ protected:
   //! @{
   rclcpp::Node::SharedPtr nh_;
   rclcpp::executors::SingleThreadedExecutor::SharedPtr executor_;
-  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr joint_cmd_array_sub_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_trajectory_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_cmd_joint_state_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
   //! @}
 };
 
