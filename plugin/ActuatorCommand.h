@@ -84,11 +84,6 @@ protected:
                   std::string topic_name,
                   double publish_rate = 100.0);
 
-  /** \brief Constructor.
-      \param msg command message
-  */
-  void callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
-
   /** \brief Callback for joint trajectory commands.
       \param msg command message
   */

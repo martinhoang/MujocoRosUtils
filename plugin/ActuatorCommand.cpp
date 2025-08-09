@@ -238,7 +238,10 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
       topic_name = node_name + "/command";
     }
     joint_cmd_array_sub_ = nh_->create_subscription<std_msgs::msg::Float64MultiArray>(
-        topic_name + "_array", 1, std::bind(&ActuatorCommand::callback, this, std::placeholders::_1));
+        topic_name + "_array", 1,
+        [&](const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+        { jointCommandCallback(active_joint_names_, msg->data); });
+
     // Subscriber for JointTrajectory messages
     joint_trajectory_sub_ = nh_->create_subscription<trajectory_msgs::msg::JointTrajectory>(
         topic_name + "_trajectory", 1,
@@ -355,26 +358,6 @@ void ActuatorCommand::compute(const mjModel *, // m
   }
 }
 
-void ActuatorCommand::callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
-{
-  if(msg->data.size() == ctrl_.size())
-  {
-    print_debug("Received actuator command with size %zu for %zu num of actuators\n", msg->data.size(),
-                actuators_.size());
-    ctrl_ = msg->data;
-  }
-  else
-  {
-    if(msg->data.size() != ctrl_.size())
-    {
-      print_warning("[ActuatorCommand] Msg Size (%zu) != Ctrl Size (%zu). Only apply what is possible\n",
-                    msg->data.size(), ctrl_.size());
-      copy_arrays_no_resize<double>(ctrl_, msg->data);
-    }
-  }
-}
-
-// void ActuatorCommand::jointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg)
 void ActuatorCommand::jointCommandCallback(std::vector<std::string> & names, std::vector<double> & positions)
 {
   if(names.empty() || positions.empty())
