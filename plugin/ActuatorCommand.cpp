@@ -420,7 +420,7 @@ void ActuatorCommand::jointCommandCallback(std::vector<std::string> & names, std
 
   if(is_valid)
   {
-    print_confirm("[ActuatorCommand] Received JointTrajectory command\n");
+    print_debug("[ActuatorCommand] Received JointTrajectory command\n");
     ctrl_ = std::move(new_ctrl);
   }
 }

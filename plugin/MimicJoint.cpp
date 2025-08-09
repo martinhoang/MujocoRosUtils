@@ -148,8 +148,8 @@ MimicJoint::MimicJoint(const mjModel * m, mjData * d, int master, int slave, dou
   int slave_joint_id_ = m->actuator_trnid[2 * slave_act_id_];
   const char * slave_joint_name = mj_id2name(m, mjOBJ_JOINT, slave_joint_id_);
 
-  print_info("[MimicJoint] Created mimic joint '%s' with gear %f to master joint '%s' whose actuator id is %d\n", slave_joint_name, gear_,
-             master_joint_name, slave_act_id_);
+  print_info("[MimicJoint] Created mimic joint '%s':\n- Gear %f\n- Master Joint: '%s'\n- Master Actuator id: %d\n",
+             slave_joint_name, gear_, master_joint_name, slave_act_id_);
 }
 
 void MimicJoint::reset(const mjModel * m, int plugin_id)
