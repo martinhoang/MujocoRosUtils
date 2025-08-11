@@ -19,7 +19,8 @@ project(${PROJECT_NAME})
 # MuJoCo
 if(NOT DEFINED MUJOCO_ROOT_DIR)
   set(MUJOCO_ROOT_DIR $ENV{MUJOCO_PATH})
-  message(STATUS "Using MuJoCo path from environment variable: ${MUJOCO_ROOT_DIR}")
+  message(
+    STATUS "Using MuJoCo path from environment variable: ${MUJOCO_ROOT_DIR}")
 endif()
 
 if(NOT DEFINED MUJOCO_ROOT_DIR)
@@ -90,41 +91,6 @@ rosidl_generate_interfaces(
   geometry_msgs
   builtin_interfaces)
 
-
-###
-find_package(pluginlib REQUIRED)
-find_package(rclcpp_lifecycle REQUIRED)
-
-add_library(
-  mujoco_hardware_plugin SHARED
-  src/mujoco_system.cpp
-)
-
-target_include_directories(
-  mujoco_hardware_plugin
-  PRIVATE
-  include
-  ${MUJOCO_INCLUDE_DIR}
-)
-
-ament_target_dependencies(mujoco_hardware_plugin
-rclcpp
-rclcpp_lifecycle
-hardware_interface
-pluginlib
-)
-
-target_link_libraries(
-  mujoco_hardware_plugin
-  ${LIB_MUJOCO}
-)
-
-ament_export_libraries(
-  mujoco_hardware_plugin
-)
-
-pluginlib_export_plugin_description_file(hardware_interface mujoco_hardware_plugin.xml)
-
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 # Do this to allow for loading xml according to the instructions in the README
@@ -132,6 +98,38 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY xml DESTINATION share)
 
 ament_export_dependencies(rosidl_default_runtime)
+
+# Adding new pluginlib for MujocoSystem hardware interface
+find_package(pluginlib REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+
+add_library(mujoco_hardware_plugin SHARED src/mujoco_system.cpp)
+
+target_include_directories(
+  mujoco_hardware_plugin
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+         $<INSTALL_INTERFACE:include>
+  PRIVATE ${MUJOCO_INCLUDE_DIR})
+
+ament_target_dependencies(mujoco_hardware_plugin rclcpp rclcpp_lifecycle
+                          hardware_interface pluginlib)
+
+target_link_libraries(mujoco_hardware_plugin ${LIB_MUJOCO})
+
+install(DIRECTORY include/ DESTINATION include/mujoco_hardware_plugin)
+
+install(
+  TARGETS mujoco_hardware_plugin
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
+ament_export_include_directories(include)
+ament_export_libraries(mujoco_hardware_plugin)
+
+#! The first argument has to be the package that contains the immediate base class of the extended plugin, and NOT the ancestral parents (like hardware_interface, etc.). Typical it is this package.
+pluginlib_export_plugin_description_file(mujoco_ros_utils
+                                         mujoco_hardware_plugin.xml)
 
 ament_package()
 add_subdirectory(plugin)

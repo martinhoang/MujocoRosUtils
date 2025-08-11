@@ -1,6 +1,6 @@
-#include <mujoco_system.hpp>
+#include "mujoco_system.hpp"
 
-namespace mujoco_ros2_control
+namespace mujoco_ros_utils
 {
 
 bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mjData* d,
@@ -74,8 +74,8 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
   return return_type::OK;
 }
 
-} // namespace mujoco_ros2_control
+} // namespace mujoco_ros_utils
 
 #include <pluginlib/class_list_macros.hpp>
-PLUGINLIB_EXPORT_CLASS(mujoco_ros2_control::MujocoSystem,
-                       mujoco_ros2_control::MujocoSystemInterface)
+PLUGINLIB_EXPORT_CLASS(mujoco_ros_utils::MujocoSystem,
+                       mujoco_ros_utils::MujocoSystemInterface)

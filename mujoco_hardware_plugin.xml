@@ -1,5 +1,5 @@
 <library path="mujoco_hardware_plugin">
-  <class type="mujoco_ros2_control::MujocoSystem" base_class_type="mujoco_ros2_control::MujocoSystemInterface">
+  <class type="mujoco_ros_utils::MujocoSystem" base_class_type="mujoco_ros_utils::MujocoSystemInterface">
     <description>
       Hardware interface for ROS 2 control with Mujoco
     </description>
