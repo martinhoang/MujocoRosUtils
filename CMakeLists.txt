@@ -90,6 +90,41 @@ rosidl_generate_interfaces(
   geometry_msgs
   builtin_interfaces)
 
+
+###
+find_package(pluginlib REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+
+add_library(
+  mujoco_hardware_plugin SHARED
+  src/mujoco_system.cpp
+)
+
+target_include_directories(
+  mujoco_hardware_plugin
+  PRIVATE
+  include
+  ${MUJOCO_INCLUDE_DIR}
+)
+
+ament_target_dependencies(mujoco_hardware_plugin
+rclcpp
+rclcpp_lifecycle
+hardware_interface
+pluginlib
+)
+
+target_link_libraries(
+  mujoco_hardware_plugin
+  ${LIB_MUJOCO}
+)
+
+ament_export_libraries(
+  mujoco_hardware_plugin
+)
+
+pluginlib_export_plugin_description_file(hardware_interface mujoco_hardware_plugin.xml)
+
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 # Do this to allow for loading xml according to the instructions in the README

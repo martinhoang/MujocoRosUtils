@@ -8,6 +8,7 @@ add_library(
   SensorPublisher.cpp
   mujoco_utils.cpp
   MimicJoint.cpp
+  RosControl.cpp
   # mujoco_ros2_control.cpp
   )
 target_include_directories(

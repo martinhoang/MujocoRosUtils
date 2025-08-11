@@ -32,7 +32,7 @@ void MimicJoint::RegisterPlugin()
                       int // plugin_id
                    ) { return 0; };
 
-  plugin.needstage = mjSTAGE_VEL;
+  plugin.needstage = 0;
 
   plugin.init = +[](const mjModel * m, mjData * d, int plugin_id)
   {
@@ -66,7 +66,7 @@ void MimicJoint::RegisterPlugin()
 
   mjp_registerPlugin(&plugin);
 
-  print_info("MimicJoint plugin registered\n");
+  print_confirm("Successfully registered 'MimicJoint' plugin\n");
 };
 
 std::unique_ptr<MimicJoint> MimicJoint::Create(const mjModel * m, mjData * d, int plugin_id)

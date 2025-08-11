@@ -1,9 +1,7 @@
 #include "ActuatorCommand.h"
-
-#include <mujoco/mujoco.h>
-
 #include "mujoco_utils.hpp"
 
+#include <mujoco/mujoco.h>
 #include <iostream>
 
 namespace MujocoRosUtils
@@ -39,7 +37,7 @@ void ActuatorCommand::RegisterPlugin()
                            int // sensor_id
                         ) { return 0; };
 
-  plugin.needstage = mjSTAGE_VEL;
+  plugin.needstage = 0;
 
   plugin.init = +[](const mjModel * m, mjData * d, int plugin_id)
   {
@@ -76,7 +74,7 @@ void ActuatorCommand::RegisterPlugin()
 
   mjp_registerPlugin(&plugin);
 
-  print_info("ActuatorCommand plugin registered\n");
+  print_confirm("Successfully registered 'ActuatorCommand' plugin\n");
 }
 
 std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjData * d, int plugin_id)
