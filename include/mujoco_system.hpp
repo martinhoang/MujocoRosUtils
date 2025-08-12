@@ -34,11 +34,17 @@ public:
   CallbackReturn on_error(const State &previous_state);
 
   /// Initialization of the hardware interface from data parsed from the robot's URDF.
-  CallbackReturn                on_init(const HardwareInfo &hardware_info) override;
-  std::vector<StateInterface>   export_state_interfaces() override;
-  std::vector<CommandInterface> export_command_interfaces() override;
+  CallbackReturn on_init(const hardware_interface::HardwareInfo &hardware_info) override;
+  std::vector<hardware_interface::StateInterface>   export_state_interfaces() override;
+  std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
   return_type read(const rclcpp::Time &time, const rclcpp::Duration &period) override;
   return_type write(const rclcpp::Time &time, const rclcpp::Duration &period) override;
+
+protected:
+  std::vector<hardware_interface::StateInterface>   state_interfaces_;
+  std::vector<hardware_interface::CommandInterface> command_interfaces_;
+  const mjModel                                    *model_{nullptr};
+  mjData                                           *data_{nullptr};
 };
 
 } // namespace mujoco_ros2_control

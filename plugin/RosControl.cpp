@@ -136,9 +136,7 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
     {
       if (!rclcpp::ok())
       {
-        RCLCPP_ERROR(node_->get_logger(), "Interrupted while waiting for %s service. Exiting.",
-                     robot_param_node.c_str());
-        return;
+        mju_error("Interrupted while waiting for %s service. Exiting.", robot_param_node.c_str());
       }
       RCLCPP_ERROR(node_->get_logger(), "%s service not available, waiting again...",
                    robot_param_node.c_str());
