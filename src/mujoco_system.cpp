@@ -7,42 +7,43 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
                             const hardware_interface::HardwareInfo &info)
 
 {
+  printf("Initializing 'MujocoSystem' with for: %s\n", info.name.c_str());
   return true;
 }
 
 CallbackReturn MujocoSystem::on_configure(const State &previous_state)
 {
   // Setting up the communication to the hardware
-  printf("Configuring MujocoSystem with previous state: %s\n", previous_state.label().c_str());
+  printf("Configuring 'MujocoSystem' with previous state: %s\n", previous_state.label().c_str());
   return CallbackReturn::SUCCESS;
 }
 CallbackReturn MujocoSystem::on_cleanup(const State &previous_state)
 {
   // Do the opposite of on_configure()
-  printf("Cleaning up MujocoSystem with previous state: %s\n", previous_state.label().c_str());
+  printf("Cleaning up 'MujocoSystem' with previous state: %s\n", previous_state.label().c_str());
   return CallbackReturn::SUCCESS;
 }
 CallbackReturn MujocoSystem::on_shutdown(const State &previous_state)
 {
-  printf("Shutting down MujocoSystem with previous state: %s\n", previous_state.label().c_str());
+  printf("Shutting down 'MujocoSystem' with previous state: %s\n", previous_state.label().c_str());
   return CallbackReturn::SUCCESS;
 }
 CallbackReturn MujocoSystem::on_activate(const State &previous_state)
 {
   // Activate the hardware power
-  printf("Activating MujocoSystem with previous state: %s\n", previous_state.label().c_str());
+  printf("Activating 'MujocoSystem' with previous state: %s\n", previous_state.label().c_str());
   return CallbackReturn::SUCCESS;
 }
 CallbackReturn MujocoSystem::on_deactivate(const State &previous_state)
 {
   // Turn off the hardware power
-  printf("Deactivating MujocoSystem with previous state: %s\n", previous_state.label().c_str());
+  printf("Deactivating 'MujocoSystem' with previous state: %s\n", previous_state.label().c_str());
   return CallbackReturn::SUCCESS;
 }
 CallbackReturn MujocoSystem::on_error(const State &previous_state)
 {
   // Handle errors
-  printf("Error occurred in MujocoSystem with previous state: %s\n",
+  printf("Error occurred in 'MujocoSystem' with previous state: %s\n",
          previous_state.label().c_str());
   return CallbackReturn::SUCCESS;
 }

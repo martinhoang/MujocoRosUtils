@@ -8,6 +8,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <memory>
+#include <thread>
 
 namespace MujocoRosUtils
 {
@@ -31,10 +32,9 @@ protected:
   const mjModel          *model_ = nullptr;
   mjData                 *data_  = nullptr;
   static inline std::shared_ptr<pluginlib::ClassLoader<mujoco_ros2_control::MujocoSystemInterface>>
-                                                              mujoco_system_loader_ = nullptr;
-  std::shared_ptr<controller_manager::ControllerManager>      controller_manager_   = nullptr;
-  std::shared_ptr<rclcpp::executors::MultiThreadedExecutor>   executor_             = nullptr;
-  bool is_initialized_ = false;
+                                                            mujoco_system_loader_ = nullptr;
+  std::shared_ptr<controller_manager::ControllerManager>    controller_manager_   = nullptr;
+  std::shared_ptr<rclcpp::executors::MultiThreadedExecutor> executor_             = nullptr;
 };
 
 } // namespace MujocoRosUtils
