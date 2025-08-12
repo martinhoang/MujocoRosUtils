@@ -4,7 +4,7 @@
 #include <mujoco/mujoco.h>
 #include <rclcpp/rclcpp.hpp>
 
-namespace mujoco_ros_utils
+namespace mujoco_ros2_control
 {
 
 /**
@@ -32,4 +32,4 @@ protected:
   rclcpp::Node::SharedPtr node_;
 };
 
-} // namespace mujoco_ros_utils
+} // namespace mujoco_ros2_control

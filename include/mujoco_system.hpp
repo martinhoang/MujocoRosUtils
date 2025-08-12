@@ -5,7 +5,7 @@
 using namespace rclcpp_lifecycle;
 using namespace hardware_interface;
 
-namespace mujoco_ros_utils
+namespace mujoco_ros2_control
 {
 
 class MujocoSystem : public MujocoSystemInterface
@@ -41,4 +41,4 @@ public:
   return_type write(const rclcpp::Time &time, const rclcpp::Duration &period) override;
 };
 
-} // namespace mujoco_ros_utils
+} // namespace mujoco_ros2_control

@@ -2,6 +2,7 @@
 #include "mujoco_utils.hpp"
 
 #include <hardware_interface/component_parser.hpp>
+#include <hardware_interface/resource_manager.hpp>
 #include <mujoco/mujoco.h>
 
 constexpr char ATTR_NODE_NAME[]        = "node_name";
@@ -17,7 +18,7 @@ void Ros2Control::RegisterPlugin()
   mjpPlugin plugin;
   mjp_defaultPlugin(&plugin);
 
-  print_info("Registering Ros2Control plugin\n");
+  RCLCPP_INFO(rclcpp::get_logger("RosControl"), "Registering Ros2Control plugin\n");
 
   plugin.name = "MujocoRosUtils::Ros2Control";
   plugin.capabilityflags |= mjPLUGIN_PASSIVE;
@@ -59,7 +60,7 @@ void Ros2Control::RegisterPlugin()
   };
 
   mjp_registerPlugin(&plugin);
-  print_confirm("Successfully registered 'Ros2Control' plugin\n");
+  RCLCPP_INFO(rclcpp::get_logger("RosControl"), "Successfully registered 'Ros2Control' plugin\n");
 }
 
 std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, int plugin_id)
@@ -67,36 +68,37 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   try
   {
     mujoco_system_loader_.reset(
-      new pluginlib::ClassLoader<mujoco_ros_utils::MujocoSystemInterface>(
-        "mujoco_ros_utils", "mujoco_ros_utils::MujocoSystemInterface"));
+      new pluginlib::ClassLoader<mujoco_ros2_control::MujocoSystemInterface>(
+        "mujoco_ros_utils", /* Package where this plugin is located */
+        "mujoco_ros2_control::MujocoSystemInterface"));
   }
   catch (pluginlib::PluginlibException &ex)
   {
     mju_error("Failed to create hardware interface plugin loader. Error: %s", ex.what());
   }
 
-  std::unique_ptr<mujoco_ros_utils::MujocoSystemInterface> mujoco_system;
+  // This is only for testing if mujoco_system can be created
+  std::unique_ptr<mujoco_ros2_control::MujocoSystemInterface> mujoco_system;
   try
   {
-    print_info("Creating 'MujocoSystem' instance\n");
+    RCLCPP_INFO(rclcpp::get_logger("RosControl"), "Creating 'MujocoSystem' instance\n");
     mujoco_system.reset(
-      mujoco_system_loader_->createUnmanagedInstance("mujoco_ros_utils::MujocoSystem"));
+      mujoco_system_loader_->createUnmanagedInstance("mujoco_ros2_control/MujocoSystem") /* This refers to 'name' of the plugin if available in the plugin XML */);
   }
   catch (pluginlib::PluginlibException &ex)
   {
-    mju_error("Failed to create 'MujocoSystem' hardware interface instance. Error: %s", ex.what());
+    mju_error("Failed to test-create 'MujocoSystem' hardware interface instance. Error: %s",
+              ex.what());
   }
 
-  return std::unique_ptr<Ros2Control>(new Ros2Control(m, d, std::move(mujoco_system)));
+  return std::unique_ptr<Ros2Control>(new Ros2Control(m, d));
 }
 
-Ros2Control::Ros2Control(const mjModel *model, mjData *data,
-                         std::unique_ptr<mujoco_ros_utils::MujocoSystemInterface> mujoco_system)
+Ros2Control::Ros2Control(const mjModel *model, mjData *data)
     : model_(model)
     , data_(data)
-    , mujoco_system_(std::move(mujoco_system))
 {
-  if (!node_)
+  if (!node_ || !is_initialized_)
   {
 
     if (!rclcpp::ok())
@@ -107,13 +109,10 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data,
     }
 
     executor_.reset(new rclcpp::executors::MultiThreadedExecutor());
-    rclcpp::NodeOptions options;
-    options.automatically_declare_parameters_from_overrides(true);
-    node_ = rclcpp::Node::make_shared("ros2_control_node", options);
+    node_ = rclcpp::Node::make_shared(
+      "ros2_control_node",
+      rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
     executor_->add_node(node_);
-
-    hardware_interface::HardwareInfo hardware_info;
-    mujoco_system_->initialize(node_, model_, data_, hardware_info);
 
     //* Getting URDF string
     std::string urdf_string;
@@ -124,12 +123,79 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data,
       = robot_param_node_char && strlen(robot_param_node_char) > 0 ? robot_param_node_char : "";
     if (robot_param_node.empty())
     {
-      print_info("Using default robot state publisher: %s\n", robot_param_node.c_str());
       robot_param_node = "robot_state_publisher";
+      RCLCPP_INFO_STREAM(node_->get_logger(),
+                         "Using default robot state publisher: " << robot_param_node << std::endl);
     }
 
-    // Method 2: Getting robot description directly from parameter server
-    urdf_string = node_->get_parameter("robot_description").as_string();
+    using namespace std::chrono_literals;
+    auto parameters_client
+      = std::make_shared<rclcpp::AsyncParametersClient>(node_, robot_param_node);
+    while (!parameters_client->wait_for_service(0.5s))
+    {
+      if (!rclcpp::ok())
+      {
+        RCLCPP_ERROR(node_->get_logger(), "Interrupted while waiting for %s service. Exiting.",
+                     robot_param_node.c_str());
+        return;
+      }
+      RCLCPP_ERROR(node_->get_logger(), "%s service not available, waiting again...",
+                   robot_param_node.c_str());
+    }
+
+    RCLCPP_INFO(node_->get_logger(), "Found %s service", robot_param_node.c_str());
+
+    std::string  param_name = "robot_description";
+    rclcpp::Time start_time = node_->get_clock()->now();
+    while (urdf_string.empty() && (node_->get_clock()->now() - start_time).seconds() < 5)
+    {
+      std::string search_param_name;
+      RCLCPP_DEBUG(node_->get_logger(), "param_name %s", param_name.c_str());
+      
+      RCLCPP_INFO(node_->get_logger(),
+                  "Waiting for URDF in parameter [%s] on the ROS param server.",
+                  search_param_name.c_str());
+      try
+      {
+        auto f = parameters_client->get_parameters({param_name});
+        f.wait();
+        std::vector<rclcpp::Parameter> values = f.get();
+        urdf_string                           = values[0].as_string();
+      }
+      catch (const std::exception &e)
+      {
+        RCLCPP_ERROR(node_->get_logger(), "%s", e.what());
+      }
+
+      if (!urdf_string.empty())
+      {
+        break;
+      }
+      else
+      {
+        RCLCPP_ERROR(node_->get_logger(),
+                     "gazebo_ros2_control plugin is waiting for model"
+                     " URDF in parameter [%s] on the ROS param server.",
+                     search_param_name.c_str());
+      }
+      usleep(100000);
+
+      if (!rclcpp::ok())
+      {
+        RCLCPP_ERROR(node_->get_logger(), "Interrupted while waiting for %s service. Exiting.",
+                     robot_param_node.c_str());
+        return;
+      }
+    }
+
+    if (urdf_string.empty())
+    {
+      RCLCPP_ERROR(node_->get_logger(),
+                   "Failed to get URDF from parameter [%s] on the ROS param server.",
+                   param_name.c_str());
+      return;
+    }
+    RCLCPP_INFO(node_->get_logger(), "Got the URDF from paramter service");
 
     std::vector<hardware_interface::HardwareInfo> control_hardware_info;
     try
@@ -141,13 +207,71 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data,
       mju_warning("Failed to parse control hardware info. Error: %s", ex.what());
     }
 
-    std::unique_ptr<hardware_interface::ResourceManager> resource_manager
-      = std::make_unique<hardware_interface::ResourceManager>();
+    RCLCPP_INFO(node_->get_logger(), "Got the control hardware info from URDF with length: %zu",
+                control_hardware_info.size());
+
+    //* Initializing the hardware system
+
+    auto resource_manager = std::make_unique<hardware_interface::ResourceManager>();
+
+    try
+    {
+      resource_manager->load_urdf(urdf_string, false, false);
+    }
+    catch (...)
+    {
+      RCLCPP_ERROR(node_->get_logger(), "Error while initializing URDF!");
+    }
+
+    for (const auto &hardware_info : control_hardware_info)
+    {
+      RCLCPP_INFO(node_->get_logger(), "Hardware Info: %s",
+                  hardware_info.hardware_class_type.c_str());
+
+      std::unique_ptr<mujoco_ros2_control::MujocoSystemInterface> mujoco_system;
+
+      // Try to create an instance of the hardware interfaces
+      try
+      {
+        mujoco_system.reset(
+          mujoco_system_loader_->createUnmanagedInstance(hardware_info.hardware_class_type));
+      }
+      catch (pluginlib::PluginlibException &ex)
+      {
+        mju_error("Failed to create 'MujocoSystem' instance for %s. Error: %s",
+                  hardware_info.name.c_str(), ex.what());
+        continue;
+      }
+
+      // Initializing the MujocoSystem
+      mujoco_system->initialize(node_, model_, data_, hardware_info);
+
+      // Load it up to ResourceManager
+      resource_manager->import_component(std::move(mujoco_system), hardware_info);
+
+      // Try to activate all components to ACTIVE
+      rclcpp_lifecycle::State state(lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE,
+                                    hardware_interface::lifecycle_state_names::ACTIVE);
+      resource_manager->set_component_state(hardware_info.name, state);
+    }
 
     // Loading controller manager
-    print_info("Loading controller manager\n");
+    RCLCPP_INFO(node_->get_logger(), "Loading controller manager\n");
     controller_manager_.reset(new controller_manager::ControllerManager(
       std::move(resource_manager), executor_, "controller_manager", node_->get_namespace()));
+
+    is_initialized_ = true;
+  }
+}
+
+Ros2Control::~Ros2Control()
+{
+  if (node_)
+  {
+    controller_manager_.reset();
+    node_.reset();
+    executor_.reset();
+    rclcpp::shutdown();
   }
 }
 
@@ -159,7 +283,11 @@ void Ros2Control::reset(const mjModel *m, int plugin_id)
 void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
 {
   // Call ROS callback
-  executor_->spin_once(std::chrono::seconds(0));
+  if (rclcpp::ok() && node_)
+  {
+    // Spin the executor to process callbacks
+    executor_->spin_some();
+  }
 }
 
 } // namespace MujocoRosUtils
