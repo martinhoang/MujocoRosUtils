@@ -142,14 +142,14 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
                    robot_param_node.c_str());
     }
 
-    std::string  param_name = "robot_description";
-    RCLCPP_INFO(node_->get_logger(), "Found %s service. Asking for %s", robot_param_node.c_str(), param_name.c_str());
+    std::string param_name = "robot_description";
+    RCLCPP_INFO(node_->get_logger(), "Found %s service. Asking for %s", robot_param_node.c_str(),
+                param_name.c_str());
 
     rclcpp::Time start_time = node_->get_clock()->now();
     while (urdf_string.empty() && (node_->get_clock()->now() - start_time).seconds() < 5)
     {
-      RCLCPP_INFO(node_->get_logger(),
-                  "Waiting for parameter [%s] on the ROS param server.",
+      RCLCPP_INFO(node_->get_logger(), "Waiting for parameter [%s] on the ROS param server.",
                   param_name.c_str());
       try
       {
@@ -171,16 +171,16 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
       else
       {
         RCLCPP_INFO(node_->get_logger(),
-                     "Ros2Control plugin is waiting for model"
-                     " URDF in parameter [%s] on the ROS param server.",
-                     param_name.c_str());
+                    "Ros2Control plugin is waiting for model"
+                    " URDF in parameter [%s] on the ROS param server.",
+                    param_name.c_str());
       }
       std::this_thread::sleep_for(std::chrono::microseconds(100000));
 
       if (!rclcpp::ok())
       {
         RCLCPP_INFO(node_->get_logger(), "Interrupted while waiting for %s service. Exiting.",
-                     robot_param_node.c_str());
+                    robot_param_node.c_str());
         return;
       }
     }
@@ -222,7 +222,7 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
 
     for (const auto &hardware_info : control_hardware_info)
     {
-      RCLCPP_INFO(node_->get_logger(), "Hardware Info: %s",
+      RCLCPP_INFO(node_->get_logger(), "Hardware system: %s",
                   hardware_info.hardware_class_type.c_str());
 
       std::unique_ptr<mujoco_ros2_control::MujocoSystemInterface> mujoco_system;
@@ -243,8 +243,7 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
       // Initializing the MujocoSystem
       if (!mujoco_system->initialize(node_, model_, data_, hardware_info))
       {
-        mju_error("Failed to initialize 'MujocoSystem' for %s",
-                  hardware_info.name.c_str());
+        mju_error("Failed to initialize 'MujocoSystem' for %s", hardware_info.name.c_str());
       }
 
       // Load it up to ResourceManager
@@ -260,11 +259,15 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
     RCLCPP_INFO(node_->get_logger(), "Loading controller manager\n");
     controller_manager_.reset(new controller_manager::ControllerManager(
       std::move(resource_manager), executor_, "controller_manager", node_->get_namespace()));
+
+    // Getting node update rate
+    update_rate_ = node_->get_parameter_or("update_rate", 100.0);
   }
 }
 
 Ros2Control::~Ros2Control()
 {
+  RCLCPP_INFO(node_->get_logger(), "Destroying Ros2Control plugin\n");
   if (node_)
   {
     controller_manager_.reset();
@@ -281,11 +284,26 @@ void Ros2Control::reset(const mjModel *m, int plugin_id)
 
 void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
 {
+  builtin_interfaces::msg::Time sim_time_now;
+  sim_time_now.sec     = static_cast<int32_t>(d->time);
+  sim_time_now.nanosec = static_cast<uint32_t>((d->time - sim_time_now.sec) * 1e9);
+
   // Call ROS callback
   if (rclcpp::ok() && node_)
   {
+    rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
+    rclcpp::Duration duration = now - last_update_;
     // Spin the executor to process callbacks
     executor_->spin_some();
+
+    if (duration.seconds() > control_period_)
+    {
+      controller_manager_->read(now, duration);
+      controller_manager_->update(now, duration);
+      last_update_ = now;
+    }
+
+    controller_manager_->write(now, duration);
   }
 }
 

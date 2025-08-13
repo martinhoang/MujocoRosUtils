@@ -8,11 +8,11 @@ using namespace hardware_interface;
 namespace mujoco_ros2_control
 {
 
+class MujocoSystemPrivate;
+
 class MujocoSystem : public MujocoSystemInterface
 {
 public:
-  MujocoSystem() = default;
-
   /**
    * @brief Initialize the MujocoSystemInterface
    *
@@ -26,12 +26,8 @@ public:
   bool initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mjData *d,
                   const hardware_interface::HardwareInfo &info) override;
 
-  CallbackReturn on_configure(const State &previous_state);
-  CallbackReturn on_cleanup(const State &previous_state);
-  CallbackReturn on_shutdown(const State &previous_state);
   CallbackReturn on_activate(const State &previous_state);
   CallbackReturn on_deactivate(const State &previous_state);
-  CallbackReturn on_error(const State &previous_state);
 
   /// Initialization of the hardware interface from data parsed from the robot's URDF.
   CallbackReturn on_init(const hardware_interface::HardwareInfo &hardware_info) override;
@@ -41,10 +37,8 @@ public:
   return_type write(const rclcpp::Time &time, const rclcpp::Duration &period) override;
 
 protected:
-  std::vector<hardware_interface::StateInterface>   state_interfaces_;
-  std::vector<hardware_interface::CommandInterface> command_interfaces_;
-  const mjModel                                    *model_{nullptr};
-  mjData                                           *data_{nullptr};
+  void register_joints(const hardware_interface::HardwareInfo &hardware_info, const mjModel *m);
+  std::unique_ptr<MujocoSystemPrivate> impl_;
 };
 
 } // namespace mujoco_ros2_control
