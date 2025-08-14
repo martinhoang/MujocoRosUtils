@@ -35,10 +35,12 @@ protected:
                                                             mujoco_system_loader_ = nullptr;
   std::shared_ptr<controller_manager::ControllerManager>    controller_manager_   = nullptr;
   std::shared_ptr<rclcpp::executors::MultiThreadedExecutor> executor_             = nullptr;
+  std::thread                                               executor_thread_;
+  bool                                                      stop_executor_thread_ = true;
 
-  double       update_rate_    = 100.0;
-  double       control_period_ = 1.0 / update_rate_;
-  rclcpp::Time last_update_    = rclcpp::Time{0, 0, RCL_ROS_TIME};
+  double       update_rate_       = 100.0;
+  double       control_period_    = 1.0 / update_rate_;
+  rclcpp::Time last_update_       = rclcpp::Time{(uint64_t)0, RCL_ROS_TIME};
 };
 
 } // namespace MujocoRosUtils

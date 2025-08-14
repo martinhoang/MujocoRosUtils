@@ -32,6 +32,7 @@ protected:
 
     int master_joint_id_;
     int slave_act_id_;
+    int slave_joint_id_;
     double gear_;
 };
 } // namespace MujocoRosUtils

@@ -78,20 +78,32 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   }
 
   // This is only for testing if mujoco_system can be created
-  std::unique_ptr<mujoco_ros2_control::MujocoSystemInterface> mujoco_system;
+  // std::unique_ptr<mujoco_ros2_control::MujocoSystemInterface> mujoco_system;
+  // try
+  // {
+  //   RCLCPP_INFO(rclcpp::get_logger("RosControl"), "Creating 'MujocoSystem' instance");
+  //   mujoco_system.reset(
+  //     mujoco_system_loader_->createUnmanagedInstance("mujoco_ros2_control/MujocoSystem") /* This
+  //     refers to 'name' of the plugin if available in the plugin XML */);
+  // }
+  // catch (pluginlib::PluginlibException &ex)
+  // {
+  //   mju_error("Failed to test-create 'MujocoSystem' hardware interface instance. Error: %s",
+  //             ex.what());
+  // }
+
+  std::unique_ptr<Ros2Control> ret;
+  // Catch any error in the constructor
   try
   {
-    RCLCPP_INFO(rclcpp::get_logger("RosControl"), "Creating 'MujocoSystem' instance");
-    mujoco_system.reset(
-      mujoco_system_loader_->createUnmanagedInstance("mujoco_ros2_control/MujocoSystem") /* This refers to 'name' of the plugin if available in the plugin XML */);
+    ret.reset(new Ros2Control(m, d));
   }
-  catch (pluginlib::PluginlibException &ex)
+  catch (const std::exception &e)
   {
-    mju_error("Failed to test-create 'MujocoSystem' hardware interface instance. Error: %s",
-              ex.what());
+    mju_error("Failed to create 'Ros2Control' instance. Error: %s", e.what());
   }
 
-  return std::unique_ptr<Ros2Control>(new Ros2Control(m, d));
+  return ret;
 }
 
 Ros2Control::Ros2Control(const mjModel *model, mjData *data)
@@ -101,17 +113,25 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
   if (!node_)
   {
 
+    const char *hardcoded_config_file
+      = "/home/martin/umanoid_ws/src/umanoid/umanoid_simulation/gazebo_sim/"
+        "umanoid_sim_gazebo/config/ros2_controllers.yaml";
+
+    // Hard coding for testing for now
     if (!rclcpp::ok())
     {
-      int    argc = 0;
-      char **argv = nullptr;
+      const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, hardcoded_config_file};
+      int         argc   = sizeof(argv) / sizeof(argv[0]);
       rclcpp::init(argc, argv);
     }
 
     executor_.reset(new rclcpp::executors::MultiThreadedExecutor());
-    node_ = rclcpp::Node::make_shared(
-      "ros2_control_node",
-      rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+    rclcpp::NodeOptions options;
+    options.automatically_declare_parameters_from_overrides(true);
+    options.parameter_overrides({
+      rclcpp::Parameter("use_sim_time", rclcpp::ParameterValue(true)),
+    });
+    node_ = rclcpp::Node::make_shared("mujoco_ros2_control_node", options);
     executor_->add_node(node_);
 
     //* Getting URDF string
@@ -192,7 +212,42 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
                    param_name.c_str());
       return;
     }
+
     RCLCPP_INFO(node_->get_logger(), "Got the URDF from paramter service");
+
+    // Get parameters for controller_manager
+    auto rcl_context = node_->get_node_base_interface()->get_context()->get_rcl_context();
+    std::vector<std::string> arguments = {RCL_ROS_ARGS_FLAG};
+
+    arguments.push_back(RCL_PARAM_FILE_FLAG);
+    arguments.push_back(hardcoded_config_file);
+
+    std::vector<const char *> argv;
+
+    for (const auto &arg : arguments)
+    {
+      argv.push_back(reinterpret_cast<const char *>(arg.data()));
+    }
+
+    rcl_arguments_t rcl_arguments = rcl_get_zero_initialized_arguments();
+
+    rcl_ret_t rcl_return = rcl_parse_arguments(static_cast<int>(argv.size()), argv.data(),
+                                               rcl_get_default_allocator(), &rcl_arguments);
+
+    rcl_context->global_arguments = rcl_arguments;
+
+    if (rcl_return != RCL_RET_OK)
+    {
+      RCLCPP_ERROR(node_->get_logger(), "Error parsing config file at %s:\n%s",
+                   hardcoded_config_file, rcl_get_error_string().str);
+      return;
+    }
+    if (rcl_arguments_get_param_files_count(&rcl_arguments) < 1)
+    {
+      RCLCPP_ERROR(node_->get_logger(), "Failed to parse input yaml config file at %s",
+                   hardcoded_config_file);
+      return;
+    }
 
     std::vector<hardware_interface::HardwareInfo> control_hardware_info;
     try
@@ -245,6 +300,11 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
       {
         mju_error("Failed to initialize 'MujocoSystem' for %s", hardware_info.name.c_str());
       }
+      else
+      {
+        print_confirm("MujocoSystem initialized successfully for '%s'\n",
+                      hardware_info.name.c_str());
+      }
 
       // Load it up to ResourceManager
       resource_manager->import_component(std::move(mujoco_system), hardware_info);
@@ -260,8 +320,32 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
     controller_manager_.reset(new controller_manager::ControllerManager(
       std::move(resource_manager), executor_, "controller_manager", node_->get_namespace()));
 
+    executor_->add_node(controller_manager_);
+
+    if (!controller_manager_->has_parameter("update_rate"))
+    {
+      mju_error("Missing parameter 'update_rate' in controller manager. "
+                "Please set it to a positive integer value.");
+    }
+
     // Getting node update rate
-    update_rate_ = node_->get_parameter_or("update_rate", 100.0);
+    update_rate_ = controller_manager_->get_parameter("update_rate").as_int();
+    RCLCPP_INFO(node_->get_logger(), "Controller manager update rate: %.2f Hz", update_rate_);
+    control_period_ = 1.0 / update_rate_;
+
+    controller_manager_->set_parameter(
+      rclcpp::Parameter("use_sim_time", rclcpp::ParameterValue(true)));
+
+    // Spin off the executor thread
+    stop_executor_thread_ = false;
+    auto spin             = [this]() {
+      while (rclcpp::ok() && !stop_executor_thread_)
+      {
+        executor_->spin_once();
+      }
+    };
+
+    executor_thread_ = std::thread(spin);
   }
 }
 
@@ -270,6 +354,25 @@ Ros2Control::~Ros2Control()
   RCLCPP_INFO(node_->get_logger(), "Destroying Ros2Control plugin\n");
   if (node_)
   {
+    stop_executor_thread_ = true;
+    try
+    {
+      executor_->remove_node(node_);
+      executor_->remove_node(controller_manager_);
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_WARN(node_->get_logger(),
+                  "Error while removing nodes from executor: %s.This might be normal as the "
+                  "node/controller_manager might be cleaned up by now.",
+                  e.what());
+    }
+
+    executor_->cancel();
+    if (executor_thread_.joinable())
+    {
+      executor_thread_.join();
+    }
     controller_manager_.reset();
     node_.reset();
     executor_.reset();
@@ -279,6 +382,7 @@ Ros2Control::~Ros2Control()
 
 void Ros2Control::reset(const mjModel *m, int plugin_id)
 {
+  last_update_ = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
   return;
 }
 
@@ -293,16 +397,16 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
   {
     rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
     rclcpp::Duration duration = now - last_update_;
-    // Spin the executor to process callbacks
-    executor_->spin_some();
 
     if (duration.seconds() > control_period_)
     {
+      // RCLCPP_INFO(node_->get_logger(), "Controller manager update: %.2f seconds since last update.", duration.seconds());
       controller_manager_->read(now, duration);
       controller_manager_->update(now, duration);
       last_update_ = now;
     }
-
+    
+    // Write the data back to the model
     controller_manager_->write(now, duration);
   }
 }

@@ -223,7 +223,7 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
     char ** argv = nullptr;
 
     if(!rclcpp::ok())
-    {
+    { 
       rclcpp::init(argc, argv);
     }
 

@@ -1,18 +1,24 @@
 #include "mujoco_system.hpp"
 
+#include "hardware_interface/types/hardware_interface_type_values.hpp"
+
+#include <sensor_msgs/msg/joint_state.hpp>
+
 namespace mujoco_ros2_control
 {
 
 struct Joint
 {
-  std::size_t id;   // id of the joint in the Mujoco model
-  std::string name; // Name of the joint
-  double      joint_position;
-  double      joint_velocity;
-  double      joint_effort;
+  std::size_t id;          // id of the joint in the Mujoco model
+  std::size_t actuator_id; // id of the actuator for this joint in the Mujoco model
+  std::string name;        // Name of the joint
+  double      position;
+  double      velocity;
+  double      effort;
   double      position_cmd;
   double      velocity_cmd;
   double      effort_cmd;
+  std::string control_type;
   bool        is_mimic   = false;
   double      multiplier = 1.0;
   std::size_t mimicked_joint_id;
@@ -39,7 +45,9 @@ public:
   std::vector<hardware_interface::CommandInterface> command_interfaces_;
 
   /// \brief Joint States
-  std::vector<Joint> joint_states_;
+  std::vector<Joint> joints_;
+
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_cmd_publisher_;
 };
 
 bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mjData *d,
@@ -52,6 +60,9 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
   }
   node_ = node;
   impl_ = std::make_unique<MujocoSystemPrivate>(m, d);
+
+  impl_->joint_cmd_publisher_ = node_->create_publisher<sensor_msgs::msg::JointState>(
+      "joint_commands", rclcpp::QoS(10));
 
   RCLCPP_INFO(node_->get_logger(), "Initializing MujocoSystem '%s'\n", hardware_info.name.c_str());
 
@@ -72,6 +83,8 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
 void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardware_info,
                                    const mjModel                          *m)
 {
+  impl_->joints_.resize(hardware_info.joints.size());
+
   // Register joints from the URDF information
   for (unsigned int i = 0; i < hardware_info.joints.size(); ++i)
   {
@@ -85,13 +98,9 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
     {
       RCLCPP_WARN(node_->get_logger(), "Joint '%s' not found in Mujoco model",
                   joint_info.name.c_str());
-      std::stringstream ss;
-      ss << "Joint '" << joint_info.name << "' not found in Mujoco model";
-      throw std::runtime_error(ss.str());
+      throw std::runtime_error("Joint '" + joint_info.name + "' not found in Mujoco model");
     }
 
-    RCLCPP_INFO(node_->get_logger(), "Registering joint '%s' id %d", joint_info.name.c_str(),
-                joint_id);
     new_joint.name = joint_info.name;
     new_joint.id   = joint_id;
 
@@ -101,9 +110,7 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
     {
       new_joint.is_mimic          = true;
       new_joint.mimicked_joint_id = mj_name2id(m, mjOBJ_JOINT, mimicked_joint_it->second.c_str());
-      RCLCPP_INFO(node_->get_logger(), "Joint '%s is mimicking joint '%s'", new_joint.name.c_str(),
-                  mimicked_joint_it->second.c_str());
-      auto param_it = joint_info.parameters.find("multiplier");
+      auto param_it               = joint_info.parameters.find("multiplier");
       if (param_it != joint_info.parameters.end())
       {
         new_joint.multiplier = std::stod(param_it->second);
@@ -115,8 +122,147 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
                     joint_info.name.c_str());
         new_joint.multiplier = 1.0; // Default multiplier
       }
+    }
+
+    //* Get the "position" PID actuator corresponding with this actuator-plugin-joint pair
+    // since I dont know how to make a PID controller yet
+    // I latched on to the logics of the existing built-in position PID controller
+    // Trick: check if there is a "position" actuator for that joint already
+    // by checking if gain_type is mjGAIN_FIXED and bias_type is mjBIAS_AFFINE
+    for (int idx = 0; idx < m->nu; ++idx)
+    {
+      // If the actuator is associated with this joint
+      if (m->actuator_trnid[2 * idx] == joint_id)
+      {
+        RCLCPP_INFO(node_->get_logger(), "Actuator %d is associated with joint '%s'", idx,
+                    new_joint.name.c_str());
+        int gain_type = m->actuator_gaintype[idx];
+        int bias_type = m->actuator_biastype[idx];
+
+        if (gain_type == mjGAIN_FIXED && bias_type == mjBIAS_AFFINE)
+        {
+          new_joint.actuator_id = idx;
+          break; // No need to check further, we found the actuator
+        }
+      }
+    }
+
+    impl_->joints_[i] = new_joint;
+    Joint &last_joint = impl_->joints_[i];
+
+    if (last_joint.is_mimic)
+    {
+      RCLCPP_INFO(node_->get_logger(), "Registered mimic joint '%s' id %d", joint_info.name.c_str(),
+                  joint_id);
       continue;
     }
+
+    //* Get initial value of joint
+    double initial_position = std::numeric_limits<double>::quiet_NaN();
+    double initial_velocity = std::numeric_limits<double>::quiet_NaN();
+    double initial_effort   = std::numeric_limits<double>::quiet_NaN();
+
+    auto get_initial_value = [this](const hardware_interface::InterfaceInfo &info) {
+      double initial_value{0.0};
+
+      if (!info.initial_value.empty())
+      {
+        try
+        {
+          // Converting string double value
+          initial_value = std::stod(info.initial_value);
+        }
+        catch (std::invalid_argument &e)
+        {
+          RCLCPP_ERROR(node_->get_logger(), "Invalid initial value '%s' for joint '%s': %s",
+                       info.initial_value.c_str(), info.name.c_str(), e.what());
+          throw std::invalid_argument("Failed converting 'initial_value' string for joint '"
+                                      + info.name + "'");
+        }
+      }
+      return initial_value;
+    };
+
+    // * Connfiguring state interfaces internal variables
+    for (const auto &state_if : joint_info.state_interfaces)
+    {
+      RCLCPP_INFO(node_->get_logger(), "Registering State Interface '%s' for joint '%s'",
+                  state_if.name.c_str(), joint_info.name.c_str());
+      if (state_if.name == hardware_interface::HW_IF_POSITION)
+      {
+        impl_->state_interfaces_.emplace_back(joint_info.name, state_if.name, &last_joint.position);
+        initial_position = get_initial_value(state_if);
+        if (!std::isnan(initial_position))
+        {
+          last_joint.position          = initial_position;
+          impl_->data_->qpos[joint_id] = initial_position;
+        }
+      }
+      else if (state_if.name == hardware_interface::HW_IF_VELOCITY)
+      {
+        impl_->state_interfaces_.emplace_back(joint_info.name, state_if.name, &last_joint.velocity);
+        initial_velocity = get_initial_value(state_if);
+        if (!std::isnan(initial_velocity))
+        {
+          last_joint.velocity          = initial_velocity;
+          impl_->data_->qpos[joint_id] = initial_velocity;
+        }
+      }
+      else if (state_if.name == hardware_interface::HW_IF_EFFORT)
+      {
+        impl_->state_interfaces_.emplace_back(joint_info.name, state_if.name, &last_joint.effort);
+        initial_effort = get_initial_value(state_if);
+        if (!std::isnan(initial_effort))
+        {
+          last_joint.effort                     = initial_effort;
+          impl_->data_->qfrc_actuator[joint_id] = initial_effort;
+        }
+      }
+    }
+
+    // * Configuring command interfaces internal variables
+    for (const auto &cmd_if : joint_info.command_interfaces)
+    {
+      RCLCPP_INFO(node_->get_logger(), "Registering Command Interface '%s' for joint '%s'",
+                  cmd_if.name.c_str(), joint_info.name.c_str());
+      if (cmd_if.name.find(hardware_interface::HW_IF_POSITION) != std::string::npos)
+      {
+        impl_->command_interfaces_.emplace_back(joint_info.name, cmd_if.name,
+                                                &last_joint.position_cmd);
+        last_joint.control_type = hardware_interface::HW_IF_POSITION;
+        if (!std::isnan(initial_position))
+        {
+          last_joint.position_cmd      = initial_position;
+          impl_->data_->ctrl[joint_id] = initial_position;
+        }
+      }
+      if (cmd_if.name.find(hardware_interface::HW_IF_VELOCITY) != std::string::npos)
+      {
+        impl_->command_interfaces_.emplace_back(joint_info.name, cmd_if.name,
+                                                &last_joint.velocity_cmd);
+        last_joint.control_type = hardware_interface::HW_IF_VELOCITY;
+
+        if (!std::isnan(initial_velocity))
+        {
+          last_joint.velocity_cmd      = initial_velocity;
+          impl_->data_->ctrl[joint_id] = initial_velocity;
+        }
+      }
+      if (cmd_if.name.find(hardware_interface::HW_IF_EFFORT) != std::string::npos)
+      {
+        impl_->command_interfaces_.emplace_back(joint_info.name, cmd_if.name,
+                                                &last_joint.effort_cmd);
+        last_joint.control_type = hardware_interface::HW_IF_EFFORT;
+        if (!std::isnan(initial_effort))
+        {
+          last_joint.effort_cmd        = initial_effort;
+          impl_->data_->ctrl[joint_id] = initial_effort;
+        }
+      }
+    }
+
+    RCLCPP_INFO(node_->get_logger(), "Registered joint '%s' id %d\n", joint_info.name.c_str(),
+                joint_id);
   }
 }
 
@@ -149,24 +295,85 @@ CallbackReturn MujocoSystem::on_init(const HardwareInfo &hardware_info)
 std::vector<StateInterface> MujocoSystem::export_state_interfaces()
 {
   // Export state interfaces
-  return std::move(this->impl_->state_interfaces_);
+  return std::move(impl_->state_interfaces_);
 }
 
 std::vector<CommandInterface> MujocoSystem::export_command_interfaces()
 {
   // Export command interfaces
-  return std::move(this->impl_->command_interfaces_);
+  return std::move(impl_->command_interfaces_);
 }
 
 return_type MujocoSystem::read(const rclcpp::Time &time, const rclcpp::Duration &period)
 {
-  //
+  for (unsigned int i = 0; i < impl_->joints_.size(); ++i)
+  {
+    auto &joint = impl_->joints_[i];
+    if (joint.is_mimic)
+    {
+      continue;
+    }
+    joint.position = impl_->data_->qpos[joint.id];
+    joint.velocity = impl_->data_->qvel[joint.id];
+    joint.effort   = impl_->data_->qfrc_actuator[joint.id];
+  }
   return return_type::OK;
 }
 
 return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration &period)
 {
-  //
+  // * Update joints command
+  std::stringstream ss;
+  sensor_msgs::msg::JointState joint_state_msg;
+  joint_state_msg.name.resize(impl_->joints_.size());
+  joint_state_msg.position.resize(impl_->joints_.size());
+  for (unsigned int i = 0; i < impl_->joints_.size(); ++i)
+  {
+    auto &joint = impl_->joints_[i];
+    joint_state_msg.name[i] = joint.name;
+    joint_state_msg.position[i] = joint.position_cmd;
+
+    // Find the actuator id corresponding to this joint id
+    if (joint.is_mimic)
+    {
+      // Control mimicking joint follows mimicked joint's position with the multiplier
+      // impl_->data_->qpos[joint.id]
+      //   = joint.multiplier * impl_->data_->qpos[joint.mimicked_joint_id];
+      // impl_->data_->ctrl[joint.actuator_id]
+      //   = joint.multiplier * impl_->data_->qpos[joint.mimicked_joint_id];
+      continue; // logic of mimic joints is already in the MimicJoint plugin
+    }
+    else
+    {
+      // if (joint.control_type == hardware_interface::HW_IF_POSITION)
+      // {
+      //   ss << "Joint '" << joint.name.c_str() << "' pos_cmd: " << joint.position_cmd << std::endl;
+      //   // RCLCPP_INFO(node_->get_logger(), "Joint '%s' pos_cmd: %.4f", joint.name.c_str(),
+      //   // joint.position_cmd);
+      //   impl_->data_->ctrl[joint.actuator_id] = joint.position_cmd;
+      // }
+      // else if (joint.control_type == hardware_interface::HW_IF_VELOCITY)
+      // {
+      //   impl_->data_->ctrl[joint.actuator_id] = joint.velocity_cmd;
+      // }
+      // else if (joint.control_type == hardware_interface::HW_IF_EFFORT)
+      // {
+      //   impl_->data_->ctrl[joint.actuator_id] = joint.effort_cmd;
+      // }
+      // else
+      // {
+      //   RCLCPP_WARN(node_->get_logger(), "Unsupported control type '%s' for joint '%s'",
+      //               joint.control_type.c_str(), joint.name.c_str());
+      //   return return_type::ERROR;
+      // }
+    }
+  }
+  if (impl_->joint_cmd_publisher_)
+  {
+    joint_state_msg.header.stamp = time;
+    impl_->joint_cmd_publisher_->publish(joint_state_msg);
+  }
+  // RCLCPP_INFO(node_->get_logger(), "Joint commands:\n%s", ss.str().c_str());
   return return_type::OK;
 }
 
