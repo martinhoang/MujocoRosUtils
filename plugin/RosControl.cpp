@@ -8,6 +8,7 @@
 constexpr char ATTR_NODE_NAME[]        = "node_name";
 constexpr char ATTR_PUBLISH_RATE[]     = "publish_rate";
 constexpr char ATTR_ROBOT_PARAM_NODE[] = "robot_param_node";
+constexpr char ATTR_CONFIG_FILE[]      = "config_file";
 
 namespace MujocoRosUtils
 {
@@ -23,7 +24,8 @@ void Ros2Control::RegisterPlugin()
   plugin.name = "MujocoRosUtils::Ros2Control";
   plugin.capabilityflags |= mjPLUGIN_PASSIVE;
 
-  std::vector<const char *> attributes = {ATTR_NODE_NAME, ATTR_PUBLISH_RATE};
+  std::vector<const char *> attributes
+    = {ATTR_NODE_NAME, ATTR_PUBLISH_RATE, ATTR_ROBOT_PARAM_NODE, ATTR_CONFIG_FILE};
 
   plugin.nattribute = attributes.size();
   plugin.attributes = attributes.data();
@@ -77,26 +79,23 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
     mju_error("Failed to create hardware interface plugin loader. Error: %s", ex.what());
   }
 
-  // This is only for testing if mujoco_system can be created
-  // std::unique_ptr<mujoco_ros2_control::MujocoSystemInterface> mujoco_system;
-  // try
-  // {
-  //   RCLCPP_INFO(rclcpp::get_logger("RosControl"), "Creating 'MujocoSystem' instance");
-  //   mujoco_system.reset(
-  //     mujoco_system_loader_->createUnmanagedInstance("mujoco_ros2_control/MujocoSystem") /* This
-  //     refers to 'name' of the plugin if available in the plugin XML */);
-  // }
-  // catch (pluginlib::PluginlibException &ex)
-  // {
-  //   mju_error("Failed to test-create 'MujocoSystem' hardware interface instance. Error: %s",
-  //             ex.what());
-  // }
+  // Find the config file
+  const char *config_file_path_char = mj_getPluginConfig(m, plugin_id, ATTR_CONFIG_FILE);
+  std::string config_file_path;
+  if (!config_file_path_char)
+  {
+    config_file_path = "/home/martin/umanoid_ws/src/umanoid/umanoid_simulation/mujoco_sim/config/ros2_controllers.yaml";
+  }
+  else
+  {
+    config_file_path = config_file_path_char;
+  }
 
   std::unique_ptr<Ros2Control> ret;
   // Catch any error in the constructor
   try
   {
-    ret.reset(new Ros2Control(m, d));
+    ret.reset(new Ros2Control(m, d, config_file_path));
   }
   catch (const std::exception &e)
   {
@@ -106,21 +105,15 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   return ret;
 }
 
-Ros2Control::Ros2Control(const mjModel *model, mjData *data)
+Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config_file_path)
     : model_(model)
     , data_(data)
 {
   if (!node_)
   {
-
-    const char *hardcoded_config_file
-      = "/home/martin/umanoid_ws/src/umanoid/umanoid_simulation/gazebo_sim/"
-        "umanoid_sim_gazebo/config/ros2_controllers.yaml";
-
-    // Hard coding for testing for now
     if (!rclcpp::ok())
     {
-      const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, hardcoded_config_file};
+      const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, config_file_path.c_str()};
       int         argc   = sizeof(argv) / sizeof(argv[0]);
       rclcpp::init(argc, argv);
     }
@@ -220,7 +213,7 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
     std::vector<std::string> arguments = {RCL_ROS_ARGS_FLAG};
 
     arguments.push_back(RCL_PARAM_FILE_FLAG);
-    arguments.push_back(hardcoded_config_file);
+    arguments.push_back(config_file_path);
 
     std::vector<const char *> argv;
 
@@ -238,14 +231,14 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data)
 
     if (rcl_return != RCL_RET_OK)
     {
-      RCLCPP_ERROR(node_->get_logger(), "Error parsing config file at %s:\n%s",
-                   hardcoded_config_file, rcl_get_error_string().str);
+      RCLCPP_ERROR(node_->get_logger(), "Error parsing config file at %s:\n%s", config_file_path.c_str(),
+                   rcl_get_error_string().str);
       return;
     }
     if (rcl_arguments_get_param_files_count(&rcl_arguments) < 1)
     {
       RCLCPP_ERROR(node_->get_logger(), "Failed to parse input yaml config file at %s",
-                   hardcoded_config_file);
+                   config_file_path);
       return;
     }
 
@@ -400,12 +393,13 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
 
     if (duration.seconds() > control_period_)
     {
-      // RCLCPP_INFO(node_->get_logger(), "Controller manager update: %.2f seconds since last update.", duration.seconds());
+      // RCLCPP_INFO(node_->get_logger(), "Controller manager update: %.2f seconds since last
+      // update.", duration.seconds());
       controller_manager_->read(now, duration);
       controller_manager_->update(now, duration);
       last_update_ = now;
     }
-    
+
     // Write the data back to the model
     controller_manager_->write(now, duration);
   }

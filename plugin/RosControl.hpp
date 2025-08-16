@@ -21,7 +21,7 @@ public:
 
 public:
   Ros2Control(Ros2Control &&) = default;
-  Ros2Control(const mjModel *model, mjData *data);
+  Ros2Control(const mjModel *model, mjData *data, std::string &config_file_path);
   ~Ros2Control();
 
   void reset(const mjModel *m, int plugin_id);
@@ -38,9 +38,9 @@ protected:
   std::thread                                               executor_thread_;
   bool                                                      stop_executor_thread_ = true;
 
-  double       update_rate_       = 100.0;
-  double       control_period_    = 1.0 / update_rate_;
-  rclcpp::Time last_update_       = rclcpp::Time{(uint64_t)0, RCL_ROS_TIME};
+  double       update_rate_    = 100.0;
+  double       control_period_ = 1.0 / update_rate_;
+  rclcpp::Time last_update_    = rclcpp::Time{(uint64_t)0, RCL_ROS_TIME};
 };
 
 } // namespace MujocoRosUtils
