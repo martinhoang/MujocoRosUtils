@@ -347,6 +347,8 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
     }
     else
     {
+      // For now only allow for 1 single type of controller
+      // Maybe in the future open to two ?  
       if (joint.control_type == hardware_interface::HW_IF_POSITION)
       {
         ss << "Joint '" << joint.name.c_str() << "' pos_cmd: " << joint.position_cmd << std::endl;
@@ -380,7 +382,7 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
   double update_freq = 1 / (time - previous_update_time).seconds();
   previous_update_time = time;
 
-  RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, "Joint commands:\n%s\nUpdate frequency: %.4f", ss.str().c_str(), update_freq);
+  // RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, "Joint commands:\n%s\nUpdate frequency: %.4f", ss.str().c_str(), update_freq);
   return return_type::OK;
 }
 

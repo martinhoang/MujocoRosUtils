@@ -82,13 +82,13 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   // Find the config file
   const char *config_file_path_char = mj_getPluginConfig(m, plugin_id, ATTR_CONFIG_FILE);
   std::string config_file_path;
-  if (!config_file_path_char)
+  if (config_file_path_char && strlen(config_file_path_char) > 0)
   {
-    config_file_path = "/home/martin/umanoid_ws/src/umanoid/umanoid_simulation/mujoco_sim/config/ros2_controllers.yaml";
+    config_file_path = config_file_path_char;
   }
   else
   {
-    config_file_path = config_file_path_char;
+    config_file_path = "/home/martin/umanoid_ws/src/umanoid/umanoid_simulation/mujoco_sim/config/ros2_controllers.yaml";
   }
 
   std::unique_ptr<Ros2Control> ret;
@@ -210,10 +210,17 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
 
     // Get parameters for controller_manager
     auto rcl_context = node_->get_node_base_interface()->get_context()->get_rcl_context();
-    std::vector<std::string> arguments = {RCL_ROS_ARGS_FLAG};
+    std::vector<std::string> arguments;
 
-    arguments.push_back(RCL_PARAM_FILE_FLAG);
-    arguments.push_back(config_file_path);
+    if (!config_file_path.empty())
+    {
+      arguments.push_back(RCL_ROS_ARGS_FLAG);
+      arguments.push_back(RCL_PARAM_FILE_FLAG);
+      arguments.push_back(config_file_path);
+    }
+    else {
+      arguments.push_back(RCL_PARAM_FILE_FLAG);
+    }
 
     std::vector<const char *> argv;
 
@@ -238,7 +245,7 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
     if (rcl_arguments_get_param_files_count(&rcl_arguments) < 1)
     {
       RCLCPP_ERROR(node_->get_logger(), "Failed to parse input yaml config file at %s",
-                   config_file_path);
+                   config_file_path.c_str());
       return;
     }
 
@@ -334,7 +341,7 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
     auto spin             = [this]() {
       while (rclcpp::ok() && !stop_executor_thread_)
       {
-        executor_->spin_once();
+        executor_->spin_once(std::chrono::milliseconds(100));
       }
     };
 
