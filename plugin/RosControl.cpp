@@ -1,6 +1,7 @@
 #include "RosControl.hpp"
 #include "mujoco_utils.hpp"
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <hardware_interface/component_parser.hpp>
 #include <hardware_interface/resource_manager.hpp>
 #include <mujoco/mujoco.h>
@@ -88,7 +89,10 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   }
   else
   {
-    config_file_path = "/home/martin/umanoid_ws/src/umanoid/umanoid_simulation/mujoco_sim/config/ros2_controllers.yaml";
+    std::string umanoid_simulation_mujoco = "umanoid_simulation_mujoco";
+    auto        umanoid_simulation_mujoco_share_directory
+      = ament_index_cpp::get_package_share_directory(umanoid_simulation_mujoco);
+    config_file_path = umanoid_simulation_mujoco_share_directory + "/config/ros2_controllers.yaml";
   }
 
   std::unique_ptr<Ros2Control> ret;
@@ -218,7 +222,8 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
       arguments.push_back(RCL_PARAM_FILE_FLAG);
       arguments.push_back(config_file_path);
     }
-    else {
+    else
+    {
       arguments.push_back(RCL_PARAM_FILE_FLAG);
     }
 
@@ -238,8 +243,8 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
 
     if (rcl_return != RCL_RET_OK)
     {
-      RCLCPP_ERROR(node_->get_logger(), "Error parsing config file at %s:\n%s", config_file_path.c_str(),
-                   rcl_get_error_string().str);
+      RCLCPP_ERROR(node_->get_logger(), "Error parsing config file at %s:\n%s",
+                   config_file_path.c_str(), rcl_get_error_string().str);
       return;
     }
     if (rcl_arguments_get_param_files_count(&rcl_arguments) < 1)
