@@ -387,6 +387,15 @@ Ros2Control::~Ros2Control()
 
 void Ros2Control::reset(const mjModel *m, int plugin_id)
 {
+  if (node_)
+  {
+    RCLCPP_INFO(node_->get_logger(), "Ros2Control plugin reset");
+  }
+  else
+  {
+    print_confirm("Ros2Control plugin reset\n");
+  }
+
   last_update_ = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
   return;
 }

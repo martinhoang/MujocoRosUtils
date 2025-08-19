@@ -13,8 +13,11 @@ struct Joint
   std::size_t actuator_id; // id of the actuator for this joint in the Mujoco model
   std::string name;        // Name of the joint
   double      position;
+  double      initial_position;
   double      velocity;
+  double      initial_velocity;
   double      effort;
+  double      initial_effort;
   double      position_cmd;
   double      velocity_cmd;
   double      effort_cmd;
@@ -47,6 +50,7 @@ public:
   /// \brief Joint States
   std::vector<Joint> joints_;
 
+  /// \brief Joint command publisher
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_cmd_publisher_;
 };
 
@@ -61,8 +65,8 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
   node_ = node;
   impl_ = std::make_unique<MujocoSystemPrivate>(m, d);
 
-  impl_->joint_cmd_publisher_ = node_->create_publisher<sensor_msgs::msg::JointState>(
-      "joint_commands", rclcpp::QoS(10));
+  impl_->joint_cmd_publisher_
+    = node_->create_publisher<sensor_msgs::msg::JointState>("joint_commands", rclcpp::QoS(10));
 
   RCLCPP_INFO(node_->get_logger(), "Initializing MujocoSystem '%s'\n", hardware_info.name.c_str());
 
@@ -80,6 +84,36 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
   return true;
 }
 
+void MujocoSystem::reset(void)
+{
+  // Reset all joint states
+  for (auto &joint : impl_->joints_)
+  {
+    joint.position               = joint.initial_position;
+    joint.position_cmd           = joint.initial_position;
+    joint.velocity               = joint.initial_velocity;
+    joint.velocity_cmd           = joint.initial_velocity;
+    joint.effort                 = joint.initial_effort;
+    joint.effort_cmd             = joint.initial_effort;
+    impl_->data_->qpos[joint.id] = joint.initial_position;
+
+    if (joint.control_type == hardware_interface::HW_IF_POSITION)
+    {
+      impl_->data_->ctrl[joint.id] = joint.initial_position;
+    }
+    else if (joint.control_type == hardware_interface::HW_IF_VELOCITY)
+    {
+      impl_->data_->ctrl[joint.id] = joint.initial_velocity;
+    }
+    else if (joint.control_type == hardware_interface::HW_IF_EFFORT)
+    {
+      impl_->data_->ctrl[joint.id] = joint.initial_effort;
+    }
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "MujocoSystem reset");
+}
+
 void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardware_info,
                                    const mjModel                          *m)
 {
@@ -90,7 +124,7 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
   {
     auto &joint_info = hardware_info.joints[i];
 
-    Joint& last_joint = impl_->joints_[i];
+    Joint &last_joint = impl_->joints_[i];
 
     // Find joint name in the model
     int joint_id = mj_name2id(m, mjOBJ_JOINT, joint_info.name.c_str());
@@ -110,7 +144,7 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
     {
       last_joint.is_mimic          = true;
       last_joint.mimicked_joint_id = mj_name2id(m, mjOBJ_JOINT, mimicked_joint_it->second.c_str());
-      auto param_it               = joint_info.parameters.find("multiplier");
+      auto param_it                = joint_info.parameters.find("multiplier");
       if (param_it != joint_info.parameters.end())
       {
         last_joint.multiplier = std::stod(param_it->second);
@@ -194,6 +228,7 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         initial_position = get_initial_value(state_if);
         if (!std::isnan(initial_position))
         {
+          last_joint.initial_position  = initial_position;
           last_joint.position          = initial_position;
           impl_->data_->qpos[joint_id] = initial_position;
         }
@@ -204,8 +239,9 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         initial_velocity = get_initial_value(state_if);
         if (!std::isnan(initial_velocity))
         {
+          last_joint.initial_velocity  = initial_velocity;
           last_joint.velocity          = initial_velocity;
-          impl_->data_->qpos[joint_id] = initial_velocity;
+          impl_->data_->qvel[joint_id] = initial_velocity;
         }
       }
       else if (state_if.name == hardware_interface::HW_IF_EFFORT)
@@ -214,6 +250,7 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         initial_effort = get_initial_value(state_if);
         if (!std::isnan(initial_effort))
         {
+          last_joint.initial_effort             = initial_effort;
           last_joint.effort                     = initial_effort;
           impl_->data_->qfrc_actuator[joint_id] = initial_effort;
         }
@@ -324,15 +361,22 @@ return_type MujocoSystem::read(const rclcpp::Time &time, const rclcpp::Duration 
 
 return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration &period)
 {
+
+  // * If sim is reset
+  if (period.seconds() <= 0)
+  {
+    reset();
+  }
+
   // * Update joints command
-  std::stringstream ss;
+  std::stringstream            ss;
   sensor_msgs::msg::JointState joint_state_msg;
   joint_state_msg.name.resize(impl_->joints_.size());
   joint_state_msg.position.resize(impl_->joints_.size());
   for (unsigned int i = 0; i < impl_->joints_.size(); ++i)
   {
-    auto &joint = impl_->joints_[i];
-    joint_state_msg.name[i] = joint.name;
+    auto &joint                 = impl_->joints_[i];
+    joint_state_msg.name[i]     = joint.name;
     joint_state_msg.position[i] = joint.position_cmd;
 
     // Find the actuator id corresponding to this joint id
@@ -348,7 +392,7 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
     else
     {
       // For now only allow for 1 single type of controller
-      // Maybe in the future open to two ?  
+      // Maybe in the future open to two ?
       if (joint.control_type == hardware_interface::HW_IF_POSITION)
       {
         ss << "Joint '" << joint.name.c_str() << "' pos_cmd: " << joint.position_cmd << std::endl;
@@ -372,6 +416,7 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
       }
     }
   }
+
   if (impl_->joint_cmd_publisher_)
   {
     joint_state_msg.header.stamp = time;
@@ -379,10 +424,11 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
   }
   static rclcpp::Time previous_update_time{(uint64_t)0, RCL_ROS_TIME};
 
-  double update_freq = 1 / (time - previous_update_time).seconds();
+  double update_freq   = 1 / (time - previous_update_time).seconds();
   previous_update_time = time;
 
-  // RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, "Joint commands:\n%s\nUpdate frequency: %.4f", ss.str().c_str(), update_freq);
+  // RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, "Joint
+  // commands:\n%s\nUpdate frequency: %.4f", ss.str().c_str(), update_freq);
   return return_type::OK;
 }
 

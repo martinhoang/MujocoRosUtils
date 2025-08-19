@@ -36,6 +36,12 @@ public:
   return_type read(const rclcpp::Time &time, const rclcpp::Duration &period) override;
   return_type write(const rclcpp::Time &time, const rclcpp::Duration &period) override;
 
+  /**
+   * @brief Called when the world is reset and reset this system as well
+   * 
+   */
+  void reset(void);
+
 protected:
   void register_joints(const hardware_interface::HardwareInfo &hardware_info, const mjModel *m);
   std::unique_ptr<MujocoSystemPrivate> impl_;
