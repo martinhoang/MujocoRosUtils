@@ -87,28 +87,51 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
 void MujocoSystem::reset(void)
 {
   // Reset all joint states
+  std::stringstream ss;
   for (auto &joint : impl_->joints_)
   {
-    joint.position               = joint.initial_position;
-    joint.position_cmd           = joint.initial_position;
-    joint.velocity               = joint.initial_velocity;
-    joint.velocity_cmd           = joint.initial_velocity;
-    joint.effort                 = joint.initial_effort;
-    joint.effort_cmd             = joint.initial_effort;
-    impl_->data_->qpos[joint.id] = joint.initial_position;
+    const char *joint_name_char = mj_id2name(impl_->model_, mjOBJ_JOINT, joint.id);
+
+    std::string joint_name;
+    if (joint_name_char && strlen(joint_name_char) > 0)
+    {
+      joint_name = joint_name_char;
+    }
+    else
+    {
+      joint_name = "unknown_joint_" + std::to_string(joint.id);
+    }
+    ss << "Joint '" << joint_name << "' reset to: " << joint.initial_position << std::endl;
+    joint.position                            = joint.initial_position;
+    joint.position_cmd                        = joint.initial_position;
+    joint.velocity                            = joint.initial_velocity;
+    joint.velocity_cmd                        = joint.initial_velocity;
+    joint.effort                              = joint.initial_effort;
+    joint.effort_cmd                          = joint.initial_effort;
+    int joint_data_id_in_qpos                 = impl_->model_->jnt_qposadr[joint.id];
+    impl_->data_->qpos[joint_data_id_in_qpos] = joint.initial_position;
 
     if (joint.control_type == hardware_interface::HW_IF_POSITION)
     {
-      impl_->data_->ctrl[joint.id] = joint.initial_position;
+      impl_->data_->ctrl[joint.actuator_id] = joint.initial_position;
     }
     else if (joint.control_type == hardware_interface::HW_IF_VELOCITY)
     {
-      impl_->data_->ctrl[joint.id] = joint.initial_velocity;
+      impl_->data_->ctrl[joint.actuator_id] = joint.initial_velocity;
     }
     else if (joint.control_type == hardware_interface::HW_IF_EFFORT)
     {
-      impl_->data_->ctrl[joint.id] = joint.initial_effort;
+      impl_->data_->ctrl[joint.actuator_id] = joint.initial_effort;
     }
+  }
+
+  if (ss.str().length() > 0)
+  {
+    RCLCPP_INFO(node_->get_logger(), "%s", ss.str().c_str());
+  }
+  else
+  {
+    RCLCPP_INFO(node_->get_logger(), "No joints to reset");
   }
 
   RCLCPP_INFO(node_->get_logger(), "MujocoSystem reset");
@@ -168,8 +191,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
       // If the actuator is associated with this joint
       if (m->actuator_trnid[2 * idx] == joint_id)
       {
-        RCLCPP_INFO(node_->get_logger(), "Actuator %d is associated with joint '%s'", idx,
-                    last_joint.name.c_str());
+        RCLCPP_INFO(node_->get_logger(), "Actuator %d is associated with joint id %ld - '%s'", idx,
+                    last_joint.id, last_joint.name.c_str());
         int gain_type = m->actuator_gaintype[idx];
         int bias_type = m->actuator_biastype[idx];
 
@@ -186,7 +209,7 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
 
     if (last_joint.is_mimic)
     {
-      RCLCPP_INFO(node_->get_logger(), "Registered mimic joint '%s' id %d", joint_info.name.c_str(),
+      RCLCPP_INFO(node_->get_logger(), "Registered mimic joint '%s' id %d\n", joint_info.name.c_str(),
                   joint_id);
       continue;
     }
@@ -228,9 +251,10 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         initial_position = get_initial_value(state_if);
         if (!std::isnan(initial_position))
         {
-          last_joint.initial_position  = initial_position;
-          last_joint.position          = initial_position;
-          impl_->data_->qpos[joint_id] = initial_position;
+          last_joint.initial_position               = initial_position;
+          last_joint.position                       = initial_position;
+          int joint_data_id_in_qpos                 = impl_->model_->jnt_qposadr[joint_id];
+          impl_->data_->qpos[joint_data_id_in_qpos] = initial_position;
         }
       }
       else if (state_if.name == hardware_interface::HW_IF_VELOCITY)
@@ -239,9 +263,10 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         initial_velocity = get_initial_value(state_if);
         if (!std::isnan(initial_velocity))
         {
-          last_joint.initial_velocity  = initial_velocity;
-          last_joint.velocity          = initial_velocity;
-          impl_->data_->qvel[joint_id] = initial_velocity;
+          last_joint.initial_velocity               = initial_velocity;
+          last_joint.velocity                       = initial_velocity;
+          int joint_data_id_in_qvel                 = impl_->model_->jnt_dofadr[joint_id];
+          impl_->data_->qvel[joint_data_id_in_qvel] = initial_velocity;
         }
       }
       else if (state_if.name == hardware_interface::HW_IF_EFFORT)
@@ -250,9 +275,10 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         initial_effort = get_initial_value(state_if);
         if (!std::isnan(initial_effort))
         {
-          last_joint.initial_effort             = initial_effort;
-          last_joint.effort                     = initial_effort;
-          impl_->data_->qfrc_actuator[joint_id] = initial_effort;
+          last_joint.initial_effort                         = initial_effort;
+          last_joint.effort                                 = initial_effort;
+          int joint_data_id_in_qvel                         = impl_->model_->jnt_dofadr[joint_id];
+          impl_->data_->qfrc_applied[joint_data_id_in_qvel] = initial_effort;
         }
       }
     }
@@ -269,8 +295,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         last_joint.control_type = hardware_interface::HW_IF_POSITION;
         if (!std::isnan(initial_position))
         {
-          last_joint.position_cmd      = initial_position;
-          impl_->data_->ctrl[joint_id] = initial_position;
+          last_joint.position_cmd                    = initial_position;
+          impl_->data_->ctrl[last_joint.actuator_id] = initial_position;
         }
       }
       if (cmd_if.name.find(hardware_interface::HW_IF_VELOCITY) != std::string::npos)
@@ -281,8 +307,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
 
         if (!std::isnan(initial_velocity))
         {
-          last_joint.velocity_cmd      = initial_velocity;
-          impl_->data_->ctrl[joint_id] = initial_velocity;
+          last_joint.velocity_cmd                    = initial_velocity;
+          impl_->data_->ctrl[last_joint.actuator_id] = initial_velocity;
         }
       }
       if (cmd_if.name.find(hardware_interface::HW_IF_EFFORT) != std::string::npos)
@@ -292,8 +318,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         last_joint.control_type = hardware_interface::HW_IF_EFFORT;
         if (!std::isnan(initial_effort))
         {
-          last_joint.effort_cmd        = initial_effort;
-          impl_->data_->ctrl[joint_id] = initial_effort;
+          last_joint.effort_cmd                      = initial_effort;
+          impl_->data_->ctrl[last_joint.actuator_id] = initial_effort;
         }
       }
     }
@@ -352,9 +378,11 @@ return_type MujocoSystem::read(const rclcpp::Time &time, const rclcpp::Duration 
     {
       continue;
     }
-    joint.position = impl_->data_->qpos[joint.id];
-    joint.velocity = impl_->data_->qvel[joint.id];
-    joint.effort   = impl_->data_->qfrc_actuator[joint.id];
+    int joint_data_id_in_qpos = impl_->model_->jnt_qposadr[joint.id];
+    joint.position            = impl_->data_->qpos[joint_data_id_in_qpos];
+    int joint_data_id_in_qvel = impl_->model_->jnt_dofadr[joint.id];
+    joint.velocity            = impl_->data_->qvel[joint_data_id_in_qvel];
+    joint.effort              = impl_->data_->qfrc_applied[joint_data_id_in_qvel];
   }
   return return_type::OK;
 }

@@ -164,7 +164,9 @@ void MimicJoint::compute(const mjModel *m, mjData *d, int plugin_id)
 {
   // Compute the joint state
   // d->ctrl[slave_act_id_] = d->qpos[master_joint_id_] * gear_;
-  d->qpos[slave_joint_id_] = d->qpos[master_joint_id_] * gear_;
+  int joint_data_id_in_qpos = m->jnt_qposadr[slave_joint_id_];
+  int master_joint_data_id_in_qpos = m->jnt_qposadr[master_joint_id_];
+  d->qpos[joint_data_id_in_qpos] = d->qpos[master_joint_data_id_in_qpos] * gear_;
 }
 
 } // namespace MujocoRosUtils

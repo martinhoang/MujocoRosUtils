@@ -347,7 +347,8 @@ void ActuatorCommand::compute(const mjModel *, // m
       for(size_t i = 0; i < actuators_.size(); ++i)
       {
         int joint_id = model_->actuator_trnid[2 * actuators_[i]];
-        joint_state_msg.position[i] = std::isnan(data_->qpos[joint_id]) ? 0.0 : data_->qpos[joint_id];
+        int qpos_id = model_->jnt_qposadr[joint_id];
+        joint_state_msg.position[i] = std::isnan(data_->qpos[qpos_id]) ? 0.0 : data_->qpos[qpos_id];
       }
 
       joint_state_pub_->publish(joint_state_msg);
