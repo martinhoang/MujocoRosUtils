@@ -237,6 +237,9 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   mjv_makeScene(m, &scene_, 1000);
   mjr_makeContext(m, &context_, mjFONTSCALE_100);
 
+  // Need to resize off-screen buffers
+  mjr_resizeOffscreen(viewport_.width, viewport_.height, &context_);
+
   // Init camera
   camera_.type       = mjCAMERA_FIXED;
   camera_.fixedcamid = camera_id_;
@@ -260,7 +263,6 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   depth_buffer_.reset(new float[width * height]);
   color_buffer_flipped_.reset(new unsigned char[3 * width * height]);
   depth_buffer_flipped_.reset(new float[width * height]);
-
 
   if (!color_buffer_ || !depth_buffer_ || !color_buffer_flipped_ || !depth_buffer_flipped_)
   {
@@ -351,7 +353,6 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   color_msg.data.resize(sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
   std::memcpy(&color_msg.data[0], color_buffer_flipped_.get(),
               sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
-  color_pub_->publish(color_msg);
 
   sensor_msgs::msg::Image depth_msg;
   depth_msg.header.stamp    = stamp_now;
@@ -364,7 +365,6 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   depth_msg.data.resize(sizeof(float) * viewport_.width * viewport_.height);
   std::memcpy(&depth_msg.data[0], depth_buffer_flipped_.get(),
               sizeof(float) * viewport_.width * viewport_.height);
-  depth_pub_->publish(depth_msg);
 
   sensor_msgs::msg::CameraInfo info_msg;
   info_msg.header.stamp     = stamp_now;
@@ -383,6 +383,10 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   info_msg.k[4] = info_msg.p[5] = focal_scaling;
   info_msg.k[5] = info_msg.p[6] = static_cast<double>(viewport_.height) / 2.0;
   info_msg.k[8] = info_msg.p[10] = 1.0;
+
+  // Start publishing everything at once
+  color_pub_->publish(color_msg);
+  depth_pub_->publish(depth_msg);
   info_pub_->publish(info_msg);
 }
 
