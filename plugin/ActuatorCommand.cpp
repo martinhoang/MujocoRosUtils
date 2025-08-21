@@ -191,7 +191,7 @@ std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjDa
   }
   else
   {
-    print_warning("No publish_rate specified in plugin config, using default value of %d.\n", publish_rate);
+    print_warning("[ActuatorCommand] No publish_rate specified in plugin config, using default value of %.2f.\n", publish_rate);
   }
 
   return std::unique_ptr<ActuatorCommand>(

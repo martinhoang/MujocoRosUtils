@@ -92,10 +92,10 @@ protected:
 
   //! Data buffer
   //! @{
-  unsigned char * color_buffer_;
-  float * depth_buffer_;
-  unsigned char * color_buffer_flipped_;
-  float * depth_buffer_flipped_;
+  std::unique_ptr<unsigned char[]> color_buffer_;
+  std::unique_ptr<float[]> depth_buffer_;
+  std::unique_ptr<unsigned char[]> color_buffer_flipped_;
+  std::unique_ptr<float[]> depth_buffer_flipped_;
   //! @}
 
   //! Variables for visualization and rendering in MuJoCo

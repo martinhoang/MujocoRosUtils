@@ -8,6 +8,14 @@
 namespace MujocoRosUtils
 {
 
+constexpr char ATTR_FRAME_ID[]         = "frame_id";
+constexpr char ATTR_COLOR_TOPIC_NAME[] = "color_topic_name";
+constexpr char ATTR_DEPTH_TOPIC_NAME[] = "depth_topic_name";
+constexpr char ATTR_INFO_TOPIC_NAME[]  = "info_topic_name";
+constexpr char ATTR_HEIGHT[]           = "height";
+constexpr char ATTR_WIDTH[]            = "width";
+constexpr char ATTR_PUBLISH_RATE[]     = "publish_rate";
+
 void ImagePublisher::RegisterPlugin()
 {
   mjpPlugin plugin;
@@ -16,9 +24,9 @@ void ImagePublisher::RegisterPlugin()
   plugin.name = "MujocoRosUtils::ImagePublisher";
   plugin.capabilityflags |= mjPLUGIN_SENSOR;
 
-  const char *attributes[]
-    = {"frame_id", "color_topic_name", "depth_topic_name", "info_topic_name", "height",
-       "width",    "publish_rate"};
+  const char *attributes[] = {ATTR_FRAME_ID,        ATTR_COLOR_TOPIC_NAME, ATTR_DEPTH_TOPIC_NAME,
+                              ATTR_INFO_TOPIC_NAME, ATTR_HEIGHT,           ATTR_WIDTH,
+                              ATTR_PUBLISH_RATE};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
   plugin.attributes = attributes;
@@ -73,7 +81,7 @@ void ImagePublisher::RegisterPlugin()
 ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_id)
 {
   // frame_id
-  const char *frame_id_char = mj_getPluginConfig(m, plugin_id, "frame_id");
+  const char *frame_id_char = mj_getPluginConfig(m, plugin_id, ATTR_FRAME_ID);
   std::string frame_id      = "";
   if (strlen(frame_id_char) > 0)
   {
@@ -81,7 +89,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // color_topic_name
-  const char *color_topic_name_char = mj_getPluginConfig(m, plugin_id, "color_topic_name");
+  const char *color_topic_name_char = mj_getPluginConfig(m, plugin_id, ATTR_COLOR_TOPIC_NAME);
   std::string color_topic_name      = "";
   if (strlen(color_topic_name_char) > 0)
   {
@@ -89,7 +97,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // depth_topic_name
-  const char *depth_topic_name_char = mj_getPluginConfig(m, plugin_id, "depth_topic_name");
+  const char *depth_topic_name_char = mj_getPluginConfig(m, plugin_id, ATTR_DEPTH_TOPIC_NAME);
   std::string depth_topic_name      = "";
   if (strlen(depth_topic_name_char) > 0)
   {
@@ -97,7 +105,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // info_topic_name
-  const char *info_topic_name_char = mj_getPluginConfig(m, plugin_id, "info_topic_name");
+  const char *info_topic_name_char = mj_getPluginConfig(m, plugin_id, ATTR_INFO_TOPIC_NAME);
   std::string info_topic_name      = "";
   if (strlen(info_topic_name_char) > 0)
   {
@@ -105,7 +113,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // height
-  const char *height_char = mj_getPluginConfig(m, plugin_id, "height");
+  const char *height_char = mj_getPluginConfig(m, plugin_id, ATTR_HEIGHT);
   int         height      = 240;
   if (strlen(height_char) > 0)
   {
@@ -118,7 +126,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // width
-  const char *width_char = mj_getPluginConfig(m, plugin_id, "width");
+  const char *width_char = mj_getPluginConfig(m, plugin_id, ATTR_WIDTH);
   int         width      = 320;
   if (strlen(width_char) > 0)
   {
@@ -131,7 +139,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // publish_rate
-  const char *publish_rate_char = mj_getPluginConfig(m, plugin_id, "publish_rate");
+  const char *publish_rate_char = mj_getPluginConfig(m, plugin_id, ATTR_PUBLISH_RATE);
   mjtNum      publish_rate      = 30.0;
   if (strlen(publish_rate_char) > 0)
   {
@@ -243,10 +251,21 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   // Allocate buffer
   size_t color_buffer_size = sizeof(unsigned char) * 3 * viewport_.width * viewport_.height;
   size_t depth_buffer_size = sizeof(float) * viewport_.width * viewport_.height;
-  color_buffer_            = static_cast<unsigned char *>(std::malloc(color_buffer_size));
-  depth_buffer_            = static_cast<float *>(std::malloc(depth_buffer_size));
-  color_buffer_flipped_    = static_cast<unsigned char *>(std::malloc(color_buffer_size));
-  depth_buffer_flipped_    = static_cast<float *>(std::malloc(depth_buffer_size));
+  // color_buffer_            = static_cast<unsigned char *>(std::malloc(color_buffer_size));
+  // depth_buffer_            = static_cast<float *>(std::malloc(depth_buffer_size));
+  // color_buffer_flipped_    = static_cast<unsigned char *>(std::malloc(color_buffer_size));
+  // depth_buffer_flipped_    = static_cast<float *>(std::malloc(depth_buffer_size));
+
+  color_buffer_.reset(new unsigned char[3 * width * height]);
+  depth_buffer_.reset(new float[width * height]);
+  color_buffer_flipped_.reset(new unsigned char[3 * width * height]);
+  depth_buffer_flipped_.reset(new float[width * height]);
+
+
+  if (!color_buffer_ || !depth_buffer_ || !color_buffer_flipped_ || !depth_buffer_flipped_)
+  {
+    mju_error("[ImagePublisher] Could not allocate image buffers.");
+  }
 
   // Init ROS
   int    argc = 0;
@@ -294,7 +313,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   mjr_render(viewport_, &scene_, &context_);
 
   // Read rgb and depth pixels
-  mjr_readPixels(color_buffer_, depth_buffer_, viewport_, &context_);
+  mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
 
   // Convert raw depth to distance and flip images
   float near = static_cast<float>(m->vis.map.znear * m->stat.extent);
@@ -330,7 +349,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   color_msg.is_bigendian    = 0;
   color_msg.step = static_cast<unsigned int>(sizeof(unsigned char) * 3 * viewport_.width);
   color_msg.data.resize(sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
-  std::memcpy(&color_msg.data[0], color_buffer_flipped_,
+  std::memcpy(&color_msg.data[0], color_buffer_flipped_.get(),
               sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
   color_pub_->publish(color_msg);
 
@@ -343,7 +362,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   depth_msg.is_bigendian    = 0;
   depth_msg.step            = static_cast<unsigned int>(sizeof(float) * viewport_.width);
   depth_msg.data.resize(sizeof(float) * viewport_.width * viewport_.height);
-  std::memcpy(&depth_msg.data[0], depth_buffer_flipped_,
+  std::memcpy(&depth_msg.data[0], depth_buffer_flipped_.get(),
               sizeof(float) * viewport_.width * viewport_.height);
   depth_pub_->publish(depth_msg);
 
@@ -369,11 +388,6 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 
 void ImagePublisher::free()
 {
-  std::free(color_buffer_);
-  std::free(depth_buffer_);
-  std::free(color_buffer_flipped_);
-  std::free(depth_buffer_flipped_);
-
   mjr_freeContext(&context_);
   mjv_freeScene(&scene_);
 

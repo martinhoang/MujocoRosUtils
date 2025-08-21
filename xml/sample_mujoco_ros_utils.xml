@@ -64,7 +64,6 @@
     <position name="camera_tilt" joint="camera_tilt"/>
 
     <plugin plugin="MujocoRosUtils::ActuatorCommand" joint="camera_pan">
-      <config key="actuator_name" value="camera_pan"/>
       <config key="topic_name" value="/camera_pan"/>
     </plugin>
   </actuator>
@@ -90,8 +89,8 @@
       <config key="color_topic_name" value="/image/color"/>
       <config key="depth_topic_name" value="/image/depth"/>
       <config key="info_topic_name" value="/image/camera_info"/>
-      <config key="height" value="240"/>
-      <config key="width" value="320"/>
+      <config key="height" value="800"/>
+      <config key="width" value="1280"/>
       <config key="publish_rate" value="30"/>
     </plugin>
 
