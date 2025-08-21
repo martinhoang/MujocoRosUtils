@@ -127,14 +127,14 @@ void MujocoSystem::reset(void)
 
   if (ss.str().length() > 0)
   {
-    RCLCPP_INFO(node_->get_logger(), "%s", ss.str().c_str());
+    // RCLCPP_INFO(node_->get_logger(), "%s", ss.str().c_str());
   }
   else
   {
-    RCLCPP_INFO(node_->get_logger(), "No joints to reset");
+    RCLCPP_WARN(node_->get_logger(), "No joints to reset");
   }
 
-  RCLCPP_INFO(node_->get_logger(), "MujocoSystem reset");
+  RCLCPP_DEBUG(node_->get_logger(), "MujocoSystem reset");
 }
 
 void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardware_info,

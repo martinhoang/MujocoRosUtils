@@ -389,7 +389,7 @@ void Ros2Control::reset(const mjModel *m, int plugin_id)
 {
   if (node_)
   {
-    RCLCPP_INFO(node_->get_logger(), "Ros2Control plugin reset");
+    RCLCPP_DEBUG(node_->get_logger(), "Ros2Control plugin reset");
   }
   else
   {
