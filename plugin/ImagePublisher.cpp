@@ -1,20 +1,24 @@
 #include "ImagePublisher.h"
-
-#include <mujoco/mujoco.h>
+#include "depth_conversions.hpp"
 
 #include <cstdlib>
+#include <cv_bridge/cv_bridge.h>
 #include <iostream>
+#include <mujoco/mujoco.h>
+#include <sensor_msgs/image_encodings.hpp>
 
 namespace MujocoRosUtils
 {
 
-constexpr char ATTR_FRAME_ID[]         = "frame_id";
-constexpr char ATTR_COLOR_TOPIC_NAME[] = "color_topic_name";
-constexpr char ATTR_DEPTH_TOPIC_NAME[] = "depth_topic_name";
-constexpr char ATTR_INFO_TOPIC_NAME[]  = "info_topic_name";
-constexpr char ATTR_HEIGHT[]           = "height";
-constexpr char ATTR_WIDTH[]            = "width";
-constexpr char ATTR_PUBLISH_RATE[]     = "publish_rate";
+constexpr char ATTR_FRAME_ID[]               = "frame_id";
+constexpr char ATTR_COLOR_TOPIC_NAME[]       = "color_topic_name";
+constexpr char ATTR_DEPTH_TOPIC_NAME[]       = "depth_topic_name";
+constexpr char ATTR_INFO_TOPIC_NAME[]        = "info_topic_name";
+constexpr char ATTR_POINT_CLOUD_TOPIC_NAME[] = "point_cloud_topic_name";
+constexpr char ATTR_ROTATE_POINT_CLOUD[] = "rotate_point_cloud";
+constexpr char ATTR_HEIGHT[]                 = "height";
+constexpr char ATTR_WIDTH[]                  = "width";
+constexpr char ATTR_PUBLISH_RATE[]           = "publish_rate";
 
 void ImagePublisher::RegisterPlugin()
 {
@@ -24,8 +28,14 @@ void ImagePublisher::RegisterPlugin()
   plugin.name = "MujocoRosUtils::ImagePublisher";
   plugin.capabilityflags |= mjPLUGIN_SENSOR;
 
-  const char *attributes[] = {ATTR_FRAME_ID,        ATTR_COLOR_TOPIC_NAME, ATTR_DEPTH_TOPIC_NAME,
-                              ATTR_INFO_TOPIC_NAME, ATTR_HEIGHT,           ATTR_WIDTH,
+  const char *attributes[] = {ATTR_FRAME_ID,
+                              ATTR_COLOR_TOPIC_NAME,
+                              ATTR_DEPTH_TOPIC_NAME,
+                              ATTR_INFO_TOPIC_NAME,
+                              ATTR_POINT_CLOUD_TOPIC_NAME,
+                              ATTR_ROTATE_POINT_CLOUD,
+                              ATTR_HEIGHT,
+                              ATTR_WIDTH,
                               ATTR_PUBLISH_RATE};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
@@ -112,6 +122,26 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     info_topic_name = std::string(info_topic_name_char);
   }
 
+  // point_cloud_topic_name
+  const char *point_cloud_topic_name_char
+    = mj_getPluginConfig(m, plugin_id, ATTR_POINT_CLOUD_TOPIC_NAME);
+  std::string point_cloud_topic_name = "";
+  if (strlen(point_cloud_topic_name_char) > 0)
+  {
+    point_cloud_topic_name = std::string(point_cloud_topic_name_char);
+  }
+
+  // rotate_point_cloud
+  const char *rotate_point_cloud_char = mj_getPluginConfig(m, plugin_id, ATTR_ROTATE_POINT_CLOUD);
+  bool rotate_point_cloud = true;
+  if (strlen(rotate_point_cloud_char) > 0)
+  {
+    if (strcmp(rotate_point_cloud_char, "false") == 0)
+    {
+      rotate_point_cloud = false;
+    }
+  }
+
   // height
   const char *height_char = mj_getPluginConfig(m, plugin_id, ATTR_HEIGHT);
   int         height      = 240;
@@ -174,18 +204,19 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   std::cout << "[ImagePublisher] Create." << std::endl;
 
   return new ImagePublisher(m, d, sensor_id, frame_id, color_topic_name, depth_topic_name,
-                            info_topic_name, height, width, publish_rate);
+                            info_topic_name, point_cloud_topic_name, rotate_point_cloud, height, width, publish_rate);
 }
 
 ImagePublisher::ImagePublisher(const mjModel *m,
                                mjData *, // d
                                int sensor_id, const std::string &frame_id,
                                std::string color_topic_name, std::string depth_topic_name,
-                               std::string info_topic_name, int height, int width,
-                               mjtNum publish_rate)
+                               std::string info_topic_name, std::string point_cloud_topic_name,
+                               bool rotate_point_cloud, int height, int width, mjtNum publish_rate)
     : sensor_id_(sensor_id)
     , camera_id_(m->sensor_objid[sensor_id])
     , frame_id_(frame_id)
+    , rotate_point_cloud_(rotate_point_cloud)
     , publish_skip_(std::max(static_cast<int>(1.0 / (publish_rate * m->opt.timestep)), 1))
     , viewport_({0, 0, width, height})
 {
@@ -205,6 +236,10 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   if (info_topic_name.empty())
   {
     info_topic_name = "mujoco/" + camera_name + "/camera_info";
+  }
+  if (point_cloud_topic_name.empty())
+  {
+    point_cloud_topic_name = "mujoco/" + camera_name + "/point_cloud";
   }
 
   // Init OpenGL
@@ -254,10 +289,6 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   // Allocate buffer
   size_t color_buffer_size = sizeof(unsigned char) * 3 * viewport_.width * viewport_.height;
   size_t depth_buffer_size = sizeof(float) * viewport_.width * viewport_.height;
-  // color_buffer_            = static_cast<unsigned char *>(std::malloc(color_buffer_size));
-  // depth_buffer_            = static_cast<float *>(std::malloc(depth_buffer_size));
-  // color_buffer_flipped_    = static_cast<unsigned char *>(std::malloc(color_buffer_size));
-  // depth_buffer_flipped_    = static_cast<float *>(std::malloc(depth_buffer_size));
 
   color_buffer_.reset(new unsigned char[3 * width * height]);
   depth_buffer_.reset(new float[width * height]);
@@ -278,9 +309,10 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   }
   rclcpp::NodeOptions node_options;
 
-  node_options.parameter_overrides({
-    {"use_sim_time", true}, // Force use simulation time
-  });
+  node_options.parameter_overrides({{"use_sim_time", true}, // Force use simulation time
+                                    {"range_max", 0.0},
+                                    {"use_quiet_nan", true}});
+  node_options.automatically_declare_parameters_from_overrides(true);
 
   std::string node_name = mj_id2name(m, mjOBJ_SENSOR, sensor_id);
 
@@ -288,6 +320,11 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   color_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(color_topic_name, 1);
   depth_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(depth_topic_name, 1);
   info_pub_  = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(info_topic_name, 1);
+  point_cloud_pub_
+    = nh_->create_publisher<sensor_msgs::msg::PointCloud2>(point_cloud_topic_name, 1);
+
+  range_max_     = nh_->get_parameter_or("range_max", 0.0);
+  use_quiet_nan_ = nh_->get_parameter_or("use_quiet_nan", true);
 }
 
 void ImagePublisher::reset(const mjModel *, // m
@@ -385,9 +422,50 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   info_msg.k[8] = info_msg.p[10] = 1.0;
 
   // Start publishing everything at once
+  info_pub_->publish(info_msg);
   color_pub_->publish(color_msg);
   depth_pub_->publish(depth_msg);
-  info_pub_->publish(info_msg);
+
+  // Publish point cloud
+  image_geometry::PinholeCameraModel model;
+  model.fromCameraInfo(info_msg);
+  sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
+    = std::make_shared<sensor_msgs::msg::PointCloud2>();
+  cloud_msg->header       = depth_msg.header;
+  cloud_msg->height       = depth_msg.height;
+  cloud_msg->width        = depth_msg.width;
+  cloud_msg->is_dense     = false;
+  cloud_msg->is_bigendian = false;
+  sensor_msgs::PointCloud2Modifier pcd_modifier(*cloud_msg);
+  pcd_modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
+
+  sensor_msgs::msg::Image::ConstSharedPtr color_msg_ptr(&color_msg,
+                                                        [](const sensor_msgs::msg::Image *) {
+                                                        });
+  cv_bridge::CvImageConstPtr              cv_ptr
+    = cv_bridge::toCvCopy(color_msg_ptr, sensor_msgs::image_encodings::RGB8);
+
+  sensor_msgs::msg::Image::ConstSharedPtr depth_msg_ptr(&depth_msg,
+                                                        [](const sensor_msgs::msg::Image *) {
+                                                        });
+  if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_16UC1)
+  {
+    depthimage_to_pointcloud2::convert<uint16_t>(depth_msg_ptr, cloud_msg, model, range_max_,
+                                                 use_quiet_nan_, rotate_point_cloud_, cv_ptr);
+  }
+  else if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_32FC1)
+  {
+    depthimage_to_pointcloud2::convert<float>(depth_msg_ptr, cloud_msg, model, range_max_,
+                                              use_quiet_nan_, rotate_point_cloud_, cv_ptr);
+  }
+  else
+  {
+    RCLCPP_WARN(nh_->get_logger(), "Depth image has unsupported encoding [%s]",
+                depth_msg.encoding.c_str());
+    return;
+  }
+
+  point_cloud_pub_->publish(*cloud_msg);
 }
 
 void ImagePublisher::free()

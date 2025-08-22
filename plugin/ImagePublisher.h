@@ -1,8 +1,10 @@
 #pragma once
 
+#include <image_geometry/pinhole_camera_model.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include <mujoco/mjdata.h>
 #include <mujoco/mjmodel.h>
@@ -11,6 +13,8 @@
 #include <mujoco/mjvisualize.h>
 
 #include <GLFW/glfw3.h>
+#include <opencv2/core/core.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <string>
 
 namespace MujocoRosUtils
@@ -28,7 +32,7 @@ public:
       \param d data
       \param plugin_id plugin ID
    */
-  static ImagePublisher * Create(const mjModel * m, mjData * d, int plugin_id);
+  static ImagePublisher *Create(const mjModel *m, mjData *d, int plugin_id);
 
 public:
   /** \brief Copy constructor. */
@@ -38,14 +42,22 @@ public:
       \param m model
       \param plugin_id plugin ID
    */
-  void reset(const mjModel * m, int plugin_id);
+  void reset(const mjModel *m, int plugin_id);
 
   /** \brief Compute.
       \param m model
       \param d data
       \param plugin_id plugin ID
    */
-  void compute(const mjModel * m, mjData * d, int plugin_id);
+  void compute(const mjModel *m, mjData *d, int plugin_id);
+
+  /** \brief  Convert depth image to PointCloud2
+   *
+   */
+  static void convert(const sensor_msgs::msg::Image::ConstSharedPtr &depth_msg,
+                      const sensor_msgs::msg::Image::ConstSharedPtr &rgb_msg,
+                      sensor_msgs::msg::PointCloud2::SharedPtr      &cloud_msg,
+                      const image_geometry::PinholeCameraModel      &model);
 
   /** \brief Free buffer. */
   void free();
@@ -63,16 +75,10 @@ protected:
       \param width image width
       \param publish_rate publish rate
   */
-  ImagePublisher(const mjModel * m,
-                 mjData * d,
-                 int sensor_id,
-                 const std::string & frame_id,
-                 std::string color_topic_name,
-                 std::string depth_topic_name,
-                 std::string info_topic_name,
-                 int height,
-                 int width,
-                 mjtNum publish_rate);
+  ImagePublisher(const mjModel *m, mjData *d, int sensor_id, const std::string &frame_id,
+                 std::string color_topic_name, std::string depth_topic_name,
+                 std::string info_topic_name, std::string point_cloud_topic_name,
+                 bool rotate_point_cloud, int height, int width, mjtNum publish_rate);
 
 protected:
   //! Sensor ID
@@ -90,30 +96,40 @@ protected:
   //! Iteration count of simulation
   int sim_cnt_ = 0;
 
+  //! Whether to rotate the point cloud to match ROS conventions
+
+  //! Parameters for point cloud conversion
+  //! @{
+  double range_max_ = 0.0;
+  bool use_quiet_nan_ = true;
+  bool rotate_point_cloud_ = true;
+  //! @}
+
   //! Data buffer
   //! @{
   std::unique_ptr<unsigned char[]> color_buffer_;
-  std::unique_ptr<float[]> depth_buffer_;
+  std::unique_ptr<float[]>         depth_buffer_;
   std::unique_ptr<unsigned char[]> color_buffer_flipped_;
-  std::unique_ptr<float[]> depth_buffer_flipped_;
+  std::unique_ptr<float[]>         depth_buffer_flipped_;
   //! @}
 
   //! Variables for visualization and rendering in MuJoCo
   //! @{
-  mjvScene scene_;
-  mjvCamera camera_;
-  mjvOption option_;
-  mjrContext context_;
-  mjrRect viewport_;
-  GLFWwindow * window_;
+  mjvScene    scene_;
+  mjvCamera   camera_;
+  mjvOption   option_;
+  mjrContext  context_;
+  mjrRect     viewport_;
+  GLFWwindow *window_;
   //! @}
 
   //! ROS variables
   //! @{
-  rclcpp::Node::SharedPtr nh_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr color_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr info_pub_;
+  rclcpp::Node::SharedPtr                                     nh_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr       color_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr       depth_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr  info_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_pub_;
   //! @}
 };
 

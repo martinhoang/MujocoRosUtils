@@ -3,6 +3,8 @@ add_library(
   ClockPublisher.cpp
   PosePublisher.cpp
   ImagePublisher.cpp
+  depth_conversions.hpp
+  depth_traits.hpp
   ActuatorCommand.cpp
   ExternalForce.cpp
   SensorPublisher.cpp
@@ -25,6 +27,8 @@ ament_target_dependencies(
   visualization_msgs
   tf2_ros
   sensor_msgs
+  cv_bridge
+  image_geometry
   trajectory_msgs
   builtin_interfaces
   hardware_interface
