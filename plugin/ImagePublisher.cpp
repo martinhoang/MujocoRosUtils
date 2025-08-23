@@ -255,6 +255,11 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     point_cloud_topic_name = "mujoco/" + camera_name + "/point_cloud";
   }
 
+  // Set GLFW error callback
+  glfwSetErrorCallback([](int error, const char *description) {
+    RCLCPP_ERROR_STREAM(rclcpp::get_logger("ImagePublisher"), "GLFW Error " << error << ": " << description);
+  });
+
   // Init OpenGL
   if (!glfwInit())
   {
@@ -263,7 +268,6 @@ ImagePublisher::ImagePublisher(const mjModel *m,
 
   // Create invisible window, single-buffered
   glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-  glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_FALSE);
   window_ = glfwCreateWindow(viewport_.width, viewport_.height, "MujocoRosUtils::ImagePublisher",
                              nullptr, nullptr);
   if (!window_)
