@@ -17,6 +17,11 @@
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <string>
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
 namespace MujocoRosUtils
 {
 
@@ -63,6 +68,8 @@ public:
   void free();
 
 protected:
+  /** \brief Publishing loop for the worker thread. */
+  void publishThread();
   /** \brief Constructor.
       \param m model
       \param d data
@@ -78,9 +85,13 @@ protected:
   ImagePublisher(const mjModel *m, mjData *d, int sensor_id, const std::string &frame_id,
                  std::string color_topic_name, std::string depth_topic_name,
                  std::string info_topic_name, std::string point_cloud_topic_name,
-                 bool rotate_point_cloud, int height, int width, mjtNum publish_rate);
+                 bool rotate_point_cloud, int height, int width, mjtNum publish_rate,
+                 double max_range);
 
 protected:
+  //! MuJoCo model
+  const mjModel *m_;
+
   //! Sensor ID
   int sensor_id_ = -1;
 
@@ -111,6 +122,8 @@ protected:
   std::unique_ptr<float[]>         depth_buffer_;
   std::unique_ptr<unsigned char[]> color_buffer_flipped_;
   std::unique_ptr<float[]>         depth_buffer_flipped_;
+  std::unique_ptr<unsigned char[]> color_buffer_back_;
+  std::unique_ptr<float[]>         depth_buffer_back_;
   //! @}
 
   //! Variables for visualization and rendering in MuJoCo
@@ -130,6 +143,18 @@ protected:
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr       depth_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr  info_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_pub_;
+  bool                                                        publish_color_ = false;
+  bool                                                        publish_depth_ = false;
+  bool                                                        publish_info_  = false;
+  bool                                                        publish_cloud_ = false;
+  //! @}
+
+  //! Threading variables
+  //! @{
+  std::thread             publish_thread_;
+  std::mutex              buffer_mutex_;
+  std::condition_variable buffer_cv_;
+  std::atomic<bool>       stop_thread_{false};
   //! @}
 };
 

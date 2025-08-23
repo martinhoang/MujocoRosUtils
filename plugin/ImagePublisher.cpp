@@ -15,10 +15,11 @@ constexpr char ATTR_COLOR_TOPIC_NAME[]       = "color_topic_name";
 constexpr char ATTR_DEPTH_TOPIC_NAME[]       = "depth_topic_name";
 constexpr char ATTR_INFO_TOPIC_NAME[]        = "info_topic_name";
 constexpr char ATTR_POINT_CLOUD_TOPIC_NAME[] = "point_cloud_topic_name";
-constexpr char ATTR_ROTATE_POINT_CLOUD[] = "rotate_point_cloud";
+constexpr char ATTR_ROTATE_POINT_CLOUD[]     = "rotate_point_cloud";
 constexpr char ATTR_HEIGHT[]                 = "height";
 constexpr char ATTR_WIDTH[]                  = "width";
 constexpr char ATTR_PUBLISH_RATE[]           = "publish_rate";
+constexpr char ATTR_MAX_RANGE[]              = "max_range";
 
 void ImagePublisher::RegisterPlugin()
 {
@@ -36,7 +37,8 @@ void ImagePublisher::RegisterPlugin()
                               ATTR_ROTATE_POINT_CLOUD,
                               ATTR_HEIGHT,
                               ATTR_WIDTH,
-                              ATTR_PUBLISH_RATE};
+                              ATTR_PUBLISH_RATE,
+                              ATTR_MAX_RANGE};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
   plugin.attributes = attributes;
@@ -133,7 +135,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
 
   // rotate_point_cloud
   const char *rotate_point_cloud_char = mj_getPluginConfig(m, plugin_id, ATTR_ROTATE_POINT_CLOUD);
-  bool rotate_point_cloud = true;
+  bool        rotate_point_cloud      = true;
   if (strlen(rotate_point_cloud_char) > 0)
   {
     if (strcmp(rotate_point_cloud_char, "false") == 0)
@@ -181,6 +183,14 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     return nullptr;
   }
 
+  // max_range
+  const char *max_range_char = mj_getPluginConfig(m, plugin_id, ATTR_MAX_RANGE);
+  double      max_range      = 0.0;
+  if (strlen(max_range_char) > 0)
+  {
+    max_range = strtod(max_range_char, nullptr);
+  }
+
   // Set sensor_id
   int sensor_id = 0;
   for (; sensor_id < m->nsensor; sensor_id++)
@@ -204,7 +214,8 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   std::cout << "[ImagePublisher] Create." << std::endl;
 
   return new ImagePublisher(m, d, sensor_id, frame_id, color_topic_name, depth_topic_name,
-                            info_topic_name, point_cloud_topic_name, rotate_point_cloud, height, width, publish_rate);
+                            info_topic_name, point_cloud_topic_name, rotate_point_cloud, height,
+                            width, publish_rate, max_range);
 }
 
 ImagePublisher::ImagePublisher(const mjModel *m,
@@ -212,8 +223,10 @@ ImagePublisher::ImagePublisher(const mjModel *m,
                                int sensor_id, const std::string &frame_id,
                                std::string color_topic_name, std::string depth_topic_name,
                                std::string info_topic_name, std::string point_cloud_topic_name,
-                               bool rotate_point_cloud, int height, int width, mjtNum publish_rate)
-    : sensor_id_(sensor_id)
+                               bool rotate_point_cloud, int height, int width, mjtNum publish_rate,
+                               double max_range)
+    : m_(m)
+    , sensor_id_(sensor_id)
     , camera_id_(m->sensor_objid[sensor_id])
     , frame_id_(frame_id)
     , rotate_point_cloud_(rotate_point_cloud)
@@ -294,8 +307,11 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   depth_buffer_.reset(new float[width * height]);
   color_buffer_flipped_.reset(new unsigned char[3 * width * height]);
   depth_buffer_flipped_.reset(new float[width * height]);
+  color_buffer_back_.reset(new unsigned char[3 * width * height]);
+  depth_buffer_back_.reset(new float[width * height]);
 
-  if (!color_buffer_ || !depth_buffer_ || !color_buffer_flipped_ || !depth_buffer_flipped_)
+  if (!color_buffer_ || !depth_buffer_ || !color_buffer_flipped_ || !depth_buffer_flipped_
+      || !color_buffer_back_ || !depth_buffer_back_)
   {
     mju_error("[ImagePublisher] Could not allocate image buffers.");
   }
@@ -317,14 +333,17 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   std::string node_name = mj_id2name(m, mjOBJ_SENSOR, sensor_id);
 
   nh_        = rclcpp::Node::make_shared(node_name, node_options);
-  color_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(color_topic_name, 1);
-  depth_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(depth_topic_name, 1);
-  info_pub_  = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(info_topic_name, 1);
+  auto qos   = rclcpp::SensorDataQoS();
+  color_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(color_topic_name, qos);
+  depth_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(depth_topic_name, qos);
+  info_pub_  = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(info_topic_name, qos);
   point_cloud_pub_
-    = nh_->create_publisher<sensor_msgs::msg::PointCloud2>(point_cloud_topic_name, 1);
+    = nh_->create_publisher<sensor_msgs::msg::PointCloud2>(point_cloud_topic_name, qos);
 
-  range_max_     = nh_->get_parameter_or("range_max", 0.0);
+  range_max_     = nh_->get_parameter_or("range_max", max_range);
   use_quiet_nan_ = nh_->get_parameter_or("use_quiet_nan", true);
+
+  publish_thread_ = std::thread(&ImagePublisher::publishThread, this);
 }
 
 void ImagePublisher::reset(const mjModel *, // m
@@ -337,6 +356,18 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 {
   sim_cnt_++;
   if (sim_cnt_ % publish_skip_ != 0)
+  {
+    return;
+  }
+
+  // Update subscriber counts
+  publish_color_ = color_pub_->get_subscription_count() > 0;
+  publish_depth_ = depth_pub_->get_subscription_count() > 0;
+  publish_info_  = info_pub_->get_subscription_count() > 0;
+  publish_cloud_ = point_cloud_pub_->get_subscription_count() > 0;
+
+  // If no one is listening, do nothing
+  if (!publish_color_ && !publish_depth_ && !publish_info_ && !publish_cloud_)
   {
     return;
   }
@@ -354,122 +385,61 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   // Read rgb and depth pixels
   mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
 
-  // Convert raw depth to distance and flip images
-  float near = static_cast<float>(m->vis.map.znear * m->stat.extent);
-  float far  = static_cast<float>(m->vis.map.zfar * m->stat.extent);
-  for (int w = 0; w < viewport_.width; w++)
+  // Publish color image directly from the compute thread for low latency
+  if (publish_color_)
   {
+    // Flip color buffer
+#pragma omp parallel for
     for (int h = 0; h < viewport_.height; h++)
     {
-      int idx         = h * viewport_.width + w;
-      int idx_flipped = (viewport_.height - 1 - h) * viewport_.width + w;
-
-      // See
-      // https://github.com/deepmind/mujoco/blob/631b16e7ad192df936195658fe79f2ada85f755c/python/mujoco/renderer.py#L175-L178
-      depth_buffer_[idx] = near / (1.0f - depth_buffer_[idx] * (1.0f - near / far));
-
-      for (int c = 0; c < 3; c++)
+      for (int w = 0; w < viewport_.width; w++)
       {
-        color_buffer_flipped_[3 * idx_flipped + c] = color_buffer_[3 * idx + c];
+        int idx         = h * viewport_.width + w;
+        int idx_flipped = (viewport_.height - 1 - h) * viewport_.width + w;
+        for (int c = 0; c < 3; c++)
+        {
+          color_buffer_flipped_[3 * idx_flipped + c] = color_buffer_[3 * idx + c];
+        }
       }
-      depth_buffer_flipped_[idx_flipped] = depth_buffer_[idx];
     }
+
+    // Create and publish color_msg
+    rclcpp::Time            stamp_now = nh_->get_clock()->now();
+    sensor_msgs::msg::Image color_msg;
+    color_msg.header.stamp    = stamp_now;
+    color_msg.header.frame_id = frame_id_;
+    color_msg.height          = viewport_.height;
+    color_msg.width           = viewport_.width;
+    color_msg.encoding        = "rgb8";
+    color_msg.is_bigendian    = 0;
+    color_msg.step = static_cast<unsigned int>(sizeof(unsigned char) * 3 * viewport_.width);
+    color_msg.data.resize(sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
+    std::memcpy(&color_msg.data[0], color_buffer_flipped_.get(),
+                sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
+    color_pub_->publish(color_msg);
   }
 
-  // Publish topic
-  rclcpp::Time stamp_now = nh_->get_clock()->now();
-
-  sensor_msgs::msg::Image color_msg;
-  color_msg.header.stamp    = stamp_now;
-  color_msg.header.frame_id = frame_id_;
-  color_msg.height          = viewport_.height;
-  color_msg.width           = viewport_.width;
-  color_msg.encoding        = "rgb8";
-  color_msg.is_bigendian    = 0;
-  color_msg.step = static_cast<unsigned int>(sizeof(unsigned char) * 3 * viewport_.width);
-  color_msg.data.resize(sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
-  std::memcpy(&color_msg.data[0], color_buffer_flipped_.get(),
-              sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
-
-  sensor_msgs::msg::Image depth_msg;
-  depth_msg.header.stamp    = stamp_now;
-  depth_msg.header.frame_id = frame_id_;
-  depth_msg.height          = viewport_.height;
-  depth_msg.width           = viewport_.width;
-  depth_msg.encoding        = "32FC1";
-  depth_msg.is_bigendian    = 0;
-  depth_msg.step            = static_cast<unsigned int>(sizeof(float) * viewport_.width);
-  depth_msg.data.resize(sizeof(float) * viewport_.width * viewport_.height);
-  std::memcpy(&depth_msg.data[0], depth_buffer_flipped_.get(),
-              sizeof(float) * viewport_.width * viewport_.height);
-
-  sensor_msgs::msg::CameraInfo info_msg;
-  info_msg.header.stamp     = stamp_now;
-  info_msg.header.frame_id  = frame_id_;
-  info_msg.height           = viewport_.height;
-  info_msg.width            = viewport_.width;
-  info_msg.distortion_model = "plumb_bob";
-  info_msg.d.resize(5, 0.0);
-  info_msg.k.fill(0.0);
-  info_msg.r.fill(0.0);
-  info_msg.p.fill(0.0);
-  double focal_scaling
-    = (1.0 / std::tan((m->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0)) * viewport_.height / 2.0;
-  info_msg.k[0] = info_msg.p[0] = focal_scaling;
-  info_msg.k[2] = info_msg.p[2] = static_cast<double>(viewport_.width) / 2.0;
-  info_msg.k[4] = info_msg.p[5] = focal_scaling;
-  info_msg.k[5] = info_msg.p[6] = static_cast<double>(viewport_.height) / 2.0;
-  info_msg.k[8] = info_msg.p[10] = 1.0;
-
-  // Start publishing everything at once
-  info_pub_->publish(info_msg);
-  color_pub_->publish(color_msg);
-  depth_pub_->publish(depth_msg);
-
-  // Publish point cloud
-  image_geometry::PinholeCameraModel model;
-  model.fromCameraInfo(info_msg);
-  sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
-    = std::make_shared<sensor_msgs::msg::PointCloud2>();
-  cloud_msg->header       = depth_msg.header;
-  cloud_msg->height       = depth_msg.height;
-  cloud_msg->width        = depth_msg.width;
-  cloud_msg->is_dense     = false;
-  cloud_msg->is_bigendian = false;
-  sensor_msgs::PointCloud2Modifier pcd_modifier(*cloud_msg);
-  pcd_modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
-
-  sensor_msgs::msg::Image::ConstSharedPtr color_msg_ptr(&color_msg,
-                                                        [](const sensor_msgs::msg::Image *) {
-                                                        });
-  cv_bridge::CvImageConstPtr              cv_ptr
-    = cv_bridge::toCvCopy(color_msg_ptr, sensor_msgs::image_encodings::RGB8);
-
-  sensor_msgs::msg::Image::ConstSharedPtr depth_msg_ptr(&depth_msg,
-                                                        [](const sensor_msgs::msg::Image *) {
-                                                        });
-  if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_16UC1)
+  // Offload depth and point cloud processing to the worker thread
+  if (publish_depth_ || publish_cloud_)
   {
-    depthimage_to_pointcloud2::convert<uint16_t>(depth_msg_ptr, cloud_msg, model, range_max_,
-                                                 use_quiet_nan_, rotate_point_cloud_, cv_ptr);
+    {
+      std::lock_guard<std::mutex> lock(buffer_mutex_);
+      color_buffer_.swap(color_buffer_back_);
+      depth_buffer_.swap(depth_buffer_back_);
+    }
+    buffer_cv_.notify_one();
   }
-  else if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_32FC1)
-  {
-    depthimage_to_pointcloud2::convert<float>(depth_msg_ptr, cloud_msg, model, range_max_,
-                                              use_quiet_nan_, rotate_point_cloud_, cv_ptr);
-  }
-  else
-  {
-    RCLCPP_WARN(nh_->get_logger(), "Depth image has unsupported encoding [%s]",
-                depth_msg.encoding.c_str());
-    return;
-  }
-
-  point_cloud_pub_->publish(*cloud_msg);
 }
 
 void ImagePublisher::free()
 {
+  stop_thread_ = true;
+  buffer_cv_.notify_all();
+  if (publish_thread_.joinable())
+  {
+    publish_thread_.join();
+  }
+
   mjr_freeContext(&context_);
   mjv_freeScene(&scene_);
 
@@ -477,3 +447,157 @@ void ImagePublisher::free()
 }
 
 } // namespace MujocoRosUtils
+void MujocoRosUtils::ImagePublisher::publishThread()
+{
+  while (!stop_thread_)
+  {
+    {
+      std::unique_lock<std::mutex> lock(buffer_mutex_);
+      buffer_cv_.wait(lock);
+    }
+
+    if (stop_thread_)
+    {
+      break;
+    }
+
+    // --- Process Depth Data ---
+    float near = static_cast<float>(m_->vis.map.znear * m_->stat.extent);
+    float far  = static_cast<float>(m_->vis.map.zfar * m_->stat.extent);
+#pragma omp parallel for
+    for (int h = 0; h < viewport_.height; h++)
+    {
+      for (int w = 0; w < viewport_.width; w++)
+      {
+        int idx         = h * viewport_.width + w;
+        int idx_flipped = (viewport_.height - 1 - h) * viewport_.width + w;
+        // Process depth
+        depth_buffer_back_[idx] = near / (1.0f - depth_buffer_back_[idx] * (1.0f - near / far));
+        depth_buffer_flipped_[idx_flipped] = depth_buffer_back_[idx];
+      }
+    }
+
+    rclcpp::Time stamp_now = nh_->get_clock()->now();
+
+    // --- Publish Depth Image ---
+    sensor_msgs::msg::Image depth_msg;
+    if (publish_depth_ || publish_cloud_) // Also need depth_msg for point cloud
+    {
+      depth_msg.header.stamp    = stamp_now;
+      depth_msg.header.frame_id = frame_id_;
+      depth_msg.height          = viewport_.height;
+      depth_msg.width           = viewport_.width;
+      depth_msg.encoding        = "32FC1";
+      depth_msg.is_bigendian    = 0;
+      depth_msg.step            = static_cast<unsigned int>(sizeof(float) * viewport_.width);
+      depth_msg.data.resize(sizeof(float) * viewport_.width * viewport_.height);
+      std::memcpy(&depth_msg.data[0], depth_buffer_flipped_.get(),
+                  sizeof(float) * viewport_.width * viewport_.height);
+      if (publish_depth_)
+      {
+        depth_pub_->publish(depth_msg);
+      }
+    }
+
+    // --- Publish Camera Info ---
+    sensor_msgs::msg::CameraInfo info_msg;
+    if (publish_info_ || publish_cloud_)
+    {
+      info_msg.header.stamp     = stamp_now;
+      info_msg.header.frame_id  = frame_id_;
+      info_msg.height           = viewport_.height;
+      info_msg.width            = viewport_.width;
+      info_msg.distortion_model = "plumb_bob";
+      info_msg.d.resize(5, 0.0);
+      info_msg.k.fill(0.0);
+      info_msg.r.fill(0.0);
+      info_msg.p.fill(0.0);
+      double focal_scaling = (1.0 / std::tan((m_->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0))
+                             * viewport_.height / 2.0;
+      info_msg.k[0] = info_msg.p[0] = focal_scaling;
+      info_msg.k[2] = info_msg.p[2] = static_cast<double>(viewport_.width) / 2.0;
+      info_msg.k[4] = info_msg.p[5] = focal_scaling;
+      info_msg.k[5] = info_msg.p[6] = static_cast<double>(viewport_.height) / 2.0;
+      info_msg.k[8] = info_msg.p[10] = 1.0;
+      if (publish_info_)
+      {
+        info_pub_->publish(info_msg);
+      }
+    }
+
+    // --- Publish Point Cloud ---
+    if (publish_cloud_)
+    {
+      // Flip the color buffer that was passed from the main thread
+#pragma omp parallel for
+      for (int h = 0; h < viewport_.height; h++)
+      {
+        for (int w = 0; w < viewport_.width; w++)
+        {
+          int idx         = h * viewport_.width + w;
+          int idx_flipped = (viewport_.height - 1 - h) * viewport_.width + w;
+          for (int c = 0; c < 3; c++)
+          {
+            color_buffer_flipped_[3 * idx_flipped + c] = color_buffer_back_[3 * idx + c];
+          }
+        }
+      }
+
+      // Create a temporary color message for the conversion function
+      sensor_msgs::msg::Image color_msg_for_cloud;
+      color_msg_for_cloud.header.stamp    = stamp_now;
+      color_msg_for_cloud.header.frame_id = frame_id_;
+      color_msg_for_cloud.height          = viewport_.height;
+      color_msg_for_cloud.width           = viewport_.width;
+      color_msg_for_cloud.encoding        = "rgb8";
+      color_msg_for_cloud.is_bigendian    = 0;
+      color_msg_for_cloud.step
+        = static_cast<unsigned int>(sizeof(unsigned char) * 3 * viewport_.width);
+      color_msg_for_cloud.data.resize(sizeof(unsigned char) * 3 * viewport_.width
+                                      * viewport_.height);
+      std::memcpy(&color_msg_for_cloud.data[0], color_buffer_flipped_.get(),
+                  sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
+
+      image_geometry::PinholeCameraModel model;
+      model.fromCameraInfo(info_msg);
+      sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
+        = std::make_shared<sensor_msgs::msg::PointCloud2>();
+      cloud_msg->header       = depth_msg.header;
+      cloud_msg->height       = depth_msg.height;
+      cloud_msg->width        = depth_msg.width;
+      cloud_msg->is_dense     = false;
+      cloud_msg->is_bigendian = false;
+      sensor_msgs::PointCloud2Modifier pcd_modifier(*cloud_msg);
+      pcd_modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
+
+      sensor_msgs::msg::Image::ConstSharedPtr color_msg_ptr(&color_msg_for_cloud,
+                                                            [](const sensor_msgs::msg::Image *) {
+                                                            });
+      cv_bridge::CvImageConstPtr              cv_ptr
+        = cv_bridge::toCvCopy(color_msg_ptr, sensor_msgs::image_encodings::RGB8);
+
+      sensor_msgs::msg::Image::ConstSharedPtr depth_msg_ptr(&depth_msg,
+                                                            [](const sensor_msgs::msg::Image *) {
+                                                            });
+      if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_16UC1)
+      {
+        depthimage_to_pointcloud2::convert<uint16_t>(depth_msg_ptr, cloud_msg, model, range_max_,
+                                                     use_quiet_nan_, rotate_point_cloud_, cv_ptr);
+      }
+      else if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_32FC1)
+      {
+        depthimage_to_pointcloud2::convert<float>(depth_msg_ptr, cloud_msg, model, range_max_,
+                                                  use_quiet_nan_, rotate_point_cloud_, cv_ptr);
+      }
+      else
+      {
+        RCLCPP_WARN(nh_->get_logger(), "Depth image has unsupported encoding [%s]",
+                    depth_msg.encoding.c_str());
+        // Can't return, so just continue to the next loop iteration
+        continue;
+      }
+
+      point_cloud_pub_->publish(*cloud_msg);
+    }
+  }
+}

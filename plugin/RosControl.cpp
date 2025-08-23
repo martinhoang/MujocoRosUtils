@@ -382,6 +382,7 @@ Ros2Control::~Ros2Control()
     node_.reset();
     executor_.reset();
     rclcpp::shutdown();
+    print_confirm("Ros2Control plugin destroyed successfully\n");
   }
 }
 

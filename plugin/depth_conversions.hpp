@@ -84,39 +84,43 @@ void convert(
   sensor_msgs::PointCloud2Iterator<float> iter_rgb(*cloud_msg, "rgb");
   const T * depth_row = reinterpret_cast<const T *>(&depth_msg->data[0]);
   int row_step = depth_msg->step / sizeof(T);
-  for (int v = 0; v < static_cast<int>(cloud_msg->height); ++v, depth_row += row_step) {
-    for (int u = 0; u < static_cast<int>(cloud_msg->width); ++u, ++iter_x, ++iter_y, ++iter_z, ++iter_rgb) {
-      T depth = depth_row[u];
+#pragma omp parallel for
+  for (int v = 0; v < static_cast<int>(cloud_msg->height); ++v) {
+    const T* depth_row_ptr = depth_row + v * row_step;
+    sensor_msgs::PointCloud2Iterator<float> iter_x_local(iter_x + v * cloud_msg->width);
+    sensor_msgs::PointCloud2Iterator<float> iter_y_local(iter_y + v * cloud_msg->width);
+    sensor_msgs::PointCloud2Iterator<float> iter_z_local(iter_z + v * cloud_msg->width);
+    sensor_msgs::PointCloud2Iterator<float> iter_rgb_local(iter_rgb + v * cloud_msg->width);
+
+    for (int u = 0; u < static_cast<int>(cloud_msg->width); ++u, ++iter_x_local, ++iter_y_local, ++iter_z_local, ++iter_rgb_local) {
+      T depth = depth_row_ptr[u];
 
       // Missing points denoted by NaNs
       if (!DepthTraits<T>::valid(depth)) {
         if (range_max != 0.0 && !use_quiet_nan) {
           depth = DepthTraits<T>::fromMeters(range_max);
         } else {
-          *iter_x = *iter_y = *iter_z = *iter_rgb = bad_point;
+          *iter_x_local = *iter_y_local = *iter_z_local = *iter_rgb_local = bad_point;
           continue;
         }
-      } else if (range_max != 0.0) {
+      }
+
+      if (range_max != 0.0) {
         T depth_max = DepthTraits<T>::fromMeters(range_max);
         if (depth > depth_max) {
-          if (use_quiet_nan) {
-            *iter_x = *iter_y = *iter_z = *iter_rgb = bad_point;
-            continue;
-          } else {
-            depth = depth_max;
-          }
-
+          *iter_x_local = *iter_y_local = *iter_z_local = *iter_rgb_local = bad_point;
+          continue;
         }
       }
 
       // Fill in XYZ
-      *iter_x = (u - center_x) * depth * constant_x;
-      *iter_y = (v - center_y) * depth * constant_y;
+      *iter_x_local = (u - center_x) * depth * constant_x;
+      *iter_y_local = (v - center_y) * depth * constant_y;
       if (rotate_cloud) {
-        *iter_x *= -1.0f;
-        *iter_y *= -1.0f;
+        *iter_x_local *= -1.0f;
+        *iter_y_local *= -1.0f;
       }
-      *iter_z = DepthTraits<T>::toMeters(depth);
+      *iter_z_local = DepthTraits<T>::toMeters(depth);
       
       // and RGB
       int rgb = 0x000000;
@@ -131,7 +135,7 @@ void convert(
           rgb = (intensity[0] << 16) | (intensity[1] << 8) | intensity[2]; // Convert BGR to RGB correctly
         }
       }
-      std::memcpy(&(*iter_rgb), &rgb, sizeof(int));
+      std::memcpy(&(*iter_rgb_local), &rgb, sizeof(int));
     }
   }
 }

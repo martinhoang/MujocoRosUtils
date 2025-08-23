@@ -39,6 +39,7 @@ rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME}
 target_link_libraries(MujocoRosUtils PUBLIC ${cpp_typesupport_target}
                                             ${ament_LIBRARIES})
 target_link_libraries(MujocoRosUtils PUBLIC ${LIB_MUJOCO} glfw)
+target_link_libraries(MujocoRosUtils PUBLIC OpenMP::OpenMP_CXX)
 
 add_library(MujocoRosUtilsPlugin SHARED Plugin.cpp)
 target_include_directories(MujocoRosUtilsPlugin PRIVATE ${MUJOCO_INCLUDE_DIR})

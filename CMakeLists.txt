@@ -83,6 +83,7 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(controller_manager REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(OpenMP REQUIRED)
 
 rosidl_generate_interfaces(
   ${PROJECT_NAME}
