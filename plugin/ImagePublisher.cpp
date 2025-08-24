@@ -1,6 +1,7 @@
 #include "ImagePublisher.h"
 #include "depth_conversions.hpp"
 
+#include "mujoco_utils.hpp"
 #include <cstdlib>
 #include <cv_bridge/cv_bridge.h>
 #include <iostream>
@@ -189,6 +190,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   if (strlen(max_range_char) > 0)
   {
     max_range = strtod(max_range_char, nullptr);
+    print_info("Max range: %s% - f\n", max_range_char, max_range);
   }
 
   // Set sensor_id
@@ -257,7 +259,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
 
   // Set GLFW error callback
   glfwSetErrorCallback([](int error, const char *description) {
-    RCLCPP_ERROR_STREAM(rclcpp::get_logger("ImagePublisher"), "GLFW Error " << error << ": " << description);
+    RCLCPP_ERROR_STREAM(rclcpp::get_logger("ImagePublisher"),
+                        "GLFW Error " << error << ": " << description);
   });
 
   // Init OpenGL
@@ -329,9 +332,9 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   }
   rclcpp::NodeOptions node_options;
 
-  node_options.parameter_overrides({{"use_sim_time", true}, // Force use simulation time
-                                    {"range_max", 0.0},
-                                    {"use_quiet_nan", true}});
+  node_options.parameter_overrides({
+    {"use_sim_time", true}, // Force use simulation time
+  });
   node_options.automatically_declare_parameters_from_overrides(true);
 
   std::string node_name = mj_id2name(m, mjOBJ_SENSOR, sensor_id);
@@ -344,8 +347,11 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   point_cloud_pub_
     = nh_->create_publisher<sensor_msgs::msg::PointCloud2>(point_cloud_topic_name, qos);
 
+  // If the ros2 params are provided, they will take precedence
   range_max_     = nh_->get_parameter_or("range_max", max_range);
   use_quiet_nan_ = nh_->get_parameter_or("use_quiet_nan", true);
+
+  RCLCPP_INFO(nh_->get_logger(), "Setting depth range to %.4f", range_max_);
 
   publish_thread_ = std::thread(&ImagePublisher::publishThread, this);
 }

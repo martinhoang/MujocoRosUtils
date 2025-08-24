@@ -24,6 +24,8 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  RCLCPP_INFO(node->get_logger(), "Class loader for %s created", base_class.c_str());
+
   std::shared_ptr<mujoco_ros2_control::MujocoSystemInterface> mujoco_system;
 
   try
@@ -35,6 +37,8 @@ int main(int argc, char **argv)
     RCLCPP_ERROR(node->get_logger(), "Failed to create 'MujocoSystem' instance: %s", ex.what());
     return 1;
   }
+
+  RCLCPP_INFO(node->get_logger(), "MujocoSystem instance created");
 
   rclcpp::shutdown();
   return 0;
