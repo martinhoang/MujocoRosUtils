@@ -72,7 +72,7 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   {
     mujoco_system_loader_.reset(
       new pluginlib::ClassLoader<mujoco_ros2_control::MujocoSystemInterface>(
-        "mujoco_ros_utils", /* Package where this plugin is located */
+        "mujoco_ros2_control", /* Package where this plugin is located */
         "mujoco_ros2_control::MujocoSystemInterface"));
   }
   catch (pluginlib::PluginlibException &ex)
@@ -117,6 +117,7 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
   {
     if (!rclcpp::ok())
     {
+      RCLCPP_INFO(rclcpp::get_logger("Ros2Control"), "Passing ros2 config file: %s", config_file_path.c_str());
       const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, config_file_path.c_str()};
       int         argc   = sizeof(argv) / sizeof(argv[0]);
       rclcpp::init(argc, argv);

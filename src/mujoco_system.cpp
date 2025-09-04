@@ -74,10 +74,10 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
   {
     register_joints(hardware_info, m);
   }
-  catch (...)
+  catch (std::runtime_error &e)
   {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to initialize MujocoSystem for '%s'",
-                 hardware_info.name.c_str());
+    RCLCPP_ERROR(node_->get_logger(), "Failed to initialize MujocoSystem for '%s': %s",
+                 hardware_info.name.c_str(), e.what());
     return false;
   }
 
@@ -209,8 +209,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
 
     if (last_joint.is_mimic)
     {
-      RCLCPP_INFO(node_->get_logger(), "Registered mimic joint '%s' id %d\n", joint_info.name.c_str(),
-                  joint_id);
+      RCLCPP_INFO(node_->get_logger(), "Registered mimic joint '%s' id %d\n",
+                  joint_info.name.c_str(), joint_id);
       continue;
     }
 

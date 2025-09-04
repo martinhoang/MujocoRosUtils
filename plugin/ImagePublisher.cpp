@@ -190,7 +190,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   if (strlen(max_range_char) > 0)
   {
     max_range = strtod(max_range_char, nullptr);
-    print_info("Max range: %s% - f\n", max_range_char, max_range);
+    print_info("Max range: %s OR %f\n", max_range_char, max_range);
   }
 
   // Set sensor_id
