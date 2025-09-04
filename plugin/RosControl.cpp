@@ -149,8 +149,19 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
     // Create a parameter client to try to get param from the target node
     auto parameters_client
       = std::make_shared<rclcpp::AsyncParametersClient>(node_, robot_param_node);
+    constexpr int max_attempts = 5;
+    int           attempts     = 0;
     while (!parameters_client->wait_for_service(0.5s))
     {
+      attempts++;
+      if (attempts >= max_attempts)
+      {
+        RCLCPP_ERROR(node_->get_logger(),
+                     "Exceeded max attempts of %d to connect to %s service. Failing.", max_attempts,
+                     robot_param_node.c_str());
+        throw std::runtime_error("Failed to connect to parameter service from node '"
+                                 + robot_param_node + "'");
+      }
       if (!rclcpp::ok())
       {
         mju_error("Interrupted while waiting for %s service. Exiting.", robot_param_node.c_str());
