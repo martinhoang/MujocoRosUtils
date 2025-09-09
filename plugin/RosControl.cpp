@@ -10,6 +10,7 @@ constexpr char ATTR_NODE_NAME[]        = "node_name";
 constexpr char ATTR_PUBLISH_RATE[]     = "publish_rate";
 constexpr char ATTR_ROBOT_PARAM_NODE[] = "robot_param_node";
 constexpr char ATTR_CONFIG_FILE[]      = "config_file";
+constexpr char ATTR_PARAMETERS[]       = "parameters";
 
 namespace MujocoRosUtils
 {
@@ -26,7 +27,7 @@ void Ros2Control::RegisterPlugin()
   plugin.capabilityflags |= mjPLUGIN_PASSIVE;
 
   std::vector<const char *> attributes
-    = {ATTR_NODE_NAME, ATTR_PUBLISH_RATE, ATTR_ROBOT_PARAM_NODE, ATTR_CONFIG_FILE};
+    = {ATTR_NODE_NAME, ATTR_PUBLISH_RATE, ATTR_ROBOT_PARAM_NODE, ATTR_CONFIG_FILE, ATTR_PARAMETERS};
 
   plugin.nattribute = attributes.size();
   plugin.attributes = attributes.data();
@@ -84,11 +85,16 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   }
 
   // Find the config file
-  const char *config_file_path_char = mj_getPluginConfig(m, plugin_id, ATTR_CONFIG_FILE);
+  const char *config_file_path_char     = mj_getPluginConfig(m, plugin_id, ATTR_CONFIG_FILE);
+  const char *parameters_file_path_char = mj_getPluginConfig(m, plugin_id, ATTR_PARAMETERS);
   std::string config_file_path;
   if (config_file_path_char && strlen(config_file_path_char) > 0)
   {
     config_file_path = config_file_path_char;
+  }
+  else if (parameters_file_path_char && strlen(parameters_file_path_char) > 0)
+  {
+    config_file_path = parameters_file_path_char;
   }
   else
   {
@@ -121,7 +127,8 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
   {
     if (!rclcpp::ok())
     {
-      RCLCPP_INFO(rclcpp::get_logger("Ros2Control"), "Passing ros2 config file: %s", config_file_path.c_str());
+      RCLCPP_INFO(rclcpp::get_logger("Ros2Control"), "Passing ros2 config file: %s",
+                  config_file_path.c_str());
       const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, config_file_path.c_str()};
       int         argc   = sizeof(argv) / sizeof(argv[0]);
       rclcpp::init(argc, argv);
