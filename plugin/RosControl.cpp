@@ -68,16 +68,19 @@ void Ros2Control::RegisterPlugin()
 
 std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, int plugin_id)
 {
-  try
+  if (!mujoco_system_loader_)
   {
-    mujoco_system_loader_.reset(
-      new pluginlib::ClassLoader<mujoco_ros2_control::MujocoSystemInterface>(
-        "mujoco_ros2_control", /* Package where this plugin is located */
-        "mujoco_ros2_control::MujocoSystemInterface"));
-  }
-  catch (pluginlib::PluginlibException &ex)
-  {
-    mju_error("Failed to create hardware interface plugin loader. Error: %s", ex.what());
+    try
+    {
+      mujoco_system_loader_.reset(
+        new pluginlib::ClassLoader<mujoco_ros2_control::MujocoSystemInterface>(
+          "mujoco_ros2_control", /* Package where this plugin is located */
+          "mujoco_ros2_control::MujocoSystemInterface"));
+    }
+    catch (pluginlib::PluginlibException &ex)
+    {
+      mju_error("Failed to create hardware interface plugin loader. Error: %s", ex.what());
+    }
   }
 
   // Find the config file
@@ -113,6 +116,7 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
     : model_(model)
     , data_(data)
 {
+  ros_control_instances_++;
   if (!node_)
   {
     if (!rclcpp::ok())
@@ -380,7 +384,7 @@ Ros2Control::~Ros2Control()
     catch (const std::exception &e)
     {
       RCLCPP_WARN(node_->get_logger(),
-                  "Error while removing nodes from executor: %s...This might be normal as the "
+                  "Error while removing nodes from executor: %s This might be normal as the "
                   "node/controller_manager might be cleaned up by now.",
                   e.what());
     }
@@ -393,7 +397,14 @@ Ros2Control::~Ros2Control()
     controller_manager_.reset();
     node_.reset();
     executor_.reset();
-    rclcpp::shutdown();
+
+    // Only shut down ROS if this is the last instance
+    ros_control_instances_--;
+    if (ros_control_instances_ == 0 && rclcpp::ok())
+    {
+      rclcpp::shutdown();
+    }
+    
     print_confirm("Ros2Control plugin destroyed successfully\n");
   }
 }

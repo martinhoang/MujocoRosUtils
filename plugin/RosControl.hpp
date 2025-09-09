@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <thread>
+#include <atomic>
 
 namespace MujocoRosUtils
 {
@@ -41,6 +42,8 @@ protected:
   double       update_rate_    = 100.0;
   double       control_period_ = 1.0 / update_rate_;
   rclcpp::Time last_update_    = rclcpp::Time{(uint64_t)0, RCL_ROS_TIME};
+
+  static inline std::atomic<int> ros_control_instances_{0};
 };
 
 } // namespace MujocoRosUtils
