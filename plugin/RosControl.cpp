@@ -380,7 +380,7 @@ Ros2Control::~Ros2Control()
     catch (const std::exception &e)
     {
       RCLCPP_WARN(node_->get_logger(),
-                  "Error while removing nodes from executor: %s.This might be normal as the "
+                  "Error while removing nodes from executor: %s...This might be normal as the "
                   "node/controller_manager might be cleaned up by now.",
                   e.what());
     }
