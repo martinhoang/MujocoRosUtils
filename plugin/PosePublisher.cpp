@@ -1,6 +1,9 @@
 #include "PosePublisher.h"
 
 #include <mujoco/mujoco.h>
+#include <tf2/LinearMath/Transform.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Vector3.h>
 
 #include <iostream>
 
@@ -71,7 +74,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   // frame_id
   const char * frame_id_char = mj_getPluginConfig(m, plugin_id, "frame_id");
   std::string frame_id = "";
-  if(strlen(frame_id_char) > 0)
+  if(frame_id_char && strlen(frame_id_char) > 0)
   {
     frame_id = std::string(frame_id_char);
   }
@@ -79,7 +82,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   // pose_topic_name
   const char * pose_topic_name_char = mj_getPluginConfig(m, plugin_id, "pose_topic_name");
   std::string pose_topic_name = "";
-  if(strlen(pose_topic_name_char) > 0)
+  if(pose_topic_name_char && strlen(pose_topic_name_char) > 0)
   {
     pose_topic_name = std::string(pose_topic_name_char);
   }
@@ -87,7 +90,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   // vel_topic_name
   const char * vel_topic_name_char = mj_getPluginConfig(m, plugin_id, "vel_topic_name");
   std::string vel_topic_name = "";
-  if(strlen(vel_topic_name_char) > 0)
+  if(vel_topic_name_char && strlen(vel_topic_name_char) > 0)
   {
     vel_topic_name = std::string(vel_topic_name_char);
   }
@@ -95,7 +98,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   // publish_rate
   const char * publish_rate_char = mj_getPluginConfig(m, plugin_id, "publish_rate");
   mjtNum publish_rate = 30.0;
-  if(strlen(publish_rate_char) > 0)
+  if(publish_rate_char && strlen(publish_rate_char) > 0)
   {
     publish_rate = strtod(publish_rate_char, nullptr);
   }
@@ -108,7 +111,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   // output_tf
   const char * output_tf_char = mj_getPluginConfig(m, plugin_id, "output_tf");
   bool output_tf = false;
-  if(strlen(output_tf_char) > 0)
+  if(output_tf_char && strlen(output_tf_char) > 0)
   {
     if(!(strcmp(output_tf_char, "true") == 0 || strcmp(output_tf_char, "false") == 0))
     {
@@ -121,7 +124,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   // tf_child_frame_id
   const char * tf_child_frame_id_char = mj_getPluginConfig(m, plugin_id, "tf_child_frame_id");
   std::string tf_child_frame_id = "";
-  if(strlen(tf_child_frame_id_char) > 0)
+  if(tf_child_frame_id_char && strlen(tf_child_frame_id_char) > 0)
   {
     tf_child_frame_id = std::string(tf_child_frame_id_char);
   }
@@ -146,10 +149,22 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
     return nullptr;
   }
 
+  // Find reference body ID from frame_id
+  int reference_body_id = -1;
+  if(!frame_id.empty() && frame_id != "map" && frame_id != "world")
+  {
+    reference_body_id = mj_name2id(m, mjOBJ_XBODY, frame_id.c_str());
+    if(reference_body_id == -1)
+    {
+      std::cout << "[PosePublisher] Warning: Reference frame '" << frame_id 
+                << "' not found in model. Using world frame." << std::endl;
+    }
+  }
+
   std::cout << "[PosePublisher] Create." << std::endl;
 
   return new PosePublisher(m, d, sensor_id, frame_id, pose_topic_name, vel_topic_name, publish_rate, output_tf,
-                           tf_child_frame_id);
+                           tf_child_frame_id, reference_body_id);
 }
 
 PosePublisher::PosePublisher(const mjModel * m,
@@ -160,9 +175,11 @@ PosePublisher::PosePublisher(const mjModel * m,
                              const std::string & vel_topic_name,
                              mjtNum publish_rate,
                              bool output_tf,
-                             const std::string & tf_child_frame_id)
-: sensor_id_(sensor_id), body_id_(m->sensor_objid[sensor_id]), frame_id_(frame_id), pose_topic_name_(pose_topic_name),
-  vel_topic_name_(vel_topic_name), publish_skip_(std::max(static_cast<int>(1.0 / (publish_rate * m->opt.timestep)), 1)),
+                             const std::string & tf_child_frame_id,
+                             int reference_body_id)
+: sensor_id_(sensor_id), body_id_(m->sensor_objid[sensor_id]), reference_body_id_(reference_body_id), frame_id_(frame_id), 
+  pose_topic_name_(pose_topic_name), vel_topic_name_(vel_topic_name), 
+  publish_skip_(std::max(static_cast<int>(1.0 / (publish_rate * m->opt.timestep)), 1)),
   output_tf_(output_tf), tf_child_frame_id_(tf_child_frame_id)
 {
   std::string body_name = mj_id2name(m, mjOBJ_XBODY, body_id_);
@@ -231,13 +248,57 @@ void PosePublisher::compute(const mjModel * m, mjData * d, int // plugin_id
     msg.header.stamp = stamp_now;
     msg.header.frame_id = frame_id_;
     msg.child_frame_id = tf_child_frame_id_;
-    msg.transform.translation.x = d->xpos[3 * body_id_ + 0];
-    msg.transform.translation.y = d->xpos[3 * body_id_ + 1];
-    msg.transform.translation.z = d->xpos[3 * body_id_ + 2];
-    msg.transform.rotation.w = d->xquat[4 * body_id_ + 0];
-    msg.transform.rotation.x = d->xquat[4 * body_id_ + 1];
-    msg.transform.rotation.y = d->xquat[4 * body_id_ + 2];
-    msg.transform.rotation.z = d->xquat[4 * body_id_ + 3];
+
+    // If we have a reference body, compute relative transform
+    if(reference_body_id_ >= 0)
+    {
+      // Get sensor body transform in world frame
+      tf2::Vector3 sensor_pos(d->xpos[3 * body_id_ + 0], 
+                               d->xpos[3 * body_id_ + 1], 
+                               d->xpos[3 * body_id_ + 2]);
+      tf2::Quaternion sensor_quat(d->xquat[4 * body_id_ + 1], // x
+                                   d->xquat[4 * body_id_ + 2], // y  
+                                   d->xquat[4 * body_id_ + 3], // z
+                                   d->xquat[4 * body_id_ + 0]); // w
+      tf2::Transform T_world_sensor(sensor_quat, sensor_pos);
+
+      // Get reference body transform in world frame
+      tf2::Vector3 ref_pos(d->xpos[3 * reference_body_id_ + 0],
+                            d->xpos[3 * reference_body_id_ + 1], 
+                            d->xpos[3 * reference_body_id_ + 2]);
+      tf2::Quaternion ref_quat(d->xquat[4 * reference_body_id_ + 1], // x
+                                d->xquat[4 * reference_body_id_ + 2], // y
+                                d->xquat[4 * reference_body_id_ + 3], // z
+                                d->xquat[4 * reference_body_id_ + 0]); // w
+      tf2::Transform T_world_ref(ref_quat, ref_pos);
+
+      // Compute relative transform: T_ref_sensor = T_world_ref^-1 * T_world_sensor
+      tf2::Transform T_ref_sensor = T_world_ref.inverse() * T_world_sensor;
+
+      // Extract position and orientation
+      tf2::Vector3 rel_pos = T_ref_sensor.getOrigin();
+      tf2::Quaternion rel_quat = T_ref_sensor.getRotation();
+
+      msg.transform.translation.x = rel_pos.x();
+      msg.transform.translation.y = rel_pos.y();
+      msg.transform.translation.z = rel_pos.z();
+      msg.transform.rotation.w = rel_quat.w();
+      msg.transform.rotation.x = rel_quat.x();
+      msg.transform.rotation.y = rel_quat.y();
+      msg.transform.rotation.z = rel_quat.z();
+    }
+    else
+    {
+      // Use world frame (original behavior)
+      msg.transform.translation.x = d->xpos[3 * body_id_ + 0];
+      msg.transform.translation.y = d->xpos[3 * body_id_ + 1];
+      msg.transform.translation.z = d->xpos[3 * body_id_ + 2];
+      msg.transform.rotation.w = d->xquat[4 * body_id_ + 0];
+      msg.transform.rotation.x = d->xquat[4 * body_id_ + 1];
+      msg.transform.rotation.y = d->xquat[4 * body_id_ + 2];
+      msg.transform.rotation.z = d->xquat[4 * body_id_ + 3];
+    }
+
     tf_br_->sendTransform(msg);
   }
   else
@@ -245,26 +306,108 @@ void PosePublisher::compute(const mjModel * m, mjData * d, int // plugin_id
     geometry_msgs::msg::PoseStamped pose_msg;
     pose_msg.header.stamp = stamp_now;
     pose_msg.header.frame_id = frame_id_;
-    pose_msg.pose.position.x = d->xpos[3 * body_id_ + 0];
-    pose_msg.pose.position.y = d->xpos[3 * body_id_ + 1];
-    pose_msg.pose.position.z = d->xpos[3 * body_id_ + 2];
-    pose_msg.pose.orientation.w = d->xquat[4 * body_id_ + 0];
-    pose_msg.pose.orientation.x = d->xquat[4 * body_id_ + 1];
-    pose_msg.pose.orientation.y = d->xquat[4 * body_id_ + 2];
-    pose_msg.pose.orientation.z = d->xquat[4 * body_id_ + 3];
+
+    // If we have a reference body, compute relative pose
+    if(reference_body_id_ >= 0)
+    {
+      // Get sensor body transform in world frame
+      tf2::Vector3 sensor_pos(d->xpos[3 * body_id_ + 0], 
+                               d->xpos[3 * body_id_ + 1], 
+                               d->xpos[3 * body_id_ + 2]);
+      tf2::Quaternion sensor_quat(d->xquat[4 * body_id_ + 1], // x
+                                   d->xquat[4 * body_id_ + 2], // y  
+                                   d->xquat[4 * body_id_ + 3], // z
+                                   d->xquat[4 * body_id_ + 0]); // w
+      tf2::Transform T_world_sensor(sensor_quat, sensor_pos);
+
+      // Get reference body transform in world frame
+      tf2::Vector3 ref_pos(d->xpos[3 * reference_body_id_ + 0],
+                            d->xpos[3 * reference_body_id_ + 1], 
+                            d->xpos[3 * reference_body_id_ + 2]);
+      tf2::Quaternion ref_quat(d->xquat[4 * reference_body_id_ + 1], // x
+                                d->xquat[4 * reference_body_id_ + 2], // y
+                                d->xquat[4 * reference_body_id_ + 3], // z
+                                d->xquat[4 * reference_body_id_ + 0]); // w
+      tf2::Transform T_world_ref(ref_quat, ref_pos);
+
+      // Compute relative transform: T_ref_sensor = T_world_ref^-1 * T_world_sensor
+      tf2::Transform T_ref_sensor = T_world_ref.inverse() * T_world_sensor;
+
+      // Extract position and orientation
+      tf2::Vector3 rel_pos = T_ref_sensor.getOrigin();
+      tf2::Quaternion rel_quat = T_ref_sensor.getRotation();
+
+      pose_msg.pose.position.x = rel_pos.x();
+      pose_msg.pose.position.y = rel_pos.y();
+      pose_msg.pose.position.z = rel_pos.z();
+      pose_msg.pose.orientation.w = rel_quat.w();
+      pose_msg.pose.orientation.x = rel_quat.x();
+      pose_msg.pose.orientation.y = rel_quat.y();
+      pose_msg.pose.orientation.z = rel_quat.z();
+    }
+    else
+    {
+      // Use world frame (original behavior)
+      pose_msg.pose.position.x = d->xpos[3 * body_id_ + 0];
+      pose_msg.pose.position.y = d->xpos[3 * body_id_ + 1];
+      pose_msg.pose.position.z = d->xpos[3 * body_id_ + 2];
+      pose_msg.pose.orientation.w = d->xquat[4 * body_id_ + 0];
+      pose_msg.pose.orientation.x = d->xquat[4 * body_id_ + 1];
+      pose_msg.pose.orientation.y = d->xquat[4 * body_id_ + 2];
+      pose_msg.pose.orientation.z = d->xquat[4 * body_id_ + 3];
+    }
+
     pose_pub_->publish(pose_msg);
 
+    // For velocity, we need to transform it to the reference frame
     geometry_msgs::msg::TwistStamped vel_msg;
     mjtNum vel[6];
     mj_objectVelocity(m, d, mjOBJ_XBODY, body_id_, vel, 0);
     vel_msg.header.stamp = stamp_now;
     vel_msg.header.frame_id = frame_id_;
-    vel_msg.twist.linear.x = vel[3];
-    vel_msg.twist.linear.y = vel[4];
-    vel_msg.twist.linear.z = vel[5];
-    vel_msg.twist.angular.x = vel[0];
-    vel_msg.twist.angular.y = vel[1];
-    vel_msg.twist.angular.z = vel[2];
+
+    if(reference_body_id_ >= 0)
+    {
+      // Get reference body velocity
+      mjtNum ref_vel[6];
+      mj_objectVelocity(m, d, mjOBJ_XBODY, reference_body_id_, ref_vel, 0);
+
+      // Get reference body orientation for velocity transformation
+      tf2::Quaternion ref_quat(d->xquat[4 * reference_body_id_ + 1], // x
+                                d->xquat[4 * reference_body_id_ + 2], // y
+                                d->xquat[4 * reference_body_id_ + 3], // z
+                                d->xquat[4 * reference_body_id_ + 0]); // w
+      tf2::Matrix3x3 ref_rot_matrix(ref_quat);
+      tf2::Matrix3x3 ref_rot_matrix_inv = ref_rot_matrix.transpose();
+
+      // Transform linear velocity to reference frame and compute relative velocity
+      tf2::Vector3 sensor_lin_vel(vel[3], vel[4], vel[5]);
+      tf2::Vector3 ref_lin_vel(ref_vel[3], ref_vel[4], ref_vel[5]);
+      tf2::Vector3 rel_lin_vel = ref_rot_matrix_inv * (sensor_lin_vel - ref_lin_vel);
+
+      // Transform angular velocity to reference frame and compute relative velocity  
+      tf2::Vector3 sensor_ang_vel(vel[0], vel[1], vel[2]);
+      tf2::Vector3 ref_ang_vel(ref_vel[0], ref_vel[1], ref_vel[2]);
+      tf2::Vector3 rel_ang_vel = ref_rot_matrix_inv * (sensor_ang_vel - ref_ang_vel);
+
+      vel_msg.twist.linear.x = rel_lin_vel.x();
+      vel_msg.twist.linear.y = rel_lin_vel.y();
+      vel_msg.twist.linear.z = rel_lin_vel.z();
+      vel_msg.twist.angular.x = rel_ang_vel.x();
+      vel_msg.twist.angular.y = rel_ang_vel.y();
+      vel_msg.twist.angular.z = rel_ang_vel.z();
+    }
+    else
+    {
+      // Use world frame (original behavior)
+      vel_msg.twist.linear.x = vel[3];
+      vel_msg.twist.linear.y = vel[4];
+      vel_msg.twist.linear.z = vel[5];
+      vel_msg.twist.angular.x = vel[0];
+      vel_msg.twist.angular.y = vel[1];
+      vel_msg.twist.angular.z = vel[2];
+    }
+
     vel_pub_->publish(vel_msg);
   }
 }

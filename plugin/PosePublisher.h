@@ -58,6 +58,7 @@ protected:
       \param publish_rate publish rate
       \param output_tf whether to broadcast TF
       \param tf_child_frame_id child frame ID for TF
+      \param reference_body_id reference body ID for relative transforms
   */
   PosePublisher(const mjModel * m,
                 mjData * d,
@@ -67,7 +68,8 @@ protected:
                 const std::string & vel_topic_name,
                 mjtNum publish_rate,
                 bool output_tf,
-                const std::string & tf_child_frame_id);
+                const std::string & tf_child_frame_id,
+                int reference_body_id = -1);
 
 protected:
   //! Sensor ID
@@ -75,6 +77,9 @@ protected:
 
   //! Body ID
   int body_id_ = -1;
+
+  //! Reference body ID for relative transforms
+  int reference_body_id_ = -1;
 
   //! ROS node handle
   rclcpp::Node::SharedPtr nh_;
