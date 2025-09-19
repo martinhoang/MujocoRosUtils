@@ -78,6 +78,9 @@ protected:
       \param color_topic_name topic name of color image
       \param depth_topic_name topic name of depth image
       \param info_topic_name topic name of camera information
+      \param point_cloud_topic_name topic name of point cloud
+      \param rotate_point_cloud whether to rotate point cloud to align with ROS coordinate system
+      \param point_cloud_rotation_preset preset for point cloud rotation
       \param height image height
       \param width image width
       \param publish_rate publish rate
@@ -85,8 +88,8 @@ protected:
   ImagePublisher(const mjModel *m, mjData *d, int sensor_id, const std::string &frame_id,
                  std::string color_topic_name, std::string depth_topic_name,
                  std::string info_topic_name, std::string point_cloud_topic_name,
-                 bool rotate_point_cloud, int height, int width, mjtNum publish_rate,
-                 double max_range);
+                 bool rotate_point_cloud, const std::string &point_cloud_rotation_preset,
+                 int height, int width, mjtNum publish_rate, double max_range);
 
 protected:
   //! MuJoCo model
@@ -98,22 +101,26 @@ protected:
   //! Camera ID
   int camera_id_ = -1;
 
-  //! Frame ID of topics header or TF parent
-  std::string frame_id_;
+  //! Frame ID
+  std::string frame_id_ = "";
 
-  //! Iteration interval to skip ROS publish
-  int publish_skip_ = 0;
+  //! Rotate point cloud
+  bool        rotate_point_cloud_          = false;
+  std::string point_cloud_rotation_preset_ = "";
+
+  //! Number of steps to skip between publications
+  int publish_skip_ = 1;
+
+  //! Viewport
+  mjrRect viewport_;
 
   //! Iteration count of simulation
   int sim_cnt_ = 0;
 
-  //! Whether to rotate the point cloud to match ROS conventions
-
   //! Parameters for point cloud conversion
   //! @{
-  double range_max_ = 0.0;
-  bool use_quiet_nan_ = true;
-  bool rotate_point_cloud_ = true;
+  double range_max_     = 0.0;
+  bool   use_quiet_nan_ = true;
   //! @}
 
   //! Data buffer
@@ -132,7 +139,6 @@ protected:
   mjvCamera   camera_;
   mjvOption   option_;
   mjrContext  context_;
-  mjrRect     viewport_;
   GLFWwindow *window_;
   //! @}
 

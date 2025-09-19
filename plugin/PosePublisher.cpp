@@ -10,6 +10,13 @@
 namespace MujocoRosUtils
 {
 
+constexpr char ATTR_FRAME_ID[]                = "frame_id";
+constexpr char ATTR_PUBLISH_RATE[]            = "publish_rate";
+constexpr char ATTR_OUTPUT_TF[]               = "output_tf";
+constexpr char ATTR_TF_CHILD_FRAME_ID[]       = "tf_child_frame_id";
+constexpr char ATTR_POSE_TOPIC_NAME[]         = "pose_topic_name";
+constexpr char ATTR_VEL_TOPIC_NAME[]          = "vel_topic_name";
+
 void PosePublisher::RegisterPlugin()
 {
   mjpPlugin plugin;
@@ -18,8 +25,8 @@ void PosePublisher::RegisterPlugin()
   plugin.name = "MujocoRosUtils::PosePublisher";
   plugin.capabilityflags |= mjPLUGIN_SENSOR;
 
-  const char * attributes[] = {"frame_id",     "pose_topic_name", "vel_topic_name",
-                               "publish_rate", "output_tf",       "tf_child_frame_id"};
+  const char * attributes[] = {ATTR_FRAME_ID,     ATTR_POSE_TOPIC_NAME, ATTR_VEL_TOPIC_NAME,
+                               ATTR_PUBLISH_RATE, ATTR_OUTPUT_TF,       ATTR_TF_CHILD_FRAME_ID};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
   plugin.attributes = attributes;
@@ -72,7 +79,7 @@ void PosePublisher::RegisterPlugin()
 PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_id)
 {
   // frame_id
-  const char * frame_id_char = mj_getPluginConfig(m, plugin_id, "frame_id");
+  const char * frame_id_char = mj_getPluginConfig(m, plugin_id, ATTR_FRAME_ID);
   std::string frame_id = "";
   if(frame_id_char && strlen(frame_id_char) > 0)
   {
@@ -80,7 +87,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   }
 
   // pose_topic_name
-  const char * pose_topic_name_char = mj_getPluginConfig(m, plugin_id, "pose_topic_name");
+  const char * pose_topic_name_char = mj_getPluginConfig(m, plugin_id, ATTR_POSE_TOPIC_NAME);
   std::string pose_topic_name = "";
   if(pose_topic_name_char && strlen(pose_topic_name_char) > 0)
   {
@@ -88,7 +95,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   }
 
   // vel_topic_name
-  const char * vel_topic_name_char = mj_getPluginConfig(m, plugin_id, "vel_topic_name");
+  const char * vel_topic_name_char = mj_getPluginConfig(m, plugin_id, ATTR_VEL_TOPIC_NAME);
   std::string vel_topic_name = "";
   if(vel_topic_name_char && strlen(vel_topic_name_char) > 0)
   {
@@ -96,7 +103,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   }
 
   // publish_rate
-  const char * publish_rate_char = mj_getPluginConfig(m, plugin_id, "publish_rate");
+  const char * publish_rate_char = mj_getPluginConfig(m, plugin_id, ATTR_PUBLISH_RATE);
   mjtNum publish_rate = 30.0;
   if(publish_rate_char && strlen(publish_rate_char) > 0)
   {
@@ -109,7 +116,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   }
 
   // output_tf
-  const char * output_tf_char = mj_getPluginConfig(m, plugin_id, "output_tf");
+  const char * output_tf_char = mj_getPluginConfig(m, plugin_id, ATTR_OUTPUT_TF);
   bool output_tf = false;
   if(output_tf_char && strlen(output_tf_char) > 0)
   {
@@ -122,7 +129,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   }
 
   // tf_child_frame_id
-  const char * tf_child_frame_id_char = mj_getPluginConfig(m, plugin_id, "tf_child_frame_id");
+  const char * tf_child_frame_id_char = mj_getPluginConfig(m, plugin_id, ATTR_TF_CHILD_FRAME_ID);
   std::string tf_child_frame_id = "";
   if(tf_child_frame_id_char && strlen(tf_child_frame_id_char) > 0)
   {

@@ -11,16 +11,17 @@
 namespace MujocoRosUtils
 {
 
-constexpr char ATTR_FRAME_ID[]               = "frame_id";
-constexpr char ATTR_COLOR_TOPIC_NAME[]       = "color_topic_name";
-constexpr char ATTR_DEPTH_TOPIC_NAME[]       = "depth_topic_name";
-constexpr char ATTR_INFO_TOPIC_NAME[]        = "info_topic_name";
-constexpr char ATTR_POINT_CLOUD_TOPIC_NAME[] = "point_cloud_topic_name";
-constexpr char ATTR_ROTATE_POINT_CLOUD[]     = "rotate_point_cloud";
-constexpr char ATTR_HEIGHT[]                 = "height";
-constexpr char ATTR_WIDTH[]                  = "width";
-constexpr char ATTR_PUBLISH_RATE[]           = "publish_rate";
-constexpr char ATTR_MAX_RANGE[]              = "max_range";
+constexpr char ATTR_FRAME_ID[]                    = "frame_id";
+constexpr char ATTR_COLOR_TOPIC_NAME[]            = "color_topic_name";
+constexpr char ATTR_DEPTH_TOPIC_NAME[]            = "depth_topic_name";
+constexpr char ATTR_INFO_TOPIC_NAME[]             = "info_topic_name";
+constexpr char ATTR_POINT_CLOUD_TOPIC_NAME[]      = "point_cloud_topic_name";
+constexpr char ATTR_ROTATE_POINT_CLOUD[]          = "rotate_point_cloud";
+constexpr char ATTR_POINT_CLOUD_ROTATION_PRESET[] = "point_cloud_rotation_preset";
+constexpr char ATTR_HEIGHT[]                      = "height";
+constexpr char ATTR_WIDTH[]                       = "width";
+constexpr char ATTR_PUBLISH_RATE[]                = "publish_rate";
+constexpr char ATTR_MAX_RANGE[]                   = "max_range";
 
 void ImagePublisher::RegisterPlugin()
 {
@@ -36,6 +37,7 @@ void ImagePublisher::RegisterPlugin()
                               ATTR_INFO_TOPIC_NAME,
                               ATTR_POINT_CLOUD_TOPIC_NAME,
                               ATTR_ROTATE_POINT_CLOUD,
+                              ATTR_POINT_CLOUD_ROTATION_PRESET,
                               ATTR_HEIGHT,
                               ATTR_WIDTH,
                               ATTR_PUBLISH_RATE,
@@ -134,15 +136,36 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     point_cloud_topic_name = std::string(point_cloud_topic_name_char);
   }
 
-  // rotate_point_cloud
+  // point_cloud rotation enabled
   const char *rotate_point_cloud_char = mj_getPluginConfig(m, plugin_id, ATTR_ROTATE_POINT_CLOUD);
   bool        rotate_point_cloud      = true;
-  if (strlen(rotate_point_cloud_char) > 0)
+  if (rotate_point_cloud_char && strlen(rotate_point_cloud_char) > 0)
   {
-    if (strcmp(rotate_point_cloud_char, "false") == 0)
+    if (std::string(rotate_point_cloud_char) == "false"
+        || std::string(rotate_point_cloud_char) == "0")
     {
       rotate_point_cloud = false;
     }
+    else if (std::string(rotate_point_cloud_char) == "true"
+             || std::string(rotate_point_cloud_char) == "1")
+    {
+      rotate_point_cloud = true;
+    }
+    else
+    {
+      mju_error("[ImagePublisher] `rotate_point_cloud` must be `true (1)` or `false (0)`.");
+      return nullptr;
+    }
+  }
+
+  // point_cloud_rotation_preset
+  const char *point_cloud_rotation_preset_char
+    = mj_getPluginConfig(m, plugin_id, ATTR_POINT_CLOUD_ROTATION_PRESET);
+  std::string point_cloud_rotation_preset = depthimage_to_pointcloud2::PCL_ROT_PRESET_RDF_TO_FLU;
+  if (rotate_point_cloud && point_cloud_rotation_preset_char
+      && strlen(point_cloud_rotation_preset_char) > 0)
+  {
+    point_cloud_rotation_preset = point_cloud_rotation_preset_char;
   }
 
   // height
@@ -216,8 +239,8 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   std::cout << "[ImagePublisher] Create." << std::endl;
 
   return new ImagePublisher(m, d, sensor_id, frame_id, color_topic_name, depth_topic_name,
-                            info_topic_name, point_cloud_topic_name, rotate_point_cloud, height,
-                            width, publish_rate, max_range);
+                            info_topic_name, point_cloud_topic_name, rotate_point_cloud,
+                            point_cloud_rotation_preset, height, width, publish_rate, max_range);
 }
 
 ImagePublisher::ImagePublisher(const mjModel *m,
@@ -225,13 +248,15 @@ ImagePublisher::ImagePublisher(const mjModel *m,
                                int sensor_id, const std::string &frame_id,
                                std::string color_topic_name, std::string depth_topic_name,
                                std::string info_topic_name, std::string point_cloud_topic_name,
-                               bool rotate_point_cloud, int height, int width, mjtNum publish_rate,
-                               double max_range)
+                               bool               rotate_point_cloud,
+                               const std::string &point_cloud_rotation_preset, int height,
+                               int width, mjtNum publish_rate, double max_range)
     : m_(m)
     , sensor_id_(sensor_id)
     , camera_id_(m->sensor_objid[sensor_id])
     , frame_id_(frame_id)
     , rotate_point_cloud_(rotate_point_cloud)
+    , point_cloud_rotation_preset_(point_cloud_rotation_preset)
     , publish_skip_(std::max(static_cast<int>(1.0 / (publish_rate * m->opt.timestep)), 1))
     , viewport_({0, 0, width, height})
 {
@@ -592,12 +617,14 @@ void MujocoRosUtils::ImagePublisher::publishThread()
       if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_16UC1)
       {
         depthimage_to_pointcloud2::convert<uint16_t>(depth_msg_ptr, cloud_msg, model, range_max_,
-                                                     use_quiet_nan_, rotate_point_cloud_, cv_ptr);
+                                                     use_quiet_nan_, point_cloud_rotation_preset_,
+                                                     cv_ptr);
       }
       else if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_32FC1)
       {
         depthimage_to_pointcloud2::convert<float>(depth_msg_ptr, cloud_msg, model, range_max_,
-                                                  use_quiet_nan_, rotate_point_cloud_, cv_ptr);
+                                                  use_quiet_nan_, point_cloud_rotation_preset_,
+                                                  cv_ptr);
       }
       else
       {
