@@ -75,7 +75,7 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
     {
       mujoco_system_loader_.reset(
         new pluginlib::ClassLoader<mujoco_ros2_control::MujocoSystemInterface>(
-          "mujoco_ros2_control", /* Package where this plugin is located */
+          "mujoco_ros_utils", /* Package where this plugin is located */
           "mujoco_ros2_control::MujocoSystemInterface"));
     }
     catch (pluginlib::PluginlibException &ex)

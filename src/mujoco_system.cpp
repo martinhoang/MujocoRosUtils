@@ -9,8 +9,8 @@ namespace mujoco_ros2_control
 
 struct Joint
 {
-  std::size_t id;                 // id of the joint in the Mujoco model
-  std::string name;               // Name of the joint
+  std::size_t id;   // id of the joint in the Mujoco model
+  std::string name; // Name of the joint
 
   // States
   double position;
@@ -203,8 +203,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
 
     if (last_joint.is_mimic)
     {
-      RCLCPP_INFO(node_->get_logger(), "Registered mimic joint '%s' id %d\n", joint_info.name.c_str(),
-                  joint_id);
+      RCLCPP_INFO(node_->get_logger(), "Registered mimic joint '%s' id %d\n",
+                  joint_info.name.c_str(), joint_id);
       continue;
     }
 
@@ -327,18 +327,23 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
           continue;
         }
 
-        const int bias_type = m->actuator_biastype[idx];
-        const char *aname   = mj_id2name(m, mjOBJ_ACTUATOR, idx);
-        const std::string an = aname ? std::string(aname) : std::string();
+        const int         dyn_type  = m->actuator_dyntype[idx];
+        const int         gain_type = m->actuator_gaintype[idx];
+        const int         bias_type = m->actuator_biastype[idx];
+        const char       *aname     = mj_id2name(m, mjOBJ_ACTUATOR, idx);
+        const std::string an        = aname ? std::string(aname) : std::string();
+        RCLCPP_INFO(node_->get_logger(), "Actuator %d: name='%s' dyn=%d gain=%d bias=%d trn=%d\n", idx, aname ? aname : "unnamed", dyn_type, gain_type, bias_type, m->actuator_trnid[2 * idx]);
 
         // Heuristics:
-        // - velocity servos: bias = AFFINE (kv applied via bias)
-        // - position servos: bias = NONE (no bias; kp only)
-        // - additionally allow name hints _position/_velocity
-        const bool looks_position = (bias_type == mjBIAS_NONE)
-                                    || (an.find("position") != std::string::npos);
-        const bool looks_velocity = (bias_type == mjBIAS_AFFINE)
-                                    || (an.find("velocity") != std::string::npos);
+        // - Firstly, look for name hints _position/_velocity
+        // - position servos: dyntype (none | filterexact), gaintype (fixed), biastype (affine)
+        // - velocity servos: dyntype (none), gaintype (fixed), biastype (none)
+        
+        bool looks_position = (an.find("_position") != std::string::npos);
+        looks_position |= (dyn_type == mjDYN_NONE || dyn_type == mjDYN_FILTEREXACT) && (gain_type == mjGAIN_FIXED) && (bias_type == mjBIAS_AFFINE);
+
+        bool looks_velocity = (an.find("_velocity") != std::string::npos);
+        looks_velocity |= (dyn_type == mjDYN_NONE) && (gain_type  == mjGAIN_FIXED) && (bias_type == mjBIAS_AFFINE);
 
         if (looks_position && last_joint.position_actuator_id == static_cast<std::size_t>(-1))
         {
@@ -361,7 +366,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         }
 
         // Fallback: if effort command requested but not mapped yet, bind first remaining actuator
-        if (last_joint.has_effort_cmd && last_joint.effort_actuator_id == static_cast<std::size_t>(-1))
+        if (last_joint.has_effort_cmd
+            && last_joint.effort_actuator_id == static_cast<std::size_t>(-1))
         {
           last_joint.effort_actuator_id = static_cast<std::size_t>(idx);
           if (!std::isnan(initial_effort))
@@ -371,10 +377,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         }
       }
 
-      RCLCPP_INFO(node_->get_logger(),
-                  "Joint '%s' actuators: pos=%ld vel=%ld eff=%ld",
-                  last_joint.name.c_str(),
-                  static_cast<long>(last_joint.position_actuator_id),
+      RCLCPP_INFO(node_->get_logger(), "Joint '%s' actuators: pos=%ld vel=%ld eff=%ld",
+                  last_joint.name.c_str(), static_cast<long>(last_joint.position_actuator_id),
                   static_cast<long>(last_joint.velocity_actuator_id),
                   static_cast<long>(last_joint.effort_actuator_id));
     }
