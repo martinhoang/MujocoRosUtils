@@ -12,6 +12,8 @@ constexpr char ATTR_ROBOT_PARAM_NODE[] = "robot_param_node";
 constexpr char ATTR_CONFIG_FILE[]      = "config_file";
 constexpr char ATTR_PARAMETERS[]       = "parameters";
 
+using namespace std::chrono_literals;
+
 namespace MujocoRosUtils
 {
 
@@ -121,15 +123,36 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
 Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config_file_path)
     : model_(model)
     , data_(data)
+    , config_file_path_(config_file_path)
 {
   ros_control_instances_++;
+
+  // Attempt initialization, but don't fail if service is unavailable
+  try
+  {
+    initialize();
+  }
+  catch (const std::exception &e)
+  {
+    RCLCPP_WARN(rclcpp::get_logger("Ros2Control"),
+                "Initial initialization failed, will retry during compute: %s", e.what());
+  }
+}
+
+bool Ros2Control::initialize()
+{
+  if (initialized_ || node_)
+  {
+    return initialized_;
+  }
+
   if (!node_)
   {
     if (!rclcpp::ok())
     {
       RCLCPP_INFO(rclcpp::get_logger("Ros2Control"), "Passing ros2 config file: %s",
-                  config_file_path.c_str());
-      const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, config_file_path.c_str()};
+                  config_file_path_.c_str());
+      const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, config_file_path_.c_str()};
       int         argc   = sizeof(argv) / sizeof(argv[0]);
       rclcpp::init(argc, argv);
     }
@@ -157,28 +180,26 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
                          "Using default robot state publisher: " << robot_param_node << std::endl);
     }
 
-    using namespace std::chrono_literals;
     // Create a parameter client to try to get param from the target node
     auto parameters_client
       = std::make_shared<rclcpp::AsyncParametersClient>(node_, robot_param_node);
-    constexpr int max_attempts = 5;
+    constexpr int max_attempts = 3;
     int           attempts     = 0;
-    while (!parameters_client->wait_for_service(0.5s))
+    while (!parameters_client->wait_for_service(200ms))
     {
       attempts++;
       if (attempts >= max_attempts)
       {
-        RCLCPP_ERROR(node_->get_logger(),
-                     "Exceeded max attempts of %d to connect to %s service. Failing.", max_attempts,
-                     robot_param_node.c_str());
-        throw std::runtime_error("Failed to connect to parameter service from node '"
-                                 + robot_param_node + "'");
+        RCLCPP_WARN(node_->get_logger(),
+                    "Could not connect to %s service after %d attempts. Will retry later.",
+                    robot_param_node.c_str(), max_attempts);
+        throw std::runtime_error("Service not available: " + robot_param_node);
       }
       if (!rclcpp::ok())
       {
-        mju_error("Interrupted while waiting for %s service. Exiting.", robot_param_node.c_str());
+        throw std::runtime_error("ROS shutdown while waiting for service");
       }
-      RCLCPP_ERROR(node_->get_logger(), "%s service not available, waiting again...",
+      RCLCPP_DEBUG(node_->get_logger(), "%s service not available, waiting again...",
                    robot_param_node.c_str());
     }
 
@@ -187,21 +208,21 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
                 param_name.c_str());
 
     rclcpp::Time start_time = node_->get_clock()->now();
-    while (urdf_string.empty() && (node_->get_clock()->now() - start_time).seconds() < 5)
+    while (urdf_string.empty() && (node_->get_clock()->now() - start_time).seconds() < 2)
     {
-      RCLCPP_INFO(node_->get_logger(), "Waiting for parameter [%s] on the ROS param server.",
-                  param_name.c_str());
+      RCLCPP_DEBUG(node_->get_logger(), "Waiting for parameter [%s] on the ROS param server.",
+                   param_name.c_str());
       try
       {
         auto f = parameters_client->get_parameters({param_name});
-        f.wait_for(std::chrono::milliseconds(100));
+        f.wait_for(50ms);
         executor_->spin_some();
         std::vector<rclcpp::Parameter> values = f.get();
         urdf_string                           = values[0].as_string();
       }
       catch (const std::exception &e)
       {
-        RCLCPP_ERROR(node_->get_logger(), "%s", e.what());
+        RCLCPP_DEBUG(node_->get_logger(), "Parameter request failed: %s", e.what());
       }
 
       if (!urdf_string.empty())
@@ -210,27 +231,26 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
       }
       else
       {
-        RCLCPP_INFO(node_->get_logger(),
-                    "Ros2Control plugin is waiting for model"
-                    " URDF in parameter [%s] on the ROS param server.",
-                    param_name.c_str());
+        RCLCPP_DEBUG(node_->get_logger(),
+                     "Ros2Control plugin is waiting for model"
+                     " URDF in parameter [%s] on the ROS param server.",
+                     param_name.c_str());
       }
-      std::this_thread::sleep_for(std::chrono::microseconds(100000));
+      std::this_thread::sleep_for(50ms);
 
       if (!rclcpp::ok())
       {
-        RCLCPP_INFO(node_->get_logger(), "Interrupted while waiting for %s service. Exiting.",
-                    robot_param_node.c_str());
-        return;
+        throw std::runtime_error("ROS shutdown while waiting for URDF parameter");
       }
     }
 
     if (urdf_string.empty())
     {
-      RCLCPP_ERROR(node_->get_logger(),
-                   "Failed to get URDF from parameter [%s] on the ROS param server.",
-                   param_name.c_str());
-      return;
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Failed to get URDF from parameter [%s] on the ROS param server. Will retry later.",
+        param_name.c_str());
+      throw std::runtime_error("URDF parameter not available");
     }
 
     RCLCPP_INFO(node_->get_logger(), "Got the URDF from paramter service");
@@ -239,11 +259,11 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
     auto rcl_context = node_->get_node_base_interface()->get_context()->get_rcl_context();
     std::vector<std::string> arguments;
 
-    if (!config_file_path.empty())
+    if (!config_file_path_.empty())
     {
       arguments.push_back(RCL_ROS_ARGS_FLAG);
       arguments.push_back(RCL_PARAM_FILE_FLAG);
-      arguments.push_back(config_file_path);
+      arguments.push_back(config_file_path_);
     }
     else
     {
@@ -267,14 +287,14 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
     if (rcl_return != RCL_RET_OK)
     {
       RCLCPP_ERROR(node_->get_logger(), "Error parsing config file at %s:\n%s",
-                   config_file_path.c_str(), rcl_get_error_string().str);
-      return;
+                   config_file_path_.c_str(), rcl_get_error_string().str);
+      return false;
     }
     if (rcl_arguments_get_param_files_count(&rcl_arguments) < 1)
     {
       RCLCPP_ERROR(node_->get_logger(), "Failed to parse input yaml config file at %s",
-                   config_file_path.c_str());
-      return;
+                   config_file_path_.c_str());
+      return false;
     }
 
     std::vector<hardware_interface::HardwareInfo> control_hardware_info;
@@ -374,29 +394,52 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
     };
 
     executor_thread_ = std::thread(spin);
+
+    // Mark initialization as complete
+    initialized_ = true;
+    RCLCPP_INFO(node_->get_logger(), "Ros2Control initialization completed successfully");
   }
+
+  return initialized_;
 }
 
 Ros2Control::~Ros2Control()
 {
-  RCLCPP_INFO(node_->get_logger(), "Destroying Ros2Control plugin\n");
   if (node_)
+  {
+    RCLCPP_INFO(node_->get_logger(), "Destroying Ros2Control plugin\n");
+  }
+  else
+  {
+    print_confirm("Destroying Ros2Control plugin (not initialized)\n");
+  }
+
+  if (initialized_ && node_)
   {
     stop_executor_thread_ = true;
     try
     {
       executor_->remove_node(node_);
-      executor_->remove_node(controller_manager_);
+      if (controller_manager_)
+      {
+        executor_->remove_node(controller_manager_);
+      }
     }
     catch (const std::exception &e)
     {
-      RCLCPP_WARN(node_->get_logger(),
-                  "Error while removing nodes from executor: %s This might be normal as the "
-                  "node/controller_manager might be cleaned up by now.",
-                  e.what());
+      if (node_)
+      {
+        RCLCPP_WARN(node_->get_logger(),
+                    "Error while removing nodes from executor: %s This might be normal as the "
+                    "node/controller_manager might be cleaned up by now.",
+                    e.what());
+      }
     }
 
-    executor_->cancel();
+    if (executor_)
+    {
+      executor_->cancel();
+    }
     if (executor_thread_.joinable())
     {
       executor_thread_.join();
@@ -404,16 +447,16 @@ Ros2Control::~Ros2Control()
     controller_manager_.reset();
     node_.reset();
     executor_.reset();
-
-    // Only shut down ROS if this is the last instance
-    ros_control_instances_--;
-    if (ros_control_instances_ == 0 && rclcpp::ok())
-    {
-      rclcpp::shutdown();
-    }
-    
-    print_confirm("Ros2Control plugin destroyed successfully\n");
   }
+
+  // Always decrement the counter and potentially shut down ROS
+  ros_control_instances_--;
+  if (ros_control_instances_ == 0 && rclcpp::ok())
+  {
+    rclcpp::shutdown();
+  }
+
+  print_confirm("Ros2Control plugin destroyed successfully\n");
 }
 
 void Ros2Control::reset(const mjModel *m, int plugin_id)
@@ -433,12 +476,31 @@ void Ros2Control::reset(const mjModel *m, int plugin_id)
 
 void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
 {
+  // Try to initialize if not yet initialized
+  if (!initialized_)
+  {
+    try
+    {
+      if (!initialize())
+      {
+        return;
+      }
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_DEBUG_THROTTLE(rclcpp::get_logger("Ros2Control"),
+                            *rclcpp::Clock::make_shared(RCL_ROS_TIME), 2000,
+                            "Initialization still failing: %s", e.what());
+      return;
+    }
+  }
+
   builtin_interfaces::msg::Time sim_time_now;
   sim_time_now.sec     = static_cast<int32_t>(d->time);
   sim_time_now.nanosec = static_cast<uint32_t>((d->time - sim_time_now.sec) * 1e9);
 
   // Call ROS callback
-  if (rclcpp::ok() && node_)
+  if (rclcpp::ok() && node_ && initialized_)
   {
     rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
     rclcpp::Duration duration = now - last_update_;

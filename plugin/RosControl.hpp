@@ -7,9 +7,9 @@
 #include <pluginlib/class_loader.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include <atomic>
 #include <memory>
 #include <thread>
-#include <atomic>
 
 namespace MujocoRosUtils
 {
@@ -29,6 +29,7 @@ public:
   void compute(const mjModel *m, mjData *d, int plugin_id);
 
 protected:
+  bool                    initialize();
   rclcpp::Node::SharedPtr node_  = nullptr;
   const mjModel          *model_ = nullptr;
   mjData                 *data_  = nullptr;
@@ -42,6 +43,10 @@ protected:
   double       update_rate_    = 100.0;
   double       control_period_ = 1.0 / update_rate_;
   rclcpp::Time last_update_    = rclcpp::Time{(uint64_t)0, RCL_ROS_TIME};
+
+  // Initialization state management
+  bool        initialized_ = false;
+  std::string config_file_path_;
 
   static inline std::atomic<int> ros_control_instances_{0};
 };
