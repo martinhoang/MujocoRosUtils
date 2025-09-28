@@ -75,6 +75,7 @@ protected:
       \param d data
       \param sensor_id sensor ID
       \param frame_id frame ID of topics header or TF parent
+      \param topic_namespace namespace prefix for all topics
       \param color_topic_name topic name of color image
       \param depth_topic_name topic name of depth image
       \param info_topic_name topic name of camera information
@@ -86,6 +87,7 @@ protected:
       \param publish_rate publish rate
   */
   ImagePublisher(const mjModel *m, mjData *d, int sensor_id, const std::string &frame_id,
+                 const std::string &topic_namespace,
                  std::string color_topic_name, std::string depth_topic_name,
                  std::string info_topic_name, std::string point_cloud_topic_name,
                  bool rotate_point_cloud, const std::string &point_cloud_rotation_preset,

@@ -12,6 +12,7 @@ namespace MujocoRosUtils
 {
 
 constexpr char ATTR_FRAME_ID[]                    = "frame_id";
+constexpr char ATTR_NAMESPACE[]                   = "namespace";
 constexpr char ATTR_COLOR_TOPIC_NAME[]            = "color_topic_name";
 constexpr char ATTR_DEPTH_TOPIC_NAME[]            = "depth_topic_name";
 constexpr char ATTR_INFO_TOPIC_NAME[]             = "info_topic_name";
@@ -32,6 +33,7 @@ void ImagePublisher::RegisterPlugin()
   plugin.capabilityflags |= mjPLUGIN_SENSOR;
 
   const char *attributes[] = {ATTR_FRAME_ID,
+                              ATTR_NAMESPACE,
                               ATTR_COLOR_TOPIC_NAME,
                               ATTR_DEPTH_TOPIC_NAME,
                               ATTR_INFO_TOPIC_NAME,
@@ -101,6 +103,19 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   if (strlen(frame_id_char) > 0)
   {
     frame_id = std::string(frame_id_char);
+  }
+
+  // namespace
+  const char *namespace_char = mj_getPluginConfig(m, plugin_id, ATTR_NAMESPACE);
+  std::string topic_namespace = "";
+  if (strlen(namespace_char) > 0)
+  {
+    topic_namespace = std::string(namespace_char);
+    // Ensure namespace ends with '/' if not empty
+    if (!topic_namespace.empty() && topic_namespace.back() != '/')
+    {
+      topic_namespace += "/";
+    }
   }
 
   // color_topic_name
@@ -238,7 +253,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
 
   std::cout << "[ImagePublisher] Create." << std::endl;
 
-  return new ImagePublisher(m, d, sensor_id, frame_id, color_topic_name, depth_topic_name,
+  return new ImagePublisher(m, d, sensor_id, frame_id, topic_namespace, color_topic_name, depth_topic_name,
                             info_topic_name, point_cloud_topic_name, rotate_point_cloud,
                             point_cloud_rotation_preset, height, width, publish_rate, max_range);
 }
@@ -246,6 +261,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
 ImagePublisher::ImagePublisher(const mjModel *m,
                                mjData *, // d
                                int sensor_id, const std::string &frame_id,
+                               const std::string &topic_namespace,
                                std::string color_topic_name, std::string depth_topic_name,
                                std::string info_topic_name, std::string point_cloud_topic_name,
                                bool               rotate_point_cloud,
@@ -267,19 +283,19 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   }
   if (color_topic_name.empty())
   {
-    color_topic_name = "mujoco/" + camera_name + "/color";
+    color_topic_name = topic_namespace + camera_name + "/color";
   }
   if (depth_topic_name.empty())
   {
-    depth_topic_name = "mujoco/" + camera_name + "/depth";
+    depth_topic_name = topic_namespace + camera_name + "/depth";
   }
   if (info_topic_name.empty())
   {
-    info_topic_name = "mujoco/" + camera_name + "/camera_info";
+    info_topic_name = topic_namespace + camera_name + "/camera_info";
   }
   if (point_cloud_topic_name.empty())
   {
-    point_cloud_topic_name = "mujoco/" + camera_name + "/point_cloud";
+    point_cloud_topic_name = topic_namespace + camera_name + "/point_cloud";
   }
 
   // Set GLFW error callback
