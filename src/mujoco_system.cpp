@@ -339,12 +339,19 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         // - position servos: dyntype (none | filterexact), gaintype (fixed), biastype (affine)
         // - velocity servos: dyntype (none), gaintype (fixed), biastype (none)
         
-        bool looks_position = (an.find("_position") != std::string::npos);
-        looks_position |= (dyn_type == mjDYN_NONE || dyn_type == mjDYN_FILTEREXACT) && (gain_type == mjGAIN_FIXED) && (bias_type == mjBIAS_AFFINE);
+        bool looks_position = (an.find("position") != std::string::npos);
+        bool looks_velocity = (an.find("velocity") != std::string::npos);
 
-        bool looks_velocity = (an.find("_velocity") != std::string::npos);
-        looks_velocity |= (dyn_type == mjDYN_NONE) && (gain_type  == mjGAIN_FIXED) && (bias_type == mjBIAS_AFFINE);
-
+        if (!looks_velocity)
+        {
+          looks_position |= (dyn_type == mjDYN_NONE || dyn_type == mjDYN_FILTEREXACT) && (gain_type == mjGAIN_FIXED) && (bias_type == mjBIAS_AFFINE);
+        }
+        
+        if (!looks_position)
+        {
+          looks_velocity |= (dyn_type == mjDYN_NONE) && (gain_type  == mjGAIN_FIXED) && (bias_type == mjBIAS_AFFINE);
+        }
+          
         if (looks_position && last_joint.position_actuator_id == static_cast<std::size_t>(-1))
         {
           last_joint.position_actuator_id = static_cast<std::size_t>(idx);
