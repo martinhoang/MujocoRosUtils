@@ -106,9 +106,9 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // namespace
-  const char *namespace_char = mj_getPluginConfig(m, plugin_id, ATTR_NAMESPACE);
+  const char *namespace_char  = mj_getPluginConfig(m, plugin_id, ATTR_NAMESPACE);
   std::string topic_namespace = "";
-  if (strlen(namespace_char) > 0)
+  if (namespace_char && strlen(namespace_char) > 0)
   {
     topic_namespace = std::string(namespace_char);
     // Ensure namespace ends with '/' if not empty
@@ -117,11 +117,15 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
       topic_namespace += "/";
     }
   }
+  else
+  {
+    throw std::runtime_error("[ImagePublisher] `namespace` must be specified.");
+  }
 
   // color_topic_name
   const char *color_topic_name_char = mj_getPluginConfig(m, plugin_id, ATTR_COLOR_TOPIC_NAME);
   std::string color_topic_name      = "";
-  if (strlen(color_topic_name_char) > 0)
+  if (color_topic_name_char && strlen(color_topic_name_char) > 0)
   {
     color_topic_name = std::string(color_topic_name_char);
   }
@@ -129,7 +133,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   // depth_topic_name
   const char *depth_topic_name_char = mj_getPluginConfig(m, plugin_id, ATTR_DEPTH_TOPIC_NAME);
   std::string depth_topic_name      = "";
-  if (strlen(depth_topic_name_char) > 0)
+  if (depth_topic_name_char && strlen(depth_topic_name_char) > 0)
   {
     depth_topic_name = std::string(depth_topic_name_char);
   }
@@ -137,7 +141,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   // info_topic_name
   const char *info_topic_name_char = mj_getPluginConfig(m, plugin_id, ATTR_INFO_TOPIC_NAME);
   std::string info_topic_name      = "";
-  if (strlen(info_topic_name_char) > 0)
+  if (info_topic_name_char && strlen(info_topic_name_char) > 0)
   {
     info_topic_name = std::string(info_topic_name_char);
   }
@@ -146,7 +150,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   const char *point_cloud_topic_name_char
     = mj_getPluginConfig(m, plugin_id, ATTR_POINT_CLOUD_TOPIC_NAME);
   std::string point_cloud_topic_name = "";
-  if (strlen(point_cloud_topic_name_char) > 0)
+  if (point_cloud_topic_name_char && strlen(point_cloud_topic_name_char) > 0)
   {
     point_cloud_topic_name = std::string(point_cloud_topic_name_char);
   }
@@ -253,18 +257,18 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
 
   std::cout << "[ImagePublisher] Create." << std::endl;
 
-  return new ImagePublisher(m, d, sensor_id, frame_id, topic_namespace, color_topic_name, depth_topic_name,
-                            info_topic_name, point_cloud_topic_name, rotate_point_cloud,
-                            point_cloud_rotation_preset, height, width, publish_rate, max_range);
+  return new ImagePublisher(m, d, sensor_id, frame_id, topic_namespace, color_topic_name,
+                            depth_topic_name, info_topic_name, point_cloud_topic_name,
+                            rotate_point_cloud, point_cloud_rotation_preset, height, width,
+                            publish_rate, max_range);
 }
 
 ImagePublisher::ImagePublisher(const mjModel *m,
                                mjData *, // d
                                int sensor_id, const std::string &frame_id,
-                               const std::string &topic_namespace,
-                               std::string color_topic_name, std::string depth_topic_name,
-                               std::string info_topic_name, std::string point_cloud_topic_name,
-                               bool               rotate_point_cloud,
+                               const std::string &topic_namespace, std::string color_topic_name,
+                               std::string depth_topic_name, std::string info_topic_name,
+                               std::string point_cloud_topic_name, bool rotate_point_cloud,
                                const std::string &point_cloud_rotation_preset, int height,
                                int width, mjtNum publish_rate, double max_range)
     : m_(m)
@@ -281,22 +285,17 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   {
     frame_id_ = camera_name;
   }
-  if (color_topic_name.empty())
-  {
-    color_topic_name = topic_namespace + camera_name + "/color";
-  }
-  if (depth_topic_name.empty())
-  {
-    depth_topic_name = topic_namespace + camera_name + "/depth";
-  }
-  if (info_topic_name.empty())
-  {
-    info_topic_name = topic_namespace + camera_name + "/camera_info";
-  }
-  if (point_cloud_topic_name.empty())
-  {
-    point_cloud_topic_name = topic_namespace + camera_name + "/point_cloud";
-  }
+
+  // Initialize all topic names with namespace prefix
+  color_topic_name
+    = topic_namespace + (color_topic_name.empty() ? camera_name + "/color" : color_topic_name);
+  depth_topic_name
+    = topic_namespace + (depth_topic_name.empty() ? camera_name + "/depth" : depth_topic_name);
+  info_topic_name
+    = topic_namespace + (info_topic_name.empty() ? camera_name + "/camera_info" : info_topic_name);
+  point_cloud_topic_name
+    = topic_namespace
+      + (point_cloud_topic_name.empty() ? camera_name + "/point_cloud" : point_cloud_topic_name);
 
   // Set GLFW error callback
   glfwSetErrorCallback([](int error, const char *description) {
