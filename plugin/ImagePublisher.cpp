@@ -64,30 +64,67 @@ void ImagePublisher::RegisterPlugin()
   plugin.needstage = mjSTAGE_VEL;
 
   plugin.init = +[](const mjModel *m, mjData *d, int plugin_id) {
+    print_debug("[ImagePublisher::init] Starting initialization for plugin_id=%d\n", plugin_id);
+    if (!m || !d)
+    {
+      mju_error("[ImagePublisher::init] ERROR: Null model or data pointer!");
+      return -1;
+    }
     auto *plugin_instance = ImagePublisher::Create(m, d, plugin_id);
     if (!plugin_instance)
     {
+      mju_error("[ImagePublisher::init] ERROR: Failed to create plugin instance");
       return -1;
     }
     d->plugin_data[plugin_id] = reinterpret_cast<uintptr_t>(plugin_instance);
+    print_debug("[ImagePublisher::init] Successfully initialized, instance=%p\n", plugin_instance);
     return 0;
   };
 
   plugin.destroy = +[](mjData *d, int plugin_id) {
+    print_debug("[ImagePublisher::destroy] Starting destruction for plugin_id=%d\n", plugin_id);
+    if (!d)
+    {
+      mju_warning("[ImagePublisher::destroy] Null data pointer!");
+      return;
+    }
     auto *plugin_instance = reinterpret_cast<class ImagePublisher *>(d->plugin_data[plugin_id]);
+    if (!plugin_instance)
+    {
+      mju_warning("[ImagePublisher::destroy] Null plugin instance!");
+      return;
+    }
+    print_debug("[ImagePublisher::destroy] Freeing instance=%p\n", plugin_instance);
     plugin_instance->free();
     delete reinterpret_cast<ImagePublisher *>(d->plugin_data[plugin_id]);
     d->plugin_data[plugin_id] = 0;
+    print_debug("[ImagePublisher::destroy] Destruction complete\n");
   };
 
   plugin.reset = +[](const mjModel *m, double *, // plugin_state
                      void *plugin_data, int plugin_id) {
+    print_debug("[ImagePublisher::reset] Called for plugin_id=%d\n", plugin_id);
+    if (!plugin_data)
+    {
+      mju_warning("[ImagePublisher::reset] Null plugin_data!");
+      return;
+    }
     auto *plugin_instance = reinterpret_cast<class ImagePublisher *>(plugin_data);
     plugin_instance->reset(m, plugin_id);
   };
 
   plugin.compute = +[](const mjModel *m, mjData *d, int plugin_id, int // capability_bit
                     ) {
+    if (!d || !m)
+    {
+      mju_error("[ImagePublisher::compute] Null model or data pointer!");
+      return;
+    }
+    if (!d->plugin_data[plugin_id])
+    {
+      mju_error("[ImagePublisher::compute] Null plugin_data for plugin_id=%d", plugin_id);
+      return;
+    }
     auto *plugin_instance = reinterpret_cast<class ImagePublisher *>(d->plugin_data[plugin_id]);
     plugin_instance->compute(m, d, plugin_id);
   };
@@ -97,20 +134,26 @@ void ImagePublisher::RegisterPlugin()
 
 ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_id)
 {
+  print_debug("[ImagePublisher::Create] Starting, plugin_id=%d\n", plugin_id);
+
   // frame_id
+  print_debug("[ImagePublisher::Create] Reading frame_id...\n");
   const char *frame_id_char = mj_getPluginConfig(m, plugin_id, ATTR_FRAME_ID);
   std::string frame_id      = "";
-  if (strlen(frame_id_char) > 0)
+  if (frame_id_char && strlen(frame_id_char) > 0)
   {
     frame_id = std::string(frame_id_char);
+    print_debug("[ImagePublisher::Create] frame_id=%s\n", frame_id.c_str());
   }
 
   // namespace
+  print_debug("[ImagePublisher::Create] Reading namespace...\n");
   const char *namespace_char  = mj_getPluginConfig(m, plugin_id, ATTR_NAMESPACE);
   std::string topic_namespace = "";
   if (namespace_char && strlen(namespace_char) > 0)
   {
     topic_namespace = std::string(namespace_char);
+    print_debug("[ImagePublisher::Create] namespace=%s\n", topic_namespace.c_str());
     // Ensure namespace ends with '/' if not empty
     if (!topic_namespace.empty() && topic_namespace.back() != '/')
     {
@@ -119,7 +162,9 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
   else
   {
-    throw std::runtime_error("[ImagePublisher] `namespace` must be specified.");
+    print_debug("[ImagePublisher::Create] WARNING: namespace not specified, using empty\n");
+    // Don't throw - just use empty namespace
+    topic_namespace = "";
   }
 
   // color_topic_name
@@ -188,11 +233,17 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // height
+  print_debug("[ImagePublisher::Create] Reading height...\n");
   const char *height_char = mj_getPluginConfig(m, plugin_id, ATTR_HEIGHT);
   int         height      = 240;
-  if (strlen(height_char) > 0)
+  if (height_char && strlen(height_char) > 0)
   {
     height = static_cast<int>(strtol(height_char, nullptr, 10));
+    print_debug("[ImagePublisher::Create] height=%d\n", height);
+  }
+  else
+  {
+    print_debug("[ImagePublisher::Create] height not specified, using default=%d\n", height);
   }
   if (height <= 0)
   {
@@ -201,11 +252,17 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // width
+  print_debug("[ImagePublisher::Create] Reading width...\n");
   const char *width_char = mj_getPluginConfig(m, plugin_id, ATTR_WIDTH);
   int         width      = 320;
-  if (strlen(width_char) > 0)
+  if (width_char && strlen(width_char) > 0)
   {
     width = static_cast<int>(strtol(width_char, nullptr, 10));
+    print_debug("[ImagePublisher::Create] width=%d\n", width);
+  }
+  else
+  {
+    print_debug("[ImagePublisher::Create] width not specified, using default=%d\n", width);
   }
   if (width <= 0)
   {
@@ -214,11 +271,18 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // publish_rate
+  print_debug("[ImagePublisher::Create] Reading publish_rate...\n");
   const char *publish_rate_char = mj_getPluginConfig(m, plugin_id, ATTR_PUBLISH_RATE);
   mjtNum      publish_rate      = 30.0;
-  if (strlen(publish_rate_char) > 0)
+  if (publish_rate_char && strlen(publish_rate_char) > 0)
   {
     publish_rate = strtod(publish_rate_char, nullptr);
+    print_debug("[ImagePublisher::Create] publish_rate=%f\n", publish_rate);
+  }
+  else
+  {
+    print_debug("[ImagePublisher::Create] publish_rate not specified, using default=%f\n",
+              publish_rate);
   }
   if (publish_rate <= 0)
   {
@@ -227,40 +291,53 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   // max_range
+  print_debug("[ImagePublisher::Create] Reading max_range...\n");
   const char *max_range_char = mj_getPluginConfig(m, plugin_id, ATTR_MAX_RANGE);
   double      max_range      = 0.0;
-  if (strlen(max_range_char) > 0)
+  if (max_range_char && strlen(max_range_char) > 0)
   {
     max_range = strtod(max_range_char, nullptr);
-    print_info("Max range: %s OR %f\n", max_range_char, max_range);
+    print_debug("[ImagePublisher::Create] max_range=%f\n", max_range);
+  }
+  else
+  {
+    print_debug("[ImagePublisher::Create] max_range not specified, using default=%f\n",
+              max_range);
   }
 
   // Set sensor_id
+  print_debug("[ImagePublisher::Create] Finding sensor_id, nsensor=%d\n", m->nsensor);
   int sensor_id = 0;
   for (; sensor_id < m->nsensor; sensor_id++)
   {
     if (m->sensor_type[sensor_id] == mjSENS_PLUGIN && m->sensor_plugin[sensor_id] == plugin_id)
     {
+      print_debug("[ImagePublisher::Create] Found sensor at index %d\n", sensor_id);
       break;
     }
   }
   if (sensor_id == m->nsensor)
   {
-    mju_error("[ImagePublisher] Plugin not found in sensors.");
+    mju_error("[ImagePublisher::Create] Plugin not found in sensors!");
     return nullptr;
   }
   if (m->sensor_objtype[sensor_id] != mjOBJ_CAMERA)
   {
-    mju_error("[ImagePublisher] Plugin must be attached to a camera.");
+    mju_error("[ImagePublisher::Create] Plugin must be attached to a camera!");
     return nullptr;
   }
 
-  std::cout << "[ImagePublisher] Create." << std::endl;
+  print_debug("[ImagePublisher::Create] Creating ImagePublisher instance...\n");
+  print_debug("[ImagePublisher::Create] Parameters: sensor_id=%d, width=%d, height=%d, publish_rate=%f\n",
+            sensor_id, width, height, publish_rate);
 
-  return new ImagePublisher(m, d, sensor_id, frame_id, topic_namespace, color_topic_name,
-                            depth_topic_name, info_topic_name, point_cloud_topic_name,
-                            rotate_point_cloud, point_cloud_rotation_preset, height, width,
-                            publish_rate, max_range);
+  ImagePublisher *instance = new ImagePublisher(
+    m, d, sensor_id, frame_id, topic_namespace, color_topic_name, depth_topic_name, info_topic_name,
+    point_cloud_topic_name, rotate_point_cloud, point_cloud_rotation_preset, height, width,
+    publish_rate, max_range);
+
+  print_debug("[ImagePublisher::Create] Instance created successfully at %p\n", (void*)instance);
+  return instance;
 }
 
 ImagePublisher::ImagePublisher(const mjModel *m,
@@ -297,77 +374,115 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     = topic_namespace
       + (point_cloud_topic_name.empty() ? camera_name + "/point_cloud" : point_cloud_topic_name);
 
+  print_debug("[ImagePublisher] Constructor: Starting OpenGL initialization\n");
+
   // Set GLFW error callback
   glfwSetErrorCallback([](int error, const char *description) {
-    RCLCPP_ERROR_STREAM(rclcpp::get_logger("ImagePublisher"),
-                        "GLFW Error " << error << ": " << description);
+    mju_warning("[ImagePublisher] GLFW Error %d: %s", error, description);
   });
 
   // Init OpenGL
+  print_debug("[ImagePublisher] Constructor: Calling glfwInit()\n");
   if (!glfwInit())
   {
     mju_error("[ImagePublisher] Could not initialize GLFW.");
   }
+  print_debug("[ImagePublisher] Constructor: glfwInit() succeeded\n");
 
   // Create invisible window, single-buffered
   glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+  print_debug("[ImagePublisher] Constructor: Creating GLFW window %dx%d\n",
+            viewport_.width, viewport_.height);
   window_ = glfwCreateWindow(viewport_.width, viewport_.height, "MujocoRosUtils::ImagePublisher",
                              nullptr, nullptr);
   if (!window_)
   {
     mju_error("[ImagePublisher] Could not create GLFW window.");
   }
+  print_debug("[ImagePublisher] Constructor: GLFW window created successfully\n");
 
   // Make context current
   // \todo Is it OK to override the current context of OpenGL?
+  print_debug("[ImagePublisher] Constructor: Making GLFW context current\n");
   glfwMakeContextCurrent(window_);
+  print_debug("[ImagePublisher] Constructor: GLFW context is current\n");
 
   // Init default data for visualization structures
+  print_debug("[ImagePublisher] Constructor: Initializing MuJoCo visualization structures\n");
   mjv_defaultCamera(&camera_);
   mjv_defaultOption(&option_);
   mjv_defaultScene(&scene_);
   mjr_defaultContext(&context_);
+  print_debug("[ImagePublisher] Constructor: MuJoCo defaults initialized\n");
 
   // Create scene and context
+  print_debug("[ImagePublisher] Constructor: Creating MuJoCo scene (camera_id=%d)\n", camera_id_);
   mjv_makeScene(m, &scene_, 1000);
+  print_debug("[ImagePublisher] Constructor: Creating MuJoCo render context\n");
   mjr_makeContext(m, &context_, mjFONTSCALE_100);
+  print_debug("[ImagePublisher] Constructor: MuJoCo scene and context created\n");
 
   // Need to resize off-screen buffers
+  print_debug("[ImagePublisher] Constructor: Resizing offscreen buffers to %dx%d\n",
+            viewport_.width, viewport_.height);
   mjr_resizeOffscreen(viewport_.width, viewport_.height, &context_);
+  print_debug("[ImagePublisher] Constructor: Offscreen buffers resized\n");
 
   // Init camera
   camera_.type       = mjCAMERA_FIXED;
   camera_.fixedcamid = camera_id_;
+  print_debug("[ImagePublisher] Constructor: Camera initialized (fixed cam id=%d)\n", camera_id_);
 
+  print_debug("[ImagePublisher] Constructor: Setting framebuffer to offscreen\n");
   mjr_setBuffer(mjFB_OFFSCREEN, &context_);
   if (context_.currentBuffer != mjFB_OFFSCREEN)
   {
-    mju_error(
+    mju_warning(
       "[ImagePublisher] Offscreen rendering not supported, using default/window framebuffer.");
   }
+  print_debug("[ImagePublisher] Constructor: Framebuffer set successfully\n");
 
   // Allocate buffer
+  print_debug("[ImagePublisher] Constructor: Allocating image buffers (%dx%d)\n", width, height);
   size_t color_buffer_size = sizeof(unsigned char) * 3 * viewport_.width * viewport_.height;
   size_t depth_buffer_size = sizeof(float) * viewport_.width * viewport_.height;
+  print_debug("[ImagePublisher] Constructor: Color buffer size=%zu bytes, Depth buffer size=%zu bytes\n",
+            color_buffer_size, depth_buffer_size);
 
-  color_buffer_.reset(new unsigned char[3 * width * height]);
-  depth_buffer_.reset(new float[width * height]);
-  color_buffer_flipped_.reset(new unsigned char[3 * width * height]);
-  depth_buffer_flipped_.reset(new float[width * height]);
-  color_buffer_back_.reset(new unsigned char[3 * width * height]);
-  depth_buffer_back_.reset(new float[width * height]);
+  try
+  {
+    color_buffer_.reset(new unsigned char[3 * width * height]);
+    print_debug("[ImagePublisher] Constructor: color_buffer_ allocated\n");
+    depth_buffer_.reset(new float[width * height]);
+    print_debug("[ImagePublisher] Constructor: depth_buffer_ allocated\n");
+    color_buffer_flipped_.reset(new unsigned char[3 * width * height]);
+    print_debug("[ImagePublisher] Constructor: color_buffer_flipped_ allocated\n");
+    depth_buffer_flipped_.reset(new float[width * height]);
+    print_debug("[ImagePublisher] Constructor: depth_buffer_flipped_ allocated\n");
+    color_buffer_back_.reset(new unsigned char[3 * width * height]);
+    print_debug("[ImagePublisher] Constructor: color_buffer_back_ allocated\n");
+    depth_buffer_back_.reset(new float[width * height]);
+    print_debug("[ImagePublisher] Constructor: depth_buffer_back_ allocated\n");
+  }
+  catch (const std::bad_alloc &e)
+  {
+    mju_error("[ImagePublisher] Failed to allocate buffers: %s", e.what());
+  }
 
   if (!color_buffer_ || !depth_buffer_ || !color_buffer_flipped_ || !depth_buffer_flipped_
       || !color_buffer_back_ || !depth_buffer_back_)
   {
-    mju_error("[ImagePublisher] Could not allocate image buffers.");
+    mju_error("[ImagePublisher] One or more buffers are null after allocation!");
   }
+  print_debug("[ImagePublisher] Constructor: All buffers allocated successfully\n");
 
   // Init ROS
+  print_debug("[ImagePublisher] Constructor: Initializing ROS2\n");
   int    argc = 0;
   char **argv = nullptr;
   if (!rclcpp::ok())
   {
+    print_debug("[ImagePublisher] Constructor: Calling rclcpp::init()\n");
     rclcpp::init(argc, argv);
   }
   rclcpp::NodeOptions node_options;
@@ -378,22 +493,31 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   node_options.automatically_declare_parameters_from_overrides(true);
 
   std::string node_name = mj_id2name(m, mjOBJ_SENSOR, sensor_id);
+  print_debug("[ImagePublisher] Constructor: Creating ROS2 node '%s'\n", node_name.c_str());
 
-  nh_        = rclcpp::Node::make_shared(node_name, node_options);
-  auto qos   = rclcpp::SensorDataQoS();
+  nh_ = rclcpp::Node::make_shared(node_name, node_options);
+  RCLCPP_INFO(nh_->get_logger(), "ROS2 node created");
+
+  auto qos = rclcpp::SensorDataQoS();
+  RCLCPP_DEBUG(nh_->get_logger(), "Creating publishers...");
   color_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(color_topic_name, qos);
   depth_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(depth_topic_name, qos);
   info_pub_  = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(info_topic_name, qos);
   point_cloud_pub_
     = nh_->create_publisher<sensor_msgs::msg::PointCloud2>(point_cloud_topic_name, qos);
+  RCLCPP_DEBUG(nh_->get_logger(), "Publishers created");
 
   // If the ros2 params are provided, they will take precedence
   range_max_     = nh_->get_parameter_or("range_max", max_range);
   use_quiet_nan_ = nh_->get_parameter_or("use_quiet_nan", true);
 
-  RCLCPP_INFO(nh_->get_logger(), "Setting depth range to %.4f", range_max_);
+  RCLCPP_INFO(nh_->get_logger(), "ImagePublisher initialized (range_max=%.2f)", range_max_);
 
+  // Mark as initialized before starting the publish thread
+  RCLCPP_DEBUG(nh_->get_logger(), "Starting publish thread");
+  initialized_    = true;
   publish_thread_ = std::thread(&ImagePublisher::publishThread, this);
+  RCLCPP_DEBUG(nh_->get_logger(), "Publish thread started");
 }
 
 void ImagePublisher::reset(const mjModel *, // m
@@ -404,10 +528,29 @@ void ImagePublisher::reset(const mjModel *, // m
 void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 )
 {
+  // Safety check: ensure initialization is complete
+  if (!initialized_)
+  {
+    static bool first_warning = true;
+    if (first_warning)
+    {
+      RCLCPP_WARN(nh_->get_logger(), "compute() called before initialization complete, skipping");
+      first_warning = false;
+    }
+    return;
+  }
+
   sim_cnt_++;
   if (sim_cnt_ % publish_skip_ != 0)
   {
     return;
+  }
+
+  static int compute_call_count = 0;
+  compute_call_count++;
+  if (compute_call_count <= 5 || compute_call_count % 100 == 0)
+  {
+    RCLCPP_DEBUG(nh_->get_logger(), "compute() call #%d", compute_call_count);
   }
 
   // Update subscriber counts
@@ -422,18 +565,46 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     return;
   }
 
-  // Make context current
-  // \todo Is it OK to override the current context of OpenGL?
-  glfwMakeContextCurrent(window_);
+  if (compute_call_count <= 5)
+  {
+    RCLCPP_DEBUG(nh_->get_logger(), 
+                 "Subscribers: color=%d depth=%d info=%d cloud=%d", 
+                 publish_color_, publish_depth_, publish_info_, publish_cloud_);
+  }
 
-  // Update abstract scene
-  mjv_updateScene(m, d, &option_, nullptr, &camera_, mjCAT_STATIC | mjCAT_DYNAMIC, &scene_);
+  // Protect OpenGL context operations with mutex to prevent multi-threaded access
+  try
+  {
+    std::lock_guard<std::mutex> gl_lock(gl_context_mutex_);
 
-  // Render scene in offscreen buffer
-  mjr_render(viewport_, &scene_, &context_);
+    if (compute_call_count <= 3)
+    {
+      RCLCPP_DEBUG(nh_->get_logger(), "Performing GL operations");
+    }
 
-  // Read rgb and depth pixels
-  mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
+    // Make context current
+    // \todo Is it OK to override the current context of OpenGL?
+    glfwMakeContextCurrent(window_);
+
+    // Update abstract scene
+    mjv_updateScene(m, d, &option_, nullptr, &camera_, mjCAT_STATIC | mjCAT_DYNAMIC, &scene_);
+
+    // Render scene in offscreen buffer
+    mjr_render(viewport_, &scene_, &context_);
+
+    // Read rgb and depth pixels
+    mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
+
+    if (compute_call_count <= 3)
+    {
+      RCLCPP_DEBUG(nh_->get_logger(), "GL operations complete");
+    }
+  }
+  catch (const std::exception &e)
+  {
+    RCLCPP_ERROR(nh_->get_logger(), "Exception during GL operations: %s", e.what());
+    return;
+  }
 
   // Publish color image directly from the compute thread for low latency
   if (publish_color_)
@@ -476,6 +647,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
       std::lock_guard<std::mutex> lock(buffer_mutex_);
       color_buffer_.swap(color_buffer_back_);
       depth_buffer_.swap(depth_buffer_back_);
+      data_ready_ = true;
     }
     buffer_cv_.notify_one();
   }
@@ -483,17 +655,29 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 
 void ImagePublisher::free()
 {
+  RCLCPP_DEBUG(nh_->get_logger(), "Starting cleanup");
+
+  RCLCPP_DEBUG(nh_->get_logger(), "Stopping publish thread");
   stop_thread_ = true;
   buffer_cv_.notify_all();
   if (publish_thread_.joinable())
   {
+    RCLCPP_DEBUG(nh_->get_logger(), "Waiting for thread to join");
     publish_thread_.join();
+    RCLCPP_DEBUG(nh_->get_logger(), "Thread joined");
   }
 
+  RCLCPP_DEBUG(nh_->get_logger(), "Freeing MuJoCo context and scene");
   mjr_freeContext(&context_);
   mjv_freeScene(&scene_);
 
-  glfwDestroyWindow(window_);
+  RCLCPP_DEBUG(nh_->get_logger(), "Destroying GLFW window");
+  if (window_)
+  {
+    glfwDestroyWindow(window_);
+    window_ = nullptr;
+  }
+  RCLCPP_INFO(nh_->get_logger(), "ImagePublisher cleanup complete");
 }
 
 } // namespace MujocoRosUtils
@@ -503,12 +687,23 @@ void MujocoRosUtils::ImagePublisher::publishThread()
   {
     {
       std::unique_lock<std::mutex> lock(buffer_mutex_);
-      buffer_cv_.wait(lock);
+      buffer_cv_.wait(lock, [this] {
+        return stop_thread_ || data_ready_;
+      });
+
+      if (stop_thread_)
+      {
+        break;
+      }
+
+      data_ready_ = false;
     }
 
-    if (stop_thread_)
+    // Null pointer safety check
+    if (!m_ || !depth_buffer_back_ || !color_buffer_back_)
     {
-      break;
+      RCLCPP_ERROR(nh_->get_logger(), "[ImagePublisher] Null pointer detected in publish thread");
+      continue;
     }
 
     // --- Process Depth Data ---

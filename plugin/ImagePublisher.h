@@ -163,6 +163,9 @@ protected:
   std::mutex              buffer_mutex_;
   std::condition_variable buffer_cv_;
   std::atomic<bool>       stop_thread_{false};
+  std::atomic<bool>       data_ready_{false};
+  std::atomic<bool>       initialized_{false};
+  std::mutex              gl_context_mutex_;
   //! @}
 };
 

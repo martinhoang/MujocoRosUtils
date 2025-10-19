@@ -168,8 +168,7 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
     int joint_id = mj_name2id(m, mjOBJ_JOINT, joint_info.name.c_str());
     if (joint_id < 0)
     {
-      RCLCPP_WARN(node_->get_logger(), "Joint '%s' not found in Mujoco model",
-                  joint_info.name.c_str());
+      RCLCPP_ERROR(node_->get_logger(), "Joint '%s' declared in <ros2_control> tag is NOT found in Mujoco model", joint_info.name.c_str());
       throw std::runtime_error("Joint '" + joint_info.name + "' not found in Mujoco model");
     }
 
