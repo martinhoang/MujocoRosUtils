@@ -318,9 +318,9 @@ bool Ros2Control::initialize()
     {
       resource_manager->load_urdf(urdf_string, false, false);
     }
-    catch (...)
+    catch (const std::exception &e)
     {
-      RCLCPP_ERROR(node_->get_logger(), "Error while initializing URDF!");
+      RCLCPP_ERROR(node_->get_logger(), "Error while initializing URDF! %s", e.what());
     }
 
     for (const auto &hardware_info : control_hardware_info)

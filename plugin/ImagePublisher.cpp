@@ -130,6 +130,8 @@ void ImagePublisher::RegisterPlugin()
   };
 
   mjp_registerPlugin(&plugin);
+
+  print_confirm("Successfully registered 'MujocoRosUtils::ImagePublisher' plugin\n");
 }
 
 ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_id)
@@ -336,7 +338,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     point_cloud_topic_name, rotate_point_cloud, point_cloud_rotation_preset, height, width,
     publish_rate, max_range);
 
-  print_debug("[ImagePublisher::Create] Instance created successfully at %p\n", (void*)instance);
+  print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void*)instance);
   return instance;
 }
 
@@ -606,26 +608,46 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     return;
   }
 
+  // Get timestamp for all messages
+  rclcpp::Time stamp_now = nh_->get_clock()->now();
+
+  // Publish camera info always (needed by RViz2 and other tools)
+  if (publish_info_)
+  {
+    sensor_msgs::msg::CameraInfo info_msg;
+    info_msg.header.stamp     = stamp_now;
+    info_msg.header.frame_id  = frame_id_;
+    info_msg.height           = viewport_.height;
+    info_msg.width            = viewport_.width;
+    info_msg.distortion_model = "plumb_bob";
+    info_msg.d.resize(5, 0.0);
+    info_msg.k.fill(0.0);
+    info_msg.r.fill(0.0);
+    info_msg.p.fill(0.0);
+    double focal_scaling = (1.0 / std::tan((m_->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0))
+                           * viewport_.height / 2.0;
+    info_msg.k[0] = info_msg.p[0] = focal_scaling;
+    info_msg.k[2] = info_msg.p[2] = static_cast<double>(viewport_.width) / 2.0;
+    info_msg.k[4] = info_msg.p[5] = focal_scaling;
+    info_msg.k[5] = info_msg.p[6] = static_cast<double>(viewport_.height) / 2.0;
+    info_msg.k[8] = info_msg.p[10] = 1.0;
+    info_pub_->publish(info_msg);
+  }
+
   // Publish color image directly from the compute thread for low latency
   if (publish_color_)
   {
-    // Flip color buffer
-#pragma omp parallel for
+    // Flip color buffer - row-wise memcpy is faster than pixel-by-pixel for large images
+    const int row_bytes = viewport_.width * 3;
+#pragma omp parallel for schedule(static)
     for (int h = 0; h < viewport_.height; h++)
     {
-      for (int w = 0; w < viewport_.width; w++)
-      {
-        int idx         = h * viewport_.width + w;
-        int idx_flipped = (viewport_.height - 1 - h) * viewport_.width + w;
-        for (int c = 0; c < 3; c++)
-        {
-          color_buffer_flipped_[3 * idx_flipped + c] = color_buffer_[3 * idx + c];
-        }
-      }
+      const unsigned char* src_row = color_buffer_.get() + h * row_bytes;
+      unsigned char* dst_row = color_buffer_flipped_.get() + (viewport_.height - 1 - h) * row_bytes;
+      std::memcpy(dst_row, src_row, row_bytes);
     }
 
     // Create and publish color_msg
-    rclcpp::Time            stamp_now = nh_->get_clock()->now();
     sensor_msgs::msg::Image color_msg;
     color_msg.header.stamp    = stamp_now;
     color_msg.header.frame_id = frame_id_;
@@ -683,8 +705,11 @@ void ImagePublisher::free()
 } // namespace MujocoRosUtils
 void MujocoRosUtils::ImagePublisher::publishThread()
 {
+  RCLCPP_INFO(nh_->get_logger(), "publishThread started");
+  print_confirm("ImagePublisher publish thread started\n");
   while (!stop_thread_)
   {
+    RCLCPP_INFO(nh_->get_logger(), "publishThread is waiting for data...");
     {
       std::unique_lock<std::mutex> lock(buffer_mutex_);
       buffer_cv_.wait(lock, [this] {
@@ -709,15 +734,23 @@ void MujocoRosUtils::ImagePublisher::publishThread()
     // --- Process Depth Data ---
     float near = static_cast<float>(m_->vis.map.znear * m_->stat.extent);
     float far  = static_cast<float>(m_->vis.map.zfar * m_->stat.extent);
-#pragma omp parallel for
+    
+    // Precompute constant for depth conversion
+    const float depth_scale = 1.0f - near / far;
+    
+#pragma omp parallel for schedule(static)
     for (int h = 0; h < viewport_.height; h++)
     {
+      const int row_offset = h * viewport_.width;
+      const int flipped_row_offset = (viewport_.height - 1 - h) * viewport_.width;
+      
       for (int w = 0; w < viewport_.width; w++)
       {
-        int idx         = h * viewport_.width + w;
-        int idx_flipped = (viewport_.height - 1 - h) * viewport_.width + w;
-        // Process depth
-        depth_buffer_back_[idx] = near / (1.0f - depth_buffer_back_[idx] * (1.0f - near / far));
+        const int idx = row_offset + w;
+        const int idx_flipped = flipped_row_offset + w;
+        
+        // Process depth with precomputed constant
+        depth_buffer_back_[idx] = near / (1.0f - depth_buffer_back_[idx] * depth_scale);
         depth_buffer_flipped_[idx_flipped] = depth_buffer_back_[idx];
       }
     }
@@ -744,9 +777,9 @@ void MujocoRosUtils::ImagePublisher::publishThread()
       }
     }
 
-    // --- Publish Camera Info ---
+    // --- Create Camera Info for Point Cloud (if needed) ---
     sensor_msgs::msg::CameraInfo info_msg;
-    if (publish_info_ || publish_cloud_)
+    if (publish_cloud_)
     {
       info_msg.header.stamp     = stamp_now;
       info_msg.header.frame_id  = frame_id_;
@@ -764,28 +797,19 @@ void MujocoRosUtils::ImagePublisher::publishThread()
       info_msg.k[4] = info_msg.p[5] = focal_scaling;
       info_msg.k[5] = info_msg.p[6] = static_cast<double>(viewport_.height) / 2.0;
       info_msg.k[8] = info_msg.p[10] = 1.0;
-      if (publish_info_)
-      {
-        info_pub_->publish(info_msg);
-      }
     }
 
     // --- Publish Point Cloud ---
     if (publish_cloud_)
     {
-      // Flip the color buffer that was passed from the main thread
-#pragma omp parallel for
+      // Flip the color buffer that was passed from the main thread - row-wise memcpy
+      const int row_bytes = viewport_.width * 3;
+#pragma omp parallel for schedule(static)
       for (int h = 0; h < viewport_.height; h++)
       {
-        for (int w = 0; w < viewport_.width; w++)
-        {
-          int idx         = h * viewport_.width + w;
-          int idx_flipped = (viewport_.height - 1 - h) * viewport_.width + w;
-          for (int c = 0; c < 3; c++)
-          {
-            color_buffer_flipped_[3 * idx_flipped + c] = color_buffer_back_[3 * idx + c];
-          }
-        }
+        const unsigned char* src_row = color_buffer_back_.get() + h * row_bytes;
+        unsigned char* dst_row = color_buffer_flipped_.get() + (viewport_.height - 1 - h) * row_bytes;
+        std::memcpy(dst_row, src_row, row_bytes);
       }
 
       // Create a temporary color message for the conversion function
