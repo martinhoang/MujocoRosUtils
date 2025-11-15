@@ -284,7 +284,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   else
   {
     print_debug("[ImagePublisher::Create] publish_rate not specified, using default=%f\n",
-              publish_rate);
+                publish_rate);
   }
   if (publish_rate <= 0)
   {
@@ -303,8 +303,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
   else
   {
-    print_debug("[ImagePublisher::Create] max_range not specified, using default=%f\n",
-              max_range);
+    print_debug("[ImagePublisher::Create] max_range not specified, using default=%f\n", max_range);
   }
 
   // Set sensor_id
@@ -330,15 +329,16 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
 
   print_debug("[ImagePublisher::Create] Creating ImagePublisher instance...\n");
-  print_debug("[ImagePublisher::Create] Parameters: sensor_id=%d, width=%d, height=%d, publish_rate=%f\n",
-            sensor_id, width, height, publish_rate);
+  print_debug(
+    "[ImagePublisher::Create] Parameters: sensor_id=%d, width=%d, height=%d, publish_rate=%f\n",
+    sensor_id, width, height, publish_rate);
 
   ImagePublisher *instance = new ImagePublisher(
     m, d, sensor_id, frame_id, topic_namespace, color_topic_name, depth_topic_name, info_topic_name,
     point_cloud_topic_name, rotate_point_cloud, point_cloud_rotation_preset, height, width,
     publish_rate, max_range);
 
-  print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void*)instance);
+  print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void *)instance);
   return instance;
 }
 
@@ -393,8 +393,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
 
   // Create invisible window, single-buffered
   glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-  print_debug("[ImagePublisher] Constructor: Creating GLFW window %dx%d\n",
-            viewport_.width, viewport_.height);
+  print_debug("[ImagePublisher] Constructor: Creating GLFW window %dx%d\n", viewport_.width,
+              viewport_.height);
   window_ = glfwCreateWindow(viewport_.width, viewport_.height, "MujocoRosUtils::ImagePublisher",
                              nullptr, nullptr);
   if (!window_)
@@ -426,7 +426,7 @@ ImagePublisher::ImagePublisher(const mjModel *m,
 
   // Need to resize off-screen buffers
   print_debug("[ImagePublisher] Constructor: Resizing offscreen buffers to %dx%d\n",
-            viewport_.width, viewport_.height);
+              viewport_.width, viewport_.height);
   mjr_resizeOffscreen(viewport_.width, viewport_.height, &context_);
   print_debug("[ImagePublisher] Constructor: Offscreen buffers resized\n");
 
@@ -448,8 +448,9 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   print_debug("[ImagePublisher] Constructor: Allocating image buffers (%dx%d)\n", width, height);
   size_t color_buffer_size = sizeof(unsigned char) * 3 * viewport_.width * viewport_.height;
   size_t depth_buffer_size = sizeof(float) * viewport_.width * viewport_.height;
-  print_debug("[ImagePublisher] Constructor: Color buffer size=%zu bytes, Depth buffer size=%zu bytes\n",
-            color_buffer_size, depth_buffer_size);
+  print_debug(
+    "[ImagePublisher] Constructor: Color buffer size=%zu bytes, Depth buffer size=%zu bytes\n",
+    color_buffer_size, depth_buffer_size);
 
   try
   {
@@ -502,8 +503,10 @@ ImagePublisher::ImagePublisher(const mjModel *m,
 
   auto qos = rclcpp::SensorDataQoS();
   RCLCPP_DEBUG(nh_->get_logger(), "Creating publishers...");
-  color_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(color_topic_name, qos);
-  depth_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(depth_topic_name, qos);
+  // color_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(color_topic_name, qos);
+  image_transport::ImageTransport it(nh_);
+  color_pub_ = it.advertise(color_topic_name, qos.get_rmw_qos_profile());
+  depth_pub_ = it.advertise(depth_topic_name, qos.get_rmw_qos_profile());
   info_pub_  = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(info_topic_name, qos);
   point_cloud_pub_
     = nh_->create_publisher<sensor_msgs::msg::PointCloud2>(point_cloud_topic_name, qos);
@@ -556,8 +559,8 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   }
 
   // Update subscriber counts
-  publish_color_ = color_pub_->get_subscription_count() > 0;
-  publish_depth_ = depth_pub_->get_subscription_count() > 0;
+  publish_color_ = color_pub_.getNumSubscribers() > 0;
+  publish_depth_ = depth_pub_.getNumSubscribers() > 0;
   publish_info_  = info_pub_->get_subscription_count() > 0;
   publish_cloud_ = point_cloud_pub_->get_subscription_count() > 0;
 
@@ -569,8 +572,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 
   if (compute_call_count <= 5)
   {
-    RCLCPP_DEBUG(nh_->get_logger(), 
-                 "Subscribers: color=%d depth=%d info=%d cloud=%d", 
+    RCLCPP_DEBUG(nh_->get_logger(), "Subscribers: color=%d depth=%d info=%d cloud=%d",
                  publish_color_, publish_depth_, publish_info_, publish_cloud_);
   }
 
@@ -624,8 +626,8 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     info_msg.k.fill(0.0);
     info_msg.r.fill(0.0);
     info_msg.p.fill(0.0);
-    double focal_scaling = (1.0 / std::tan((m_->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0))
-                           * viewport_.height / 2.0;
+    double focal_scaling
+      = (1.0 / std::tan((m_->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0)) * viewport_.height / 2.0;
     info_msg.k[0] = info_msg.p[0] = focal_scaling;
     info_msg.k[2] = info_msg.p[2] = static_cast<double>(viewport_.width) / 2.0;
     info_msg.k[4] = info_msg.p[5] = focal_scaling;
@@ -642,8 +644,8 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 #pragma omp parallel for schedule(static)
     for (int h = 0; h < viewport_.height; h++)
     {
-      const unsigned char* src_row = color_buffer_.get() + h * row_bytes;
-      unsigned char* dst_row = color_buffer_flipped_.get() + (viewport_.height - 1 - h) * row_bytes;
+      const unsigned char *src_row = color_buffer_.get() + h * row_bytes;
+      unsigned char *dst_row = color_buffer_flipped_.get() + (viewport_.height - 1 - h) * row_bytes;
       std::memcpy(dst_row, src_row, row_bytes);
     }
 
@@ -659,7 +661,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     color_msg.data.resize(sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
     std::memcpy(&color_msg.data[0], color_buffer_flipped_.get(),
                 sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
-    color_pub_->publish(color_msg);
+    color_pub_.publish(color_msg);
   }
 
   // Offload depth and point cloud processing to the worker thread
@@ -734,23 +736,23 @@ void MujocoRosUtils::ImagePublisher::publishThread()
     // --- Process Depth Data ---
     float near = static_cast<float>(m_->vis.map.znear * m_->stat.extent);
     float far  = static_cast<float>(m_->vis.map.zfar * m_->stat.extent);
-    
+
     // Precompute constant for depth conversion
     const float depth_scale = 1.0f - near / far;
-    
+
 #pragma omp parallel for schedule(static)
     for (int h = 0; h < viewport_.height; h++)
     {
-      const int row_offset = h * viewport_.width;
+      const int row_offset         = h * viewport_.width;
       const int flipped_row_offset = (viewport_.height - 1 - h) * viewport_.width;
-      
+
       for (int w = 0; w < viewport_.width; w++)
       {
-        const int idx = row_offset + w;
+        const int idx         = row_offset + w;
         const int idx_flipped = flipped_row_offset + w;
-        
+
         // Process depth with precomputed constant
-        depth_buffer_back_[idx] = near / (1.0f - depth_buffer_back_[idx] * depth_scale);
+        depth_buffer_back_[idx]            = near / (1.0f - depth_buffer_back_[idx] * depth_scale);
         depth_buffer_flipped_[idx_flipped] = depth_buffer_back_[idx];
       }
     }
@@ -773,7 +775,7 @@ void MujocoRosUtils::ImagePublisher::publishThread()
                   sizeof(float) * viewport_.width * viewport_.height);
       if (publish_depth_)
       {
-        depth_pub_->publish(depth_msg);
+        depth_pub_.publish(depth_msg);
       }
     }
 
@@ -807,8 +809,9 @@ void MujocoRosUtils::ImagePublisher::publishThread()
 #pragma omp parallel for schedule(static)
       for (int h = 0; h < viewport_.height; h++)
       {
-        const unsigned char* src_row = color_buffer_back_.get() + h * row_bytes;
-        unsigned char* dst_row = color_buffer_flipped_.get() + (viewport_.height - 1 - h) * row_bytes;
+        const unsigned char *src_row = color_buffer_back_.get() + h * row_bytes;
+        unsigned char       *dst_row
+          = color_buffer_flipped_.get() + (viewport_.height - 1 - h) * row_bytes;
         std::memcpy(dst_row, src_row, row_bytes);
       }
 

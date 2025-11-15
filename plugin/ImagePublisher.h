@@ -1,6 +1,7 @@
 #pragma once
 
 #include <image_geometry/pinhole_camera_model.h>
+#include <image_transport/image_transport.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -87,11 +88,11 @@ protected:
       \param publish_rate publish rate
   */
   ImagePublisher(const mjModel *m, mjData *d, int sensor_id, const std::string &frame_id,
-                 const std::string &topic_namespace,
-                 std::string color_topic_name, std::string depth_topic_name,
-                 std::string info_topic_name, std::string point_cloud_topic_name,
-                 bool rotate_point_cloud, const std::string &point_cloud_rotation_preset,
-                 int height, int width, mjtNum publish_rate, double max_range);
+                 const std::string &topic_namespace, std::string color_topic_name,
+                 std::string depth_topic_name, std::string info_topic_name,
+                 std::string point_cloud_topic_name, bool rotate_point_cloud,
+                 const std::string &point_cloud_rotation_preset, int height, int width,
+                 mjtNum publish_rate, double max_range);
 
 protected:
   //! MuJoCo model
@@ -146,9 +147,10 @@ protected:
 
   //! ROS variables
   //! @{
-  rclcpp::Node::SharedPtr                                     nh_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr       color_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr       depth_pub_;
+  rclcpp::Node::SharedPtr nh_;
+  // rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr       color_pub_;
+  image_transport::Publisher                                  color_pub_;
+  image_transport::Publisher                                  depth_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr  info_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_pub_;
   bool                                                        publish_color_ = false;

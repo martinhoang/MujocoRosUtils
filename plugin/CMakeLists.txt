@@ -32,7 +32,8 @@ ament_target_dependencies(
   trajectory_msgs
   builtin_interfaces
   hardware_interface
-  controller_manager)
+  controller_manager
+  image_transport)
 add_dependencies(MujocoRosUtils ${PROJECT_NAME})
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME}
                               "rosidl_typesupport_cpp")
