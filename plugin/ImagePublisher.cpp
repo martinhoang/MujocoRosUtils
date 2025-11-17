@@ -1,11 +1,16 @@
+#define GL_GLEXT_PROTOTYPES
+#define GL_GLEXT_LEGACY
+#include <GL/gl.h>
+#include <GL/glext.h>
+#include <GLFW/glfw3.h>
+
+#include <mujoco/mujoco.h>
 #include "ImagePublisher.h"
 #include "depth_conversions.hpp"
-
 #include "mujoco_utils.hpp"
 #include <cstdlib>
 #include <cv_bridge/cv_bridge.h>
 #include <iostream>
-#include <mujoco/mujoco.h>
 #include <sensor_msgs/image_encodings.hpp>
 
 namespace MujocoRosUtils
@@ -393,6 +398,11 @@ ImagePublisher::ImagePublisher(const mjModel *m,
 
   // Create invisible window, single-buffered
   glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+  glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_NATIVE_CONTEXT_API);
+  // Use compatibility profile (requires OpenGL 3.2+) to allow MuJoCo's display lists
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
   print_debug("[ImagePublisher] Constructor: Creating GLFW window %dx%d\n", viewport_.width,
               viewport_.height);
   window_ = glfwCreateWindow(viewport_.width, viewport_.height, "MujocoRosUtils::ImagePublisher",
@@ -596,7 +606,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     // Render scene in offscreen buffer
     mjr_render(viewport_, &scene_, &context_);
 
-    // Read rgb and depth pixels
+    // Read rgb and depth pixels using MuJoCo's function (handles framebuffer attachments correctly)
     mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
 
     if (compute_call_count <= 3)
@@ -711,7 +721,7 @@ void MujocoRosUtils::ImagePublisher::publishThread()
   print_confirm("ImagePublisher publish thread started\n");
   while (!stop_thread_)
   {
-    RCLCPP_INFO(nh_->get_logger(), "publishThread is waiting for data...");
+    RCLCPP_DEBUG(nh_->get_logger(), "publishThread is waiting for data...");
     {
       std::unique_lock<std::mutex> lock(buffer_mutex_);
       buffer_cv_.wait(lock, [this] {

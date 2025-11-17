@@ -86,7 +86,6 @@ find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(controller_manager REQUIRED)
-find_package(builtin_interfaces REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(image_transport REQUIRED)
 
