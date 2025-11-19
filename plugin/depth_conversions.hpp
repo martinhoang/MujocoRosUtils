@@ -91,7 +91,6 @@ void convert(const sensor_msgs::msg::Image::ConstSharedPtr &depth_msg,
   sensor_msgs::PointCloud2Iterator<float> iter_rgb(*cloud_msg, "rgb");
   const T *depth_row = reinterpret_cast<const T *>(&depth_msg->data[0]);
   int      row_step  = depth_msg->step / sizeof(T);
-#pragma omp parallel for
   for (int v = 0; v < static_cast<int>(cloud_msg->height); ++v)
   {
     const T                                *depth_row_ptr = depth_row + v * row_step;

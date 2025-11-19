@@ -134,6 +134,7 @@ protected:
   std::unique_ptr<float[]>         depth_buffer_flipped_;
   std::unique_ptr<unsigned char[]> color_buffer_back_;
   std::unique_ptr<float[]>         depth_buffer_back_;
+  std::unique_ptr<unsigned char[]> color_buffer_flipped_back_;
   //! @}
 
   //! Variables for visualization and rendering in MuJoCo
@@ -143,6 +144,16 @@ protected:
   mjvOption   option_;
   mjrContext  context_;
   GLFWwindow *window_;
+  //! @}
+
+  //! PBO (Pixel Buffer Objects) for async GPU->CPU transfer
+  //! @{
+  static constexpr int PBO_COUNT = 2; // Double buffering
+  unsigned int pbo_color_[PBO_COUNT] = {0};
+  unsigned int pbo_depth_[PBO_COUNT] = {0};
+  int          pbo_index_ = 0;
+  int          pbo_next_index_ = 0;
+  int          pbo_frame_count_ = 0;  // Track frames for warmup
   //! @}
 
   //! ROS variables
