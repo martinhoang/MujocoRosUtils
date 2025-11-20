@@ -19,6 +19,7 @@
 #include <string>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -30,6 +31,13 @@ namespace MujocoRosUtils
 class ImagePublisher
 {
 public:
+  enum class ReadbackMode
+  {
+    Auto,
+    Pbo,
+    Legacy
+  };
+
   /** \brief Register plugin. */
   static void RegisterPlugin();
 
@@ -92,7 +100,8 @@ protected:
                  std::string depth_topic_name, std::string info_topic_name,
                  std::string point_cloud_topic_name, bool rotate_point_cloud,
                  const std::string &point_cloud_rotation_preset, int height, int width,
-                 mjtNum publish_rate, double max_range);
+                 mjtNum publish_rate, double max_range, ReadbackMode readback_mode,
+                 bool enable_parallel);
 
 protected:
   //! MuJoCo model
@@ -106,6 +115,10 @@ protected:
 
   //! Frame ID
   std::string frame_id_ = "";
+
+  ReadbackMode readback_mode_   = ReadbackMode::Pbo;
+  bool         use_pbo_readback_ = true;
+  bool         enable_parallel_processing_ = false;
 
   //! Rotate point cloud
   bool        rotate_point_cloud_          = false;
@@ -149,11 +162,15 @@ protected:
   //! PBO (Pixel Buffer Objects) for async GPU->CPU transfer
   //! @{
   static constexpr int PBO_COUNT = 2; // Double buffering
+  static constexpr int kParallelRowThreshold = 120;
   unsigned int pbo_color_[PBO_COUNT] = {0};
   unsigned int pbo_depth_[PBO_COUNT] = {0};
   int          pbo_index_ = 0;
   int          pbo_next_index_ = 0;
   int          pbo_frame_count_ = 0;  // Track frames for warmup
+  GLsync       pbo_sync_[PBO_COUNT] = {nullptr};
+
+  bool shouldParallelizeRows(int rows) const;
   //! @}
 
   //! ROS variables
@@ -179,6 +196,13 @@ protected:
   std::atomic<bool>       data_ready_{false};
   std::atomic<bool>       initialized_{false};
   std::mutex              gl_context_mutex_;
+  //! @}
+
+  //! FPS tracking variables
+  //! @{
+  std::chrono::steady_clock::time_point last_fps_log_time_;
+  int frame_count_ = 0;
+  std::chrono::steady_clock::time_point last_frame_time_;
   //! @}
 };
 
