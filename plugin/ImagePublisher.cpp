@@ -720,11 +720,11 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   publish_cloud_ = point_cloud_pub_->get_subscription_count() > 0;
 
   // Log subscriber info periodically
-  RCLCPP_INFO_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 2000,
-                       "Active subscribers: color=%d depth=%d info=%lu cloud=%lu",
-                       color_pub_.getNumSubscribers(), depth_pub_.getNumSubscribers(),
-                       info_pub_->get_subscription_count(),
-                       point_cloud_pub_->get_subscription_count());
+  RCLCPP_DEBUG_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 2000,
+                        "Active subscribers: color=%d depth=%d info=%lu cloud=%lu",
+                        color_pub_.getNumSubscribers(), depth_pub_.getNumSubscribers(),
+                        info_pub_->get_subscription_count(),
+                        point_cloud_pub_->get_subscription_count());
 
   // If no one is listening, do nothing
   if (!publish_color_ && !publish_depth_ && !publish_info_ && !publish_cloud_)
@@ -971,7 +971,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     if (elapsed_since_log >= 2000)
     {
       double avg_gl_ms = total_gl_time / gl_sample_count;
-      RCLCPP_INFO(nh_->get_logger(), "  GL render+readback: avg %.2fms per frame", avg_gl_ms);
+      RCLCPP_DEBUG(nh_->get_logger(), "  GL render+readback: avg %.2fms per frame", avg_gl_ms);
       total_gl_time   = 0.0;
       gl_sample_count = 0;
     }
@@ -1054,7 +1054,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     {
       double      avg_flip_ms = total_flip_time / flip_sample_count;
       const char *mode        = shouldParallelizeRows(viewport_.height) ? "parallel" : "serial";
-      RCLCPP_INFO(nh_->get_logger(), "  Color flip (%s): avg %.2fms per frame", mode, avg_flip_ms);
+      RCLCPP_DEBUG(nh_->get_logger(), "  Color flip (%s): avg %.2fms per frame", mode, avg_flip_ms);
       total_flip_time   = 0.0;
       flip_sample_count = 0;
     }
@@ -1088,8 +1088,8 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     {
       double pub_fps     = color_pub_count * 1000.0 / elapsed_pub;
       size_t msg_size_kb = color_msg.data.size() / 1024;
-      RCLCPP_INFO(nh_->get_logger(), "  Color published: %.2f Hz (%d msgs, %zu KB each)", pub_fps,
-                  color_pub_count, msg_size_kb);
+      RCLCPP_DEBUG(nh_->get_logger(), "  Color published: %.2f Hz (%d msgs, %zu KB each)", pub_fps,
+                   color_pub_count, msg_size_kb);
       color_pub_count = 0;
       last_color_log  = now_pub;
     }
