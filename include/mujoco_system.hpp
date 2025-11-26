@@ -1,12 +1,21 @@
 #pragma once
 
 #include "mujoco_system_interface.hpp"
+#include <joint_limits/joint_limits.hpp>
+#include <control_toolbox/pid.hpp>
+#include <urdf/model.h>
 
 using namespace rclcpp_lifecycle;
 using namespace hardware_interface;
 
 namespace mujoco_ros2_control
 {
+
+constexpr char PARAM_KP[] {"_kp"};
+constexpr char PARAM_KI[] {"_ki"};
+constexpr char PARAM_KD[] {"_kd"};
+constexpr char PARAM_I_MAX[] {"_i_max"};
+constexpr char PARAM_I_MIN[] {"_i_min"};
 
 class MujocoSystemPrivate;
 
@@ -44,6 +53,9 @@ public:
 
 protected:
   void register_joints(const hardware_interface::HardwareInfo &hardware_info, const mjModel *m);
+  void get_joint_limits(urdf::JointConstSharedPtr urdf_joint, joint_limits::JointLimits& joint_limits);
+  control_toolbox::Pid get_pid_gains(const hardware_interface::ComponentInfo& joint_info, std::string command_interface);
+  double clamp(double v, double lo, double hi) { return (v < lo) ? lo : (hi < v) ? hi : v; }
   std::unique_ptr<MujocoSystemPrivate> impl_;
 };
 

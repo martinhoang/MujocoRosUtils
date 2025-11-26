@@ -24,6 +24,13 @@
   <depend>image_transport_plugins</depend>
   <depend>image_transport</depend>
   <depend>compressed_image_transport</depend>
+  <depend>hardware_interface</depend>
+  <depend>controller_manager</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>control_toolbox</depend>
+  <depend>joint_limits</depend>
+  <depend>urdf</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
 

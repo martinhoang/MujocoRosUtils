@@ -36,7 +36,10 @@ ament_target_dependencies(
   builtin_interfaces
   hardware_interface
   controller_manager
-  image_transport)
+  image_transport
+  control_toolbox
+  joint_limits
+  urdf)
 add_dependencies(MujocoRosUtils ${PROJECT_NAME})
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME}
                               "rosidl_typesupport_cpp")

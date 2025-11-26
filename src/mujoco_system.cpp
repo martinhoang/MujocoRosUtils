@@ -25,6 +25,22 @@ struct Joint
   double velocity_cmd;
   double effort_cmd;
 
+  // Command limits
+  double min_position_cmd = -std::numeric_limits<double>::max();
+  double max_position_cmd = std::numeric_limits<double>::max();
+  double min_velocity_cmd = -std::numeric_limits<double>::max();
+  double max_velocity_cmd = std::numeric_limits<double>::max();
+  double min_effort_cmd = -std::numeric_limits<double>::max();
+  double max_effort_cmd = std::numeric_limits<double>::max();
+
+  // PID controllers
+  control_toolbox::Pid position_pid;
+  control_toolbox::Pid velocity_pid;
+  bool is_pid_enabled = false;
+
+  // Joint limits
+  joint_limits::JointLimits joint_limits;
+
   // Actuator mapping (support multiple actuators per joint)
   std::size_t position_actuator_id = static_cast<std::size_t>(-1);
   std::size_t velocity_actuator_id = static_cast<std::size_t>(-1);
@@ -88,10 +104,10 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
   {
     register_joints(hardware_info, m);
   }
-  catch (...)
+  catch (const std::exception &e)
   {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to initialize MujocoSystem for '%s'",
-                 hardware_info.name.c_str());
+    RCLCPP_ERROR(node_->get_logger(), "Failed to initialize MujocoSystem for '%s': %s",
+                 hardware_info.name.c_str(), e.what());
     return false;
   }
 
@@ -157,6 +173,22 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
 {
   impl_->joints_.resize(hardware_info.joints.size());
 
+  // Try to load URDF model for joint limits
+  urdf::Model urdf_model;
+  bool has_urdf = false;
+  if (!hardware_info.original_xml.empty())
+  {
+    if (urdf_model.initString(hardware_info.original_xml))
+    {
+      has_urdf = true;
+      RCLCPP_INFO(node_->get_logger(), "Successfully loaded URDF model for joint limits");
+    }
+    else
+    {
+      RCLCPP_WARN(node_->get_logger(), "Failed to parse URDF from hardware_info, joint limits will not be available");
+    }
+  }
+
   // Register joints from the URDF information
   for (unsigned int i = 0; i < hardware_info.joints.size(); ++i)
   {
@@ -199,6 +231,21 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
 
     // impl_->joints_[i] = new_joint;
     // Joint &last_joint = impl_->joints_[i];
+
+    // Get joint limits from URDF if available
+    if (has_urdf)
+    {
+      auto urdf_joint = urdf_model.getJoint(last_joint.name);
+      if (urdf_joint)
+      {
+        get_joint_limits(urdf_joint, last_joint.joint_limits);
+      }
+      else
+      {
+        RCLCPP_WARN(node_->get_logger(), "Joint '%s' not found in URDF model", 
+                    last_joint.name.c_str());
+      }
+    }
 
     if (last_joint.is_mimic)
     {
@@ -276,6 +323,38 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
       }
     }
 
+    auto get_min_value = [this](const hardware_interface::InterfaceInfo &info) {
+      if (!info.min.empty())
+      {
+        try
+        {
+          return std::stod(info.min);
+        }
+        catch (std::invalid_argument &e)
+        {
+          RCLCPP_ERROR(node_->get_logger(), "Invalid min value '%s': %s",
+                       info.min.c_str(), e.what());
+        }
+      }
+      return -std::numeric_limits<double>::max();
+    };
+
+    auto get_max_value = [this](const hardware_interface::InterfaceInfo &info) {
+      if (!info.max.empty())
+      {
+        try
+        {
+          return std::stod(info.max);
+        }
+        catch (std::invalid_argument &e)
+        {
+          RCLCPP_ERROR(node_->get_logger(), "Invalid max value '%s': %s",
+                       info.max.c_str(), e.what());
+        }
+      }
+      return std::numeric_limits<double>::max();
+    };
+
     // * Configuring command interfaces internal variables
     for (const auto &cmd_if : joint_info.command_interfaces)
     {
@@ -291,6 +370,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         {
           last_joint.position_cmd = initial_position;
         }
+        last_joint.min_position_cmd = get_min_value(cmd_if);
+        last_joint.max_position_cmd = get_max_value(cmd_if);
       }
 
       if (cmd_if.name.find(hardware_interface::HW_IF_VELOCITY) != std::string::npos)
@@ -302,6 +383,8 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         {
           last_joint.velocity_cmd = initial_velocity;
         }
+        last_joint.min_velocity_cmd = get_min_value(cmd_if);
+        last_joint.max_velocity_cmd = get_max_value(cmd_if);
       }
 
       if (cmd_if.name.find(hardware_interface::HW_IF_EFFORT) != std::string::npos)
@@ -313,7 +396,22 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         {
           last_joint.effort_cmd = initial_effort;
         }
+        last_joint.min_effort_cmd = get_min_value(cmd_if);
+        last_joint.max_effort_cmd = get_max_value(cmd_if);
       }
+
+      // Check if PID control is enabled
+      if (cmd_if.name.find("_pid") != std::string::npos)
+      {
+        last_joint.is_pid_enabled = true;
+      }
+    }
+
+    // Get PID gains if PID is enabled
+    if (last_joint.is_pid_enabled)
+    {
+      last_joint.position_pid = get_pid_gains(joint_info, hardware_interface::HW_IF_POSITION);
+      last_joint.velocity_pid = get_pid_gains(joint_info, hardware_interface::HW_IF_VELOCITY);
     }
 
     // Map MuJoCo actuators to this joint's command interfaces
@@ -461,6 +559,18 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
     reset();
   }
 
+  // * Update mimic joints command
+  for (unsigned int i = 0; i < impl_->joints_.size(); ++i)
+  {
+    auto &joint = impl_->joints_[i];
+    if (joint.is_mimic)
+    {
+      joint.position_cmd = joint.multiplier * impl_->joints_[joint.mimicked_joint_id].position_cmd;
+      joint.velocity_cmd = joint.multiplier * impl_->joints_[joint.mimicked_joint_id].velocity_cmd;
+      joint.effort_cmd = joint.multiplier * impl_->joints_[joint.mimicked_joint_id].effort_cmd;
+    }
+  }
+
   // * Update joints command
   std::stringstream            ss;
   sensor_msgs::msg::JointState joint_state_msg;
@@ -484,19 +594,65 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
     }
     else
     {
+      int joint_data_id_in_qpos = impl_->model_->jnt_qposadr[joint.id];
+      int joint_data_id_in_qvel = impl_->model_->jnt_dofadr[joint.id];
+
       // Support multiple controllers per joint: write all available commands
       if (joint.has_position_cmd && joint.position_actuator_id != static_cast<std::size_t>(-1))
       {
         ss << "Joint '" << joint.name.c_str() << "' pos_cmd: " << joint.position_cmd << std::endl;
-        impl_->data_->ctrl[joint.position_actuator_id] = joint.position_cmd;
+        
+        if (joint.is_pid_enabled)
+        {
+          // Use PID control
+          double error = joint.position_cmd - impl_->data_->qpos[joint_data_id_in_qpos];
+          double effort = joint.position_pid.computeCommand(error, period.nanoseconds());
+          
+          // Apply effort limits
+          double min_eff = joint.joint_limits.has_effort_limits ? -joint.joint_limits.max_effort : std::numeric_limits<double>::lowest();
+          min_eff = std::max(min_eff, joint.min_effort_cmd);
+          double max_eff = joint.joint_limits.has_effort_limits ? joint.joint_limits.max_effort : std::numeric_limits<double>::max();
+          max_eff = std::min(max_eff, joint.max_effort_cmd);
+          
+          impl_->data_->qfrc_applied[joint_data_id_in_qvel] = clamp(effort, min_eff, max_eff);
+        }
+        else
+        {
+          // Direct position control
+          impl_->data_->ctrl[joint.position_actuator_id] = joint.position_cmd;
+        }
       }
       if (joint.has_velocity_cmd && joint.velocity_actuator_id != static_cast<std::size_t>(-1))
       {
-        impl_->data_->ctrl[joint.velocity_actuator_id] = joint.velocity_cmd;
+        if (joint.is_pid_enabled)
+        {
+          // Use PID control
+          double error = joint.velocity_cmd - impl_->data_->qvel[joint_data_id_in_qvel];
+          double effort = joint.velocity_pid.computeCommand(error, period.nanoseconds());
+          
+          // Apply effort limits
+          double min_eff = joint.joint_limits.has_effort_limits ? -joint.joint_limits.max_effort : std::numeric_limits<double>::lowest();
+          min_eff = std::max(min_eff, joint.min_effort_cmd);
+          double max_eff = joint.joint_limits.has_effort_limits ? joint.joint_limits.max_effort : std::numeric_limits<double>::max();
+          max_eff = std::min(max_eff, joint.max_effort_cmd);
+          
+          impl_->data_->qfrc_applied[joint_data_id_in_qvel] = clamp(effort, min_eff, max_eff);
+        }
+        else
+        {
+          // Direct velocity control
+          impl_->data_->ctrl[joint.velocity_actuator_id] = joint.velocity_cmd;
+        }
       }
       if (joint.has_effort_cmd && joint.effort_actuator_id != static_cast<std::size_t>(-1))
       {
-        impl_->data_->ctrl[joint.effort_actuator_id] = joint.effort_cmd;
+        // Apply effort limits
+        double min_eff = joint.joint_limits.has_effort_limits ? -joint.joint_limits.max_effort : std::numeric_limits<double>::lowest();
+        min_eff = std::max(min_eff, joint.min_effort_cmd);
+        double max_eff = joint.joint_limits.has_effort_limits ? joint.joint_limits.max_effort : std::numeric_limits<double>::max();
+        max_eff = std::min(max_eff, joint.max_effort_cmd);
+        
+        impl_->data_->ctrl[joint.effort_actuator_id] = clamp(joint.effort_cmd, min_eff, max_eff);
       }
     }
   }
@@ -514,6 +670,116 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
   // RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, "Joint
   // commands:\n%s\nUpdate frequency: %.4f", ss.str().c_str(), update_freq);
   return return_type::OK;
+}
+
+void MujocoSystem::get_joint_limits(urdf::JointConstSharedPtr urdf_joint, 
+                                     joint_limits::JointLimits& joint_limits)
+{
+  if (urdf_joint && urdf_joint->limits)
+  {
+    joint_limits.has_position_limits = true;
+    joint_limits.min_position = urdf_joint->limits->lower;
+    joint_limits.max_position = urdf_joint->limits->upper;
+    joint_limits.has_velocity_limits = true;
+    joint_limits.max_velocity = urdf_joint->limits->velocity;
+    joint_limits.has_effort_limits = true;
+    joint_limits.max_effort = urdf_joint->limits->effort;
+  }
+}
+
+control_toolbox::Pid MujocoSystem::get_pid_gains(const hardware_interface::ComponentInfo& joint_info, 
+                                                   std::string command_interface)
+{
+  double kp = 0.0, ki = 0.0, kd = 0.0;
+  
+  // Get joint limits to use as default i_max/i_min
+  auto joint_it = std::find_if(impl_->joints_.begin(), impl_->joints_.end(),
+                                [&joint_info](const Joint& j) { return j.name == joint_info.name; });
+  
+  double i_max = std::numeric_limits<double>::max();
+  double i_min = std::numeric_limits<double>::lowest();
+  
+  if (joint_it != impl_->joints_.end() && joint_it->joint_limits.has_effort_limits)
+  {
+    i_max = joint_it->joint_limits.max_effort;
+    i_min = -joint_it->joint_limits.max_effort;
+  }
+  
+  std::string key;
+  key = command_interface + std::string(PARAM_KP);
+  if (joint_info.parameters.find(key) != joint_info.parameters.end())
+  {
+    try
+    {
+      kp = std::stod(joint_info.parameters.at(key));
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_WARN(node_->get_logger(), "Failed to parse %s for joint %s: %s", 
+                  key.c_str(), joint_info.name.c_str(), e.what());
+    }
+  }
+
+  key = command_interface + std::string(PARAM_KI);
+  if (joint_info.parameters.find(key) != joint_info.parameters.end())
+  {
+    try
+    {
+      ki = std::stod(joint_info.parameters.at(key));
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_WARN(node_->get_logger(), "Failed to parse %s for joint %s: %s", 
+                  key.c_str(), joint_info.name.c_str(), e.what());
+    }
+  }
+
+  key = command_interface + std::string(PARAM_KD);
+  if (joint_info.parameters.find(key) != joint_info.parameters.end())
+  {
+    try
+    {
+      kd = std::stod(joint_info.parameters.at(key));
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_WARN(node_->get_logger(), "Failed to parse %s for joint %s: %s", 
+                  key.c_str(), joint_info.name.c_str(), e.what());
+    }
+  }
+
+  bool enable_anti_windup = false;
+  key = command_interface + std::string(PARAM_I_MAX);
+  if (joint_info.parameters.find(key) != joint_info.parameters.end())
+  {
+    try
+    {
+      i_max = std::stod(joint_info.parameters.at(key));
+      enable_anti_windup = true;
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_WARN(node_->get_logger(), "Failed to parse %s for joint %s: %s", 
+                  key.c_str(), joint_info.name.c_str(), e.what());
+    }
+  }
+
+  key = command_interface + std::string(PARAM_I_MIN);
+  if (joint_info.parameters.find(key) != joint_info.parameters.end())
+  {
+    try
+    {
+      i_min = std::stod(joint_info.parameters.at(key));
+      enable_anti_windup = true;
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_WARN(node_->get_logger(), "Failed to parse %s for joint %s: %s", 
+                  key.c_str(), joint_info.name.c_str(), e.what());
+    }
+  }
+
+  return control_toolbox::Pid(kp, ki, kd, i_max, i_min, enable_anti_windup);
 }
 
 } // namespace mujoco_ros2_control

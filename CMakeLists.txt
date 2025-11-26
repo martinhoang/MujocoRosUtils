@@ -87,6 +87,9 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(controller_manager REQUIRED)
 find_package(image_transport REQUIRED)
+find_package(control_toolbox REQUIRED)
+find_package(joint_limits REQUIRED)
+find_package(urdf REQUIRED)
 
 rosidl_generate_interfaces(
   ${PROJECT_NAME}
@@ -118,7 +121,7 @@ target_include_directories(
   PRIVATE ${MUJOCO_INCLUDE_DIR})
 
 ament_target_dependencies(mujoco_hardware_plugin rclcpp rclcpp_lifecycle
-                          hardware_interface pluginlib)
+                          hardware_interface pluginlib control_toolbox joint_limits urdf)
 
 target_link_libraries(mujoco_hardware_plugin ${LIB_MUJOCO})
 
