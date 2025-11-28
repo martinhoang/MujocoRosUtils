@@ -1014,12 +1014,19 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   {
     auto flip_start = std::chrono::steady_clock::now();
 
-    // Flip color buffer - single-threaded memcpy is most efficient
+    // Flip color buffer AND convert RGB→BGR to avoid cv_bridge color conversion issues
     const int row_bytes = viewport_.width * 3;
     auto      flip_row  = [&](int h) {
       const unsigned char *src_row = color_buffer_.get() + h * row_bytes;
       unsigned char *dst_row = color_buffer_flipped_.get() + (viewport_.height - 1 - h) * row_bytes;
-      std::memcpy(dst_row, src_row, row_bytes);
+      
+      // Convert RGB→BGR while copying (swap R and B channels)
+      for (int w = 0; w < viewport_.width; w++)
+      {
+        dst_row[w * 3 + 0] = src_row[w * 3 + 2]; // B ← R
+        dst_row[w * 3 + 1] = src_row[w * 3 + 1]; // G ← G
+        dst_row[w * 3 + 2] = src_row[w * 3 + 0]; // R ← B
+      }
     };
 
 #ifdef _OPENMP
@@ -1063,18 +1070,92 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   // Publish color image directly from the compute thread for low latency
   if (publish_color_)
   {
+    // Validate viewport dimensions before creating message
+    if (viewport_.width <= 0 || viewport_.height <= 0 || viewport_.width > 10000 || viewport_.height > 10000)
+    {
+      RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
+                            "Invalid viewport dimensions: %dx%d", viewport_.width, viewport_.height);
+      return;
+    }
+
+    // Validate buffer pointer
+    if (!color_buffer_flipped_)
+    {
+      RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
+                            "color_buffer_flipped_ is null!");
+      return;
+    }
+
     // Create and publish color_msg
     sensor_msgs::msg::Image color_msg;
     color_msg.header.stamp    = stamp_now;
     color_msg.header.frame_id = frame_id_;
-    color_msg.height          = viewport_.height;
-    color_msg.width           = viewport_.width;
-    color_msg.encoding        = "rgb8";
+    color_msg.height          = static_cast<uint32_t>(viewport_.height);
+    color_msg.width           = static_cast<uint32_t>(viewport_.width);
+    color_msg.encoding        = "bgr8";  // Changed from rgb8 to match our RGB→BGR conversion
     color_msg.is_bigendian    = 0;
-    color_msg.step = static_cast<unsigned int>(sizeof(unsigned char) * 3 * viewport_.width);
-    color_msg.data.resize(sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
-    std::memcpy(&color_msg.data[0], color_buffer_flipped_.get(),
-                sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
+    
+    // Calculate step with proper type - step is bytes per row
+    const uint32_t step_size = static_cast<uint32_t>(3) * static_cast<uint32_t>(viewport_.width);
+    color_msg.step = step_size;
+    
+    // Validate buffer size before resize - use size_t to prevent overflow
+    const size_t required_size = static_cast<size_t>(3) * static_cast<size_t>(viewport_.width) * static_cast<size_t>(viewport_.height);
+    
+    // Sanity checks
+    if (required_size == 0)
+    {
+      RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
+                            "Calculated image size is zero! (%dx%d)", viewport_.width, viewport_.height);
+      return;
+    }
+    
+    if (required_size > 100 * 1024 * 1024) // 100 MB sanity check
+    {
+      RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
+                            "Image size too large: %zu bytes (%dx%d)", 
+                            required_size, viewport_.width, viewport_.height);
+      return;
+    }
+    
+    // Verify step calculation matches expected size
+    const size_t expected_data_size = static_cast<size_t>(color_msg.step) * static_cast<size_t>(color_msg.height);
+    if (expected_data_size != required_size)
+    {
+      RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
+                            "Step calculation mismatch! step=%u height=%u expected=%zu actual=%zu",
+                            color_msg.step, color_msg.height, expected_data_size, required_size);
+      return;
+    }
+    
+    try
+    {
+      color_msg.data.resize(required_size);
+      std::memcpy(&color_msg.data[0], color_buffer_flipped_.get(), required_size);
+      
+      // Final validation before publishing
+      if (color_msg.data.size() != required_size)
+      {
+        RCLCPP_ERROR(nh_->get_logger(), "Data size mismatch after resize! expected=%zu actual=%zu",
+                     required_size, color_msg.data.size());
+        return;
+      }
+      
+      // Log message details for EVERY frame to debug the corruption
+      RCLCPP_DEBUG(nh_->get_logger(), 
+                  "PRE-PUBLISH: width=%u height=%u step=%u encoding='%s' bigendian=%d data.size=%zu (expected=%zu)",
+                  color_msg.width, color_msg.height, color_msg.step, color_msg.encoding.c_str(),
+                  color_msg.is_bigendian, color_msg.data.size(), required_size);
+      
+      // Also log the actual viewport to see if it matches
+      RCLCPP_DEBUG(nh_->get_logger(), "VIEWPORT: width=%d height=%d", viewport_.width, viewport_.height);
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_ERROR(nh_->get_logger(), "Failed to prepare color message: %s", e.what());
+      return;
+    }
+    
     color_pub_.publish(color_msg);
 
     static int  color_pub_count = 0;
