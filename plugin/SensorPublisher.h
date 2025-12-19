@@ -12,6 +12,7 @@
 
 #include <mujoco_ros_utils/msg/scalar_stamped.hpp>
 #include <string>
+#include <vector>
 
 namespace MujocoRosUtils
 {
@@ -33,7 +34,10 @@ public:
     MsgVector3,
 
     //! Quaternion
-    MsgQuaternion
+    MsgQuaternion,
+
+    //! Float array
+    MsgFloatArray
   } MessageType;
 
 public:
@@ -50,6 +54,9 @@ public:
 public:
   /** \brief Copy constructor. */
   SensorPublisher(SensorPublisher &&) = default;
+
+  /** \brief Destructor. */
+  ~SensorPublisher();
 
   /** \brief Reset.
       \param m model
@@ -68,7 +75,7 @@ protected:
   /** \brief Constructor.
       \param m model
       \param d data
-      \param sensor_id sensor ID
+      \param sensor_ids sensor IDs
       \param msg_type type of ROS message
       \param frame_id frame ID of message header
       \param topic_name topic name
@@ -76,14 +83,17 @@ protected:
    */
   SensorPublisher(const mjModel * m,
                   mjData * d,
-                  int sensor_id,
+                  const std::vector<int> & sensor_ids,
                   MessageType msg_type,
                   const std::string & frame_id,
                   const std::string & topic_name,
                   mjtNum publish_rate);
 
 protected:
-  //! Sensor ID
+  //! Sensor IDs (for multi-sensor support)
+  std::vector<int> sensor_ids_;
+
+  //! Sensor ID (for backward compatibility with single sensor)
   int sensor_id_ = -1;
 
   //! Type of ROS message
