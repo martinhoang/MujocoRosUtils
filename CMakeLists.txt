@@ -95,6 +95,7 @@ rosidl_generate_interfaces(
   ${PROJECT_NAME}
   "msg/ExternalForce.msg"
   "msg/ScalarStamped.msg"
+  "msg/ContactInfo.msg"
   DEPENDENCIES
   std_msgs
   geometry_msgs

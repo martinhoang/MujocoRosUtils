@@ -2,6 +2,7 @@
 
 #include "ActuatorCommand.h"
 #include "ClockPublisher.h"
+#include "ContactForcePublisher.h"
 #include "ExternalForce.h"
 #include "ImagePublisher.h"
 #include "PosePublisher.h"
@@ -22,6 +23,7 @@ mjPLUGIN_LIB_INIT
   SensorPublisher::RegisterPlugin();
   MimicJoint::RegisterPlugin();
   Ros2Control::RegisterPlugin();
+  ContactForcePublisher::RegisterPlugin();
 }
 
 } // namespace MujocoRosUtils
