@@ -208,39 +208,73 @@ bool Ros2Control::initialize()
                 param_name.c_str());
 
     rclcpp::Time start_time = node_->get_clock()->now();
-    while (urdf_string.empty() && (node_->get_clock()->now() - start_time).seconds() < 2)
+    constexpr double timeout_seconds = 5.0; // Increased from 2 to 5 seconds
+    std::shared_future<std::vector<rclcpp::Parameter>> pending_future;
+    bool has_pending_request = false;
+    
+    while (urdf_string.empty() && (node_->get_clock()->now() - start_time).seconds() < timeout_seconds)
     {
-      RCLCPP_DEBUG(node_->get_logger(), "Waiting for parameter [%s] on the ROS param server.",
-                   param_name.c_str());
-      try
-      {
-        auto f = parameters_client->get_parameters({param_name});
-        f.wait_for(50ms);
-        executor_->spin_some();
-        std::vector<rclcpp::Parameter> values = f.get();
-        urdf_string                           = values[0].as_string();
-      }
-      catch (const std::exception &e)
-      {
-        RCLCPP_DEBUG(node_->get_logger(), "Parameter request failed: %s", e.what());
-      }
-
-      if (!urdf_string.empty())
-      {
-        break;
-      }
-      else
-      {
-        RCLCPP_DEBUG(node_->get_logger(),
-                     "Ros2Control plugin is waiting for model"
-                     " URDF in parameter [%s] on the ROS param server.",
-                     param_name.c_str());
-      }
-      std::this_thread::sleep_for(50ms);
-
       if (!rclcpp::ok())
       {
         throw std::runtime_error("ROS shutdown while waiting for URDF parameter");
+      }
+
+      // Only send a new request if we don't have one pending
+      if (!has_pending_request)
+      {
+        RCLCPP_DEBUG(node_->get_logger(), "Requesting parameter [%s] from the ROS param server.",
+                     param_name.c_str());
+        try
+        {
+          pending_future = parameters_client->get_parameters({param_name});
+          has_pending_request = true;
+        }
+        catch (const std::exception &e)
+        {
+          RCLCPP_WARN(node_->get_logger(), "Failed to send parameter request: %s", e.what());
+          std::this_thread::sleep_for(100ms);
+          continue;
+        }
+      }
+
+      // Check if the pending request is ready with a timeout
+      if (has_pending_request)
+      {
+        auto status = pending_future.wait_for(100ms);
+        
+        if (status == std::future_status::ready)
+        {
+          try
+          {
+            std::vector<rclcpp::Parameter> values = pending_future.get();
+            if (!values.empty() && values[0].get_type() != rclcpp::ParameterType::PARAMETER_NOT_SET)
+            {
+              urdf_string = values[0].as_string();
+              RCLCPP_INFO(node_->get_logger(), "Successfully retrieved %s parameter", param_name.c_str());
+            }
+            else
+            {
+              RCLCPP_DEBUG(node_->get_logger(), "Parameter [%s] not set or empty", param_name.c_str());
+            }
+          }
+          catch (const std::exception &e)
+          {
+            RCLCPP_WARN(node_->get_logger(), "Parameter retrieval failed: %s", e.what());
+          }
+          has_pending_request = false;
+        }
+        else if (status == std::future_status::timeout)
+        {
+          RCLCPP_DEBUG(node_->get_logger(), "Still waiting for parameter [%s]...", param_name.c_str());
+        }
+      }
+      
+      // Spin to process callbacks
+      executor_->spin_some(10ms);
+      
+      if (urdf_string.empty())
+      {
+        std::this_thread::sleep_for(50ms);
       }
     }
 
@@ -414,13 +448,28 @@ Ros2Control::~Ros2Control()
     print_confirm("Destroying Ros2Control plugin (not initialized)\n");
   }
 
-  if (initialized_ && node_)
+  if (initialized_)
   {
     stop_executor_thread_ = true;
+    
+    // First, stop the executor thread
+    if (executor_)
+    {
+      executor_->cancel();
+    }
+    if (executor_thread_.joinable())
+    {
+      executor_thread_.join();
+    }
+    
+    // Then remove nodes from executor
     try
     {
-      executor_->remove_node(node_);
-      if (controller_manager_)
+      if (node_ && executor_)
+      {
+        executor_->remove_node(node_);
+      }
+      if (controller_manager_ && executor_)
       {
         executor_->remove_node(controller_manager_);
       }
@@ -435,24 +484,19 @@ Ros2Control::~Ros2Control()
                     e.what());
       }
     }
-
-    if (executor_)
-    {
-      executor_->cancel();
-    }
-    if (executor_thread_.joinable())
-    {
-      executor_thread_.join();
-    }
+    
+    // Finally, reset the shared pointers in proper order
     controller_manager_.reset();
-    node_.reset();
     executor_.reset();
+    node_.reset();
   }
 
   // Always decrement the counter and potentially shut down ROS
   ros_control_instances_--;
   if (ros_control_instances_ == 0 && rclcpp::ok())
   {
+    // Give a small delay to ensure all nodes are cleaned up
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     rclcpp::shutdown();
   }
 
