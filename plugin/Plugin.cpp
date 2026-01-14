@@ -1,6 +1,7 @@
 #include <mujoco/mjplugin.h>
 
 #include "ActuatorCommand.h"
+#include "TopicControl.h"
 #include "ClockPublisher.h"
 #include "ContactForcePublisher.h"
 #include "ExternalForce.h"
@@ -19,6 +20,7 @@ mjPLUGIN_LIB_INIT
   PosePublisher::RegisterPlugin();
   ImagePublisher::RegisterPlugin();
   ActuatorCommand::RegisterPlugin();
+  TopicControl::RegisterPlugin();
   ExternalForce::RegisterPlugin();
   SensorPublisher::RegisterPlugin();
   MimicJoint::RegisterPlugin();

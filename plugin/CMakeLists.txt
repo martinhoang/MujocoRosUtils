@@ -9,6 +9,7 @@ add_library(
   depth_conversions.hpp
   depth_traits.hpp
   ActuatorCommand.cpp
+  TopicControl.cpp
   ExternalForce.cpp
   SensorPublisher.cpp
   ContactForcePublisher.cpp

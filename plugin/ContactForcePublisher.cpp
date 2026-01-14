@@ -7,7 +7,7 @@
 #include <iostream>
 #include <sstream>
 
-"""
+/*
 Example usage:
 		<plugin plugin='MujocoRosUtils::ContactForcePublisher'>
 			<instance name='contact'>
@@ -17,7 +17,7 @@ Example usage:
 				<config key='publish_rate' value='100'/>
 			</instance>
 		</plugin>
-"""
+*/
 namespace MujocoRosUtils
 {
 
