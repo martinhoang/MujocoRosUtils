@@ -241,8 +241,8 @@ void ContactForcePublisher::compute(const mjModel *m, mjData *d, int plugin_id)
       mjContact & contact = d->contact[cnt_id];
 
       // Get geom IDs
-      int geom1_id = contact.geom1;
-      int geom2_id = contact.geom2;
+      int geom1_id = contact.geom[0];
+      int geom2_id = contact.geom[1];
 
       // Filter by geom names if specified
       if(!geom_ids_.empty())
@@ -255,9 +255,82 @@ void ContactForcePublisher::compute(const mjModel *m, mjData *d, int plugin_id)
         }
       }
 
-      // Get geom names
-      const char * geom1_name = mj_id2name(m, mjOBJ_GEOM, geom1_id);
-      const char * geom2_name = mj_id2name(m, mjOBJ_GEOM, geom2_id);
+      // Get names for both contacts (handle geom, body, or flex)
+      std::string name1, name2;
+      
+      // For contact 1
+      if(geom1_id >= 0)
+      {
+        // Regular geom contact
+        const char * geom_name = mj_id2name(m, mjOBJ_GEOM, geom1_id);
+        if(geom_name)
+        {
+          name1 = std::string(geom_name);
+        }
+        else
+        {
+          // Try body if geom name not found
+          const char * body_name = mj_id2name(m, mjOBJ_BODY, m->geom_bodyid[geom1_id]);
+          name1 = body_name ? std::string(body_name) : "unknown";
+        }
+      }
+      else if(contact.flex[0] >= 0)
+      {
+        // Flex contact
+        const char * flex_name = mj_id2name(m, mjOBJ_FLEX, contact.flex[0]);
+        name1 = flex_name ? std::string(flex_name) : "flex_unknown";
+        
+        // Add element or vertex info if available
+        if(contact.elem[0] >= 0)
+        {
+          name1 += "_elem" + std::to_string(contact.elem[0]);
+        }
+        else if(contact.vert[0] >= 0)
+        {
+          name1 += "_vert" + std::to_string(contact.vert[0]);
+        }
+      }
+      else
+      {
+        name1 = "unknown";
+      }
+      
+      // For contact 2
+      if(geom2_id >= 0)
+      {
+        // Regular geom contact
+        const char * geom_name = mj_id2name(m, mjOBJ_GEOM, geom2_id);
+        if(geom_name)
+        {
+          name2 = std::string(geom_name);
+        }
+        else
+        {
+          // Try body if geom name not found
+          const char * body_name = mj_id2name(m, mjOBJ_BODY, m->geom_bodyid[geom2_id]);
+          name2 = body_name ? std::string(body_name) : "unknown";
+        }
+      }
+      else if(contact.flex[1] >= 0)
+      {
+        // Flex contact
+        const char * flex_name = mj_id2name(m, mjOBJ_FLEX, contact.flex[1]);
+        name2 = flex_name ? std::string(flex_name) : "flex_unknown";
+        
+        // Add element or vertex info if available
+        if(contact.elem[1] >= 0)
+        {
+          name2 += "_elem" + std::to_string(contact.elem[1]);
+        }
+        else if(contact.vert[1] >= 0)
+        {
+          name2 += "_vert" + std::to_string(contact.vert[1]);
+        }
+      }
+      else
+      {
+        name2 = "unknown";
+      }
 
       // Calculate contact force
       mjtNum contact_force[6] = {0, 0, 0, 0, 0, 0};
@@ -266,8 +339,8 @@ void ContactForcePublisher::compute(const mjModel *m, mjData *d, int plugin_id)
       // Create and populate message
       mujoco_ros_utils::msg::ContactInfo msg;
       msg.id = cnt_id;
-      msg.geom1 = geom1_name ? std::string(geom1_name) : "unknown";
-      msg.geom2 = geom2_name ? std::string(geom2_name) : "unknown";
+      msg.geom1 = name1;
+      msg.geom2 = name2;
 
       // Contact position
       msg.pos.x = contact.pos[0];

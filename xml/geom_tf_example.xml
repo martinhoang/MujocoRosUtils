@@ -1,0 +1,58 @@
+<mujoco model="geom_tf_example">
+  <compiler angle="radian"/>
+  
+  <option timestep="0.001" integrator="Euler"/>
+  
+  <extension>
+    <plugin plugin="MujocoRosUtils::GeomTfPublisher">
+      <!-- 
+        parent_body: Name of the parent body whose geoms will be published
+        frame_id: TF parent frame (default: "map")
+        topic_name: Custom topic name for TF messages (default: "/tf")
+        publish_rate: Publishing rate in Hz (default: 30.0)
+        publish_bodies: Also publish body frames (default: false)
+      -->
+    </plugin>
+  </extension>
+
+  <worldbody>
+    <light diffuse=".5 .5 .5" pos="0 0 3" dir="0 0 -1"/>
+    <geom type="plane" size="1 1 0.1" rgba=".9 0 0 1"/>
+
+    <!-- Example body with multiple geoms -->
+    <body name="robot_base" pos="0 0 0.5">
+      <!-- Multiple geoms attached to this body -->
+      <geom name="base_link" type="box" size="0.2 0.2 0.1" rgba="0 .9 0 1" pos="0 0 0"/>
+      <geom name="sensor_1" type="sphere" size="0.05" rgba="0 0 .9 1" pos="0.15 0 0.1"/>
+      <geom name="sensor_2" type="sphere" size="0.05" rgba="0 0 .9 1" pos="-0.15 0 0.1"/>
+      <geom name="sensor_3" type="sphere" size="0.05" rgba="0 0 .9 1" pos="0 0.15 0.1"/>
+      
+      <freejoint/>
+      
+      <!-- Plugin instance to publish TF frames for all geoms under robot_base -->
+      <plugin plugin="MujocoRosUtils::GeomTfPublisher">
+        <config key="parent_body" value="robot_base"/>
+        <config key="frame_id" value="world"/>
+        <config key="topic_name" value="/robot/geom_tf"/>
+        <config key="publish_rate" value="50.0"/>
+        <config key="publish_bodies" value="true"/>
+      </plugin>
+    </body>
+
+    <!-- Another example body -->
+    <body name="manipulator" pos="1 0 0.3">
+      <geom name="arm_link" type="cylinder" size="0.05 0.3" rgba=".9 .9 0 1" pos="0 0 0"/>
+      <geom name="end_effector" type="box" size="0.1 0.1 0.05" rgba=".9 0 .9 1" pos="0 0 0.35"/>
+      
+      <freejoint/>
+      
+      <!-- Separate plugin instance for manipulator geoms -->
+      <plugin plugin="MujocoRosUtils::GeomTfPublisher">
+        <config key="parent_body" value="manipulator"/>
+        <config key="frame_id" value="world"/>
+        <config key="topic_name" value="/manipulator/geom_tf"/>
+        <config key="publish_rate" value="30.0"/>
+      </plugin>
+    </body>
+  </worldbody>
+</mujoco>

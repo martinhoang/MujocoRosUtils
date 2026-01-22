@@ -10,6 +10,7 @@
 #include "SensorPublisher.h"
 #include "MimicJoint.hpp"
 #include "RosControl.hpp"
+#include "GeomTfPublisher.h"
 
 namespace MujocoRosUtils
 {
@@ -26,6 +27,7 @@ mjPLUGIN_LIB_INIT
   MimicJoint::RegisterPlugin();
   Ros2Control::RegisterPlugin();
   ContactForcePublisher::RegisterPlugin();
+  GeomTfPublisher::RegisterPlugin();
 }
 
 } // namespace MujocoRosUtils
