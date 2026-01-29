@@ -9,14 +9,14 @@
 
 /*
 Example usage:
-		<plugin plugin='MujocoRosUtils::ContactForcePublisher'>
-			<instance name='contact'>
-				<config key='geom_names' value=''/>
-				<config key='frame_id' value='world'/>
-				<config key='topic_name' value='/contact_forces/all'/>
-				<config key='publish_rate' value='100'/>
-			</instance>
-		</plugin>
+                <plugin plugin='MujocoRosUtils::ContactForcePublisher'>
+                        <instance name='contact'>
+                                <config key='geom_names' value=''/>
+                                <config key='frame_id' value='world'/>
+                                <config key='topic_name' value='/contact_forces/all'/>
+                                <config key='publish_rate' value='100'/>
+                        </instance>
+                </plugin>
 */
 namespace MujocoRosUtils
 {
@@ -227,154 +227,336 @@ void ContactForcePublisher::reset(const mjModel *m, int plugin_id)
 
 void ContactForcePublisher::compute(const mjModel *m, mjData *d, int plugin_id)
 {
-    // Check if we should publish this iteration
-    if(sim_cnt_ % publish_skip_ != 0)
-    {
-      sim_cnt_++;
-      return;
-    }
+  // Check if we should publish this iteration
+  if (sim_cnt_ % publish_skip_ != 0)
+  {
     sim_cnt_++;
+    return;
+  }
+  sim_cnt_++;
 
-    // Iterate through all contacts
-    for(int cnt_id = 0; cnt_id < d->ncon; cnt_id++)
+  // Iterate through all contacts
+  for (int cnt_id = 0; cnt_id < d->ncon; cnt_id++)
+  {
+    mjContact &contact = d->contact[cnt_id];
+
+    // Get geom IDs
+    int geom1_id = contact.geom[0];
+    int geom2_id = contact.geom[1];
+
+    // Determine if contacts involve flexes
+    bool is_flex1 = (geom1_id < 0 && contact.flex[0] >= 0);
+    bool is_flex2 = (geom2_id < 0 && contact.flex[1] >= 0);
+
+    // Filter by geom names if specified
+    if (!geom_ids_.empty())
     {
-      mjContact & contact = d->contact[cnt_id];
+      // For flex contacts, we need to check the flex name against our filter list
+      // For geom contacts, we check the geom_id
+      bool match1 = false;
+      bool match2 = false;
 
-      // Get geom IDs
-      int geom1_id = contact.geom[0];
-      int geom2_id = contact.geom[1];
-
-      // Filter by geom names if specified
-      if(!geom_ids_.empty())
+      if (is_flex1)
       {
-        // Skip if neither geom is in our list of interest
-        if(geom_ids_.find(geom1_id) == geom_ids_.end() &&
-           geom_ids_.find(geom2_id) == geom_ids_.end())
+        // Check if flex name is in our filter list
+        const char *flex_name = mj_id2name(m, mjOBJ_FLEX, contact.flex[0]);
+        if (flex_name && geom_names_.find(std::string(flex_name)) != geom_names_.end())
         {
-          continue;
+          match1 = true;
         }
       }
-
-      // Get names for both contacts (handle geom, body, or flex)
-      std::string name1, name2;
-      
-      // For contact 1
-      if(geom1_id >= 0)
+      else if (geom1_id >= 0)
       {
-        // Regular geom contact
-        const char * geom_name = mj_id2name(m, mjOBJ_GEOM, geom1_id);
-        if(geom_name)
-        {
-          name1 = std::string(geom_name);
-        }
-        else
-        {
-          // Try body if geom name not found
-          const char * body_name = mj_id2name(m, mjOBJ_BODY, m->geom_bodyid[geom1_id]);
-          name1 = body_name ? std::string(body_name) : "unknown";
-        }
-      }
-      else if(contact.flex[0] >= 0)
-      {
-        // Flex contact
-        const char * flex_name = mj_id2name(m, mjOBJ_FLEX, contact.flex[0]);
-        name1 = flex_name ? std::string(flex_name) : "flex_unknown";
-        
-        // Add element or vertex info if available
-        if(contact.elem[0] >= 0)
-        {
-          name1 += "_elem" + std::to_string(contact.elem[0]);
-        }
-        else if(contact.vert[0] >= 0)
-        {
-          name1 += "_vert" + std::to_string(contact.vert[0]);
-        }
-      }
-      else
-      {
-        name1 = "unknown";
-      }
-      
-      // For contact 2
-      if(geom2_id >= 0)
-      {
-        // Regular geom contact
-        const char * geom_name = mj_id2name(m, mjOBJ_GEOM, geom2_id);
-        if(geom_name)
-        {
-          name2 = std::string(geom_name);
-        }
-        else
-        {
-          // Try body if geom name not found
-          const char * body_name = mj_id2name(m, mjOBJ_BODY, m->geom_bodyid[geom2_id]);
-          name2 = body_name ? std::string(body_name) : "unknown";
-        }
-      }
-      else if(contact.flex[1] >= 0)
-      {
-        // Flex contact
-        const char * flex_name = mj_id2name(m, mjOBJ_FLEX, contact.flex[1]);
-        name2 = flex_name ? std::string(flex_name) : "flex_unknown";
-        
-        // Add element or vertex info if available
-        if(contact.elem[1] >= 0)
-        {
-          name2 += "_elem" + std::to_string(contact.elem[1]);
-        }
-        else if(contact.vert[1] >= 0)
-        {
-          name2 += "_vert" + std::to_string(contact.vert[1]);
-        }
-      }
-      else
-      {
-        name2 = "unknown";
+        // Check if geom is in our filter list
+        match1 = (geom_ids_.find(geom1_id) != geom_ids_.end());
       }
 
-      // Calculate contact force
-      mjtNum contact_force[6] = {0, 0, 0, 0, 0, 0};
-      mj_contactForce(m, d, cnt_id, contact_force);
-
-      // Create and populate message
-      mujoco_ros_utils::msg::ContactInfo msg;
-      msg.id = cnt_id;
-      msg.geom1 = name1;
-      msg.geom2 = name2;
-
-      // Contact position
-      msg.pos.x = contact.pos[0];
-      msg.pos.y = contact.pos[1];
-      msg.pos.z = contact.pos[2];
-
-      // Contact frame (3x3 matrix stored row-wise)
-      for(int i = 0; i < 9; i++)
+      if (is_flex2)
       {
-        msg.frame[i] = contact.frame[i];
+        // Check if flex name is in our filter list
+        const char *flex_name = mj_id2name(m, mjOBJ_FLEX, contact.flex[1]);
+        if (flex_name && geom_names_.find(std::string(flex_name)) != geom_names_.end())
+        {
+          match2 = true;
+        }
+      }
+      else if (geom2_id >= 0)
+      {
+        // Check if geom is in our filter list
+        match2 = (geom_ids_.find(geom2_id) != geom_ids_.end());
       }
 
-      // Distance
-      msg.dist = contact.dist;
-
-      // Contact force (6D)
-      for(int i = 0; i < 6; i++)
+      // Skip if neither contact matches our filter
+      if (!match1 && !match2)
       {
-        msg.force[i] = contact_force[i];
+        continue;
       }
-
-      // Normal force (first component)
-      msg.normal_force = contact_force[0];
-
-      // Friction force (magnitude of tangential components)
-      msg.friction_force = std::sqrt(contact_force[1] * contact_force[1] +
-                                     contact_force[2] * contact_force[2]);
-
-      // Publish
-      contact_pub_->publish(msg);
     }
 
-    // Spin ROS
-    rclcpp::spin_some(nh_);
+    // Get names for both contacts (handle geom, body, or flex)
+    std::string name1, name2;
+
+    // For contact 1
+    if (geom1_id >= 0)
+    {
+      // Regular geom contact
+      const char *geom_name = mj_id2name(m, mjOBJ_GEOM, geom1_id);
+      if (geom_name)
+      {
+        name1 = std::string(geom_name);
+      }
+      else
+      {
+        // Try body if geom name not found
+        const char *body_name = mj_id2name(m, mjOBJ_BODY, m->geom_bodyid[geom1_id]);
+        name1                 = body_name ? std::string(body_name) : "unknown";
+      }
+    }
+    else if (contact.flex[0] >= 0)
+    {
+      // 1. Get the general Flex Name (e.g., "FC_pelvis")
+      const char *flex_name = mj_id2name(m, mjOBJ_FLEX, contact.flex[0]);
+      std::string f_name    = flex_name ? std::string(flex_name) : "flex";
+
+      int body_id = -1;
+      int flex_id = contact.flex[0];
+
+      std::cout << "[DEBUG] Contact " << cnt_id << " - Flex 1:" << std::endl;
+      std::cout << "  flex_id: " << flex_id << ", flex_name: " << (flex_name ? flex_name : "NULL")
+                << std::endl;
+      std::cout << "  contact.elem[0]: " << contact.elem[0] << std::endl;
+      std::cout << "  contact.vert[0]: " << contact.vert[0] << std::endl;
+
+      // CASE A: The contact hit a specific vertex directly
+      if (contact.vert[0] >= 0)
+      {
+        int global_vert_id = m->flex_vertadr[flex_id] + contact.vert[0];
+        body_id            = m->flex_vertbodyid[global_vert_id];
+        std::cout << "  CASE A: Vertex contact" << std::endl;
+        std::cout << "    flex_vertadr[" << flex_id << "]: " << m->flex_vertadr[flex_id]
+                  << std::endl;
+        std::cout << "    global_vert_id: " << global_vert_id << std::endl;
+        std::cout << "    body_id: " << body_id << std::endl;
+      }
+      // CASE B: The contact hit an element (volume/face)
+      // This handles the "FC_pelvis_elem..." case
+      else if (contact.elem[0] >= 0)
+      {
+        // ---------------------------------------------------------
+        // IMPORTANT: Define how many vertices make up 1 element.
+        // For a 3D grid/box (composite), this is usually 8 (Hexahedron).
+        // For a mesh/volume, this might be 4 (Tetrahedron).
+        // ---------------------------------------------------------
+        int stride = 8;
+
+        // 1. Find the start of the element data for this flex
+        int elem_start = m->flex_elemadr[flex_id];
+
+        // 2. Look up the first vertex of this specific element
+        //    We multiply elem ID by stride to find its place in the array.
+        int vertex_lookup_idx = elem_start + (contact.elem[0] * stride);
+
+        // 3. Get the Local Vertex ID
+        int local_vert_id = m->flex_elem[vertex_lookup_idx];
+
+        // 4. Convert to Global Vertex ID
+        int global_vert_id = m->flex_vertadr[flex_id] + local_vert_id;
+
+        // 5. Finally, get the Body ID attached to this vertex
+        body_id = m->flex_vertbodyid[global_vert_id];
+      }
+
+      // Resolve the Body ID to a Name
+      if (body_id >= 0)
+      {
+        const char *bname = mj_id2name(m, mjOBJ_BODY, body_id);
+        name1             = bname ? std::string(bname) : f_name;
+      }
+      else
+      {
+        // Fallback if no body is found attached to the flex
+        name1 = f_name + (contact.elem[0] >= 0 ? "_elem" : "_vert");
+      }
+    }
+    else
+    {
+      name1 = "unknown";
+    }
+
+    // For contact 2
+    if (geom2_id >= 0)
+    {
+      // Regular geom contact
+      const char *geom_name = mj_id2name(m, mjOBJ_GEOM, geom2_id);
+      if (geom_name)
+      {
+        name2 = std::string(geom_name);
+      }
+      else
+      {
+        // Try body if geom name not found
+        const char *body_name = mj_id2name(m, mjOBJ_BODY, m->geom_bodyid[geom2_id]);
+        name2                 = body_name ? std::string(body_name) : "unknown";
+      }
+    }
+    else if (contact.flex[1] >= 0)
+    {
+      // 1. Get the general Flex Name (e.g., "FC_pelvis")
+      const char *flex_name = mj_id2name(m, mjOBJ_FLEX, contact.flex[1]);
+      std::string f_name    = flex_name ? std::string(flex_name) : "flex";
+
+      int body_id = -1;
+      int flex_id = contact.flex[1];
+
+      // CASE A: The contact hit a specific vertex directly
+      if (contact.vert[1] >= 0)
+      {
+        int global_vert_id = m->flex_vertadr[flex_id] + contact.vert[1];
+        body_id            = m->flex_vertbodyid[global_vert_id];
+      }
+      // CASE B: The contact hit an element (volume/face)
+      // This handles the "FC_pelvis_elem..." case
+      else if (contact.elem[1] >= 0)
+      {
+        // ---------------------------------------------------------
+        // IMPORTANT: Define how many vertices make up 1 element.
+        // For a 3D grid/box (composite), this is usually 8 (Hexahedron).
+        // For a mesh/volume, this might be 4 (Tetrahedron).
+        // ---------------------------------------------------------
+        int stride = 8;
+
+        // 1. Find the start of the element data for this flex
+        int elem_start = m->flex_elemadr[flex_id];
+
+        // 2. Look up the first vertex of this specific element
+        //    We multiply elem ID by stride to find its place in the array.
+        int vertex_lookup_idx = elem_start + (contact.elem[1] * stride);
+
+        // 3. Get the Local Vertex ID
+        int local_vert_id = m->flex_elem[vertex_lookup_idx];
+
+        // 4. Convert to Global Vertex ID
+        int global_vert_id = m->flex_vertadr[flex_id] + local_vert_id;
+
+        // 5. Finally, get the Body ID attached to this vertex
+        body_id = m->flex_vertbodyid[global_vert_id];
+      }
+
+      // Resolve the Body ID to a Name
+      if (body_id >= 0)
+      {
+        const char *bname = mj_id2name(m, mjOBJ_BODY, body_id);
+        name2             = bname ? std::string(bname) : f_name;
+      }
+      else
+      {
+        // Fallback if no body is found attached to the flex
+        name2 = f_name + (contact.elem[1] >= 0 ? "_elem" : "_vert");
+      }
+    }
+    else
+    {
+      name2 = "unknown";
+    }
+
+    // 1. Get the forces in the Local Contact Frame
+    // [0]=normal, [1]=tangent1, [2]=tangent2, [3-5]=torsional/rolling
+    mjtNum local_force[6] = {0, 0, 0, 0, 0, 0};
+    mj_contactForce(m, d, cnt_id, local_force);
+
+    // 2. Extract Scalar Magnitudes
+    mujoco_ros_utils::msg::ContactInfo msg;
+    msg.normal_force = local_force[0];
+    msg.friction_force
+      = std::sqrt(local_force[1] * local_force[1] + local_force[2] * local_force[2]);
+
+    // 3. Compute World Frame Force Vector (Rotation)
+    // We need to multiply the Contact Frame Matrix (3x3) by the Force Vector (3x1)
+    // contact.frame is stored as: [ N_x N_y N_z | T1_x T1_y T1_z | T2_x T2_y T2_z ]
+
+    mjtNum world_force[3] = {0, 0, 0};
+
+    // Matrix-Vector Multiplication: World_F = Frame_Matrix * Local_F
+    for (int i = 0; i < 3; i++)
+    {
+      // frame[i]     is Normal(i)
+      // frame[i+3]   is Tangent1(i)
+      // frame[i+6]   is Tangent2(i)
+
+      world_force[i] = (local_force[0] * contact.frame[i]) +     // Normal Component
+                       (local_force[1] * contact.frame[i + 3]) + // Tangent 1 Component
+                       (local_force[2] * contact.frame[i + 6]);  // Tangent 2 Component
+    }
+
+    // 4. Assign to ROS message
+    // Assuming msg.force is an array of size 3 (or geometry_msgs/Vector3) representing World X,Y,Z
+    msg.force[0] = world_force[0];
+    msg.force[1] = world_force[1];
+    msg.force[2] = world_force[2];
+
+    // Note: If msg.force is actually size 6 (wrench), indices 3-5 are torques.
+    // You would perform a similar rotation for torques using local_force[3], [4], [5].
+
+    // Fill remaining message fields
+    msg.id    = cnt_id;
+    msg.geom1 = name1;
+    msg.geom2 = name2;
+    msg.dist  = contact.dist;
+
+    msg.pos.x = contact.pos[0];
+    msg.pos.y = contact.pos[1];
+    msg.pos.z = contact.pos[2];
+
+    for (int i = 0; i < 9; i++)
+    {
+      msg.frame[i] = contact.frame[i];
+    }
+
+    contact_pub_->publish(msg);
+
+    // // Calculate contact force
+    // mjtNum contact_force[6] = {0, 0, 0, 0, 0, 0};
+    // mj_contactForce(m, d, cnt_id, contact_force);
+
+    // // Create and populate message
+    // mujoco_ros_utils::msg::ContactInfo msg;
+    // msg.id    = cnt_id;
+    // msg.geom1 = name1;
+    // msg.geom2 = name2;
+
+    // // Contact position
+    // msg.pos.x = contact.pos[0];
+    // msg.pos.y = contact.pos[1];
+    // msg.pos.z = contact.pos[2];
+
+    // // Contact frame (3x3 matrix stored row-wise)
+    // for (int i = 0; i < 9; i++)
+    // {
+    //   msg.frame[i] = contact.frame[i];
+    // }
+
+    // // Distance
+    // msg.dist = contact.dist;
+
+    // // Contact force (6D)
+    // for (int i = 0; i < 6; i++)
+    // {
+    //   msg.force[i] = contact_force[i];
+    // }
+
+    // // Normal force (first component)
+    // msg.normal_force = contact_force[0];
+
+    // // Friction force (magnitude of tangential components)
+    // msg.friction_force
+    //   = std::sqrt(contact_force[1] * contact_force[1] + contact_force[2] * contact_force[2]);
+
+    // // Publish
+    // contact_pub_->publish(msg);
+  }
+
+  // Spin ROS
+  rclcpp::spin_some(nh_);
 }
 
 } // namespace MujocoRosUtils
