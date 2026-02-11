@@ -32,6 +32,7 @@ constexpr char ATTR_PUBLISH_RATE[]                = "publish_rate";
 constexpr char ATTR_MAX_RANGE[]                   = "max_range";
 constexpr char ATTR_READBACK_MODE[]               = "readback_mode";
 constexpr char ATTR_PARALLEL_PROCESSING[]         = "parallel_processing";
+constexpr char ATTR_PUBLISH_MODE[]                = "publish_mode";
 
 void ImagePublisher::RegisterPlugin()
 {
@@ -54,7 +55,8 @@ void ImagePublisher::RegisterPlugin()
                               ATTR_PUBLISH_RATE,
                               ATTR_MAX_RANGE,
                               ATTR_READBACK_MODE,
-                              ATTR_PARALLEL_PROCESSING};
+                              ATTR_PARALLEL_PROCESSING,
+                              ATTR_PUBLISH_MODE};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
   plugin.attributes = attributes;
@@ -382,6 +384,39 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
                 enable_parallel ? "true" : "false");
   }
 
+  // publish_mode
+  print_debug("[ImagePublisher::Create] Reading publish_mode...\n");
+  const char *publish_mode_char = mj_getPluginConfig(m, plugin_id, ATTR_PUBLISH_MODE);
+  bool        use_time_based    = false;
+  if (publish_mode_char && strlen(publish_mode_char) > 0)
+  {
+    std::string mode_str(publish_mode_char);
+    std::transform(mode_str.begin(), mode_str.end(), mode_str.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::tolower(c));
+                   });
+    if (mode_str == "time_based" || mode_str == "time")
+    {
+      use_time_based = true;
+    }
+    else if (mode_str == "step_based" || mode_str == "step")
+    {
+      use_time_based = false;
+    }
+    else
+    {
+      mju_error("[ImagePublisher] `publish_mode` must be `step_based` or `time_based`, not %s.",
+                publish_mode_char);
+      return nullptr;
+    }
+    print_debug("[ImagePublisher::Create] publish_mode=%s\n",
+                use_time_based ? "time_based" : "step_based");
+  }
+  else
+  {
+    print_debug("[ImagePublisher::Create] publish_mode not specified, using default=step_based\n");
+  }
+
   // Set sensor_id
   print_debug("[ImagePublisher::Create] Finding sensor_id, nsensor=%d\n", m->nsensor);
   int sensor_id = 0;
@@ -412,7 +447,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   ImagePublisher *instance = new ImagePublisher(
     m, d, sensor_id, frame_id, topic_namespace, color_topic_name, depth_topic_name, info_topic_name,
     point_cloud_topic_name, rotate_point_cloud, point_cloud_rotation_preset, height, width,
-    publish_rate, max_range, readback_mode, enable_parallel);
+    publish_rate, max_range, readback_mode, enable_parallel, use_time_based);
 
   print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void *)instance);
   return instance;
@@ -426,7 +461,7 @@ ImagePublisher::ImagePublisher(const mjModel *m,
                                std::string point_cloud_topic_name, bool rotate_point_cloud,
                                const std::string &point_cloud_rotation_preset, int height,
                                int width, mjtNum publish_rate, double max_range,
-                               ReadbackMode readback_mode, bool enable_parallel)
+                               ReadbackMode readback_mode, bool enable_parallel, bool use_time_based)
     : m_(m)
     , sensor_id_(sensor_id)
     , camera_id_(m->sensor_objid[sensor_id])
@@ -437,8 +472,11 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     , publish_skip_(std::max(static_cast<int>(1.0 / (publish_rate * m->opt.timestep)), 1))
     , viewport_({0, 0, width, height})
     , enable_parallel_processing_(enable_parallel)
+    , use_time_based_publishing_(use_time_based)
+    , target_publish_interval_ms_(1000.0 / publish_rate)
     , last_fps_log_time_(std::chrono::steady_clock::now())
     , last_frame_time_(std::chrono::steady_clock::now())
+    , last_publish_time_(std::chrono::steady_clock::now())
 {
   // Set PBO usage based on readback mode
   if (readback_mode_ == ReadbackMode::Legacy)
@@ -664,6 +702,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
               "  If 'ros2 topic hz' shows low rate, try: --qos-reliability best_effort");
   RCLCPP_INFO(nh_->get_logger(), "  Target publish rate: %.1f Hz (skip=%d, timestep=%.4f)",
               publish_rate, publish_skip_, m->opt.timestep);
+  RCLCPP_INFO(nh_->get_logger(), "  Publish mode: %s",
+              use_time_based_publishing_ ? "TIME-BASED (wall-clock)" : "STEP-BASED (simulation steps)");
   RCLCPP_INFO(nh_->get_logger(), "  Readback mode: %s",
               use_pbo_readback_ ? "PBO (async GPU transfer)" : "Legacy (mjr_readPixels)");
 #ifdef _OPENMP
@@ -701,7 +741,32 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   }
 
   sim_cnt_++;
-  if (sim_cnt_ % publish_skip_ != 0)
+  
+  // Check if we should publish based on the configured mode
+  bool should_publish = false;
+  
+  if (use_time_based_publishing_)
+  {
+    // Time-based: publish based on wall-clock time
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_publish_time_).count();
+    
+    if (elapsed_ms >= target_publish_interval_ms_)
+    {
+      should_publish = true;
+      last_publish_time_ = now;
+    }
+  }
+  else
+  {
+    // Step-based: publish based on simulation steps (original behavior)
+    if (sim_cnt_ % publish_skip_ == 0)
+    {
+      should_publish = true;
+    }
+  }
+  
+  if (!should_publish)
   {
     return;
   }
