@@ -2,6 +2,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <mujoco_ros_utils/msg/contact_info.hpp>
+#include <mujoco_ros_utils/msg/contact_info_array.hpp>
 
 #include <mujoco/mjdata.h>
 #include <mujoco/mjmodel.h>
@@ -74,6 +75,7 @@ protected:
 
   //! ROS publisher for contact info
   rclcpp::Publisher<mujoco_ros_utils::msg::ContactInfo>::SharedPtr contact_pub_;
+  rclcpp::Publisher<mujoco_ros_utils::msg::ContactInfoArray>::SharedPtr contact_array_pub_;
 
   //! Frame ID for message header
   std::string frame_id_;

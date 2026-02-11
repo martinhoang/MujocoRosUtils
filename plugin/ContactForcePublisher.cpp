@@ -200,9 +200,12 @@ ContactForcePublisher::ContactForcePublisher(const mjModel *m,
   rclcpp::NodeOptions node_options;
   nh_          = rclcpp::Node::make_shared("_contact_force_publisher", node_options);
   contact_pub_ = nh_->create_publisher<mujoco_ros_utils::msg::ContactInfo>(topic_name_, 10);
+  contact_array_pub_ =
+    nh_->create_publisher<mujoco_ros_utils::msg::ContactInfoArray>(topic_name_ + "_array", 10);
 
   std::cout << "[ContactForcePublisher] Initialized:" << std::endl;
   std::cout << "  Topic: " << topic_name_ << std::endl;
+  std::cout << "  Array Topic: " << topic_name_ + "_array" << std::endl;
   std::cout << "  Frame ID: " << frame_id_ << std::endl;
   std::cout << "  Publish rate: " << publish_rate << " Hz" << std::endl;
   if (geom_names_.empty())
@@ -234,6 +237,10 @@ void ContactForcePublisher::compute(const mjModel *m, mjData *d, int plugin_id)
     return;
   }
   sim_cnt_++;
+
+  mujoco_ros_utils::msg::ContactInfoArray array_msg;
+  array_msg.header.frame_id = frame_id_;
+  array_msg.header.stamp    = nh_->now();
 
   // Iterate through all contacts
   for (int cnt_id = 0; cnt_id < d->ncon; cnt_id++)
@@ -321,22 +328,12 @@ void ContactForcePublisher::compute(const mjModel *m, mjData *d, int plugin_id)
       int body_id = -1;
       int flex_id = contact.flex[0];
 
-      std::cout << "[DEBUG] Contact " << cnt_id << " - Flex 1:" << std::endl;
-      std::cout << "  flex_id: " << flex_id << ", flex_name: " << (flex_name ? flex_name : "NULL")
-                << std::endl;
-      std::cout << "  contact.elem[0]: " << contact.elem[0] << std::endl;
-      std::cout << "  contact.vert[0]: " << contact.vert[0] << std::endl;
-
       // CASE A: The contact hit a specific vertex directly
       if (contact.vert[0] >= 0)
       {
         int global_vert_id = m->flex_vertadr[flex_id] + contact.vert[0];
         body_id            = m->flex_vertbodyid[global_vert_id];
-        std::cout << "  CASE A: Vertex contact" << std::endl;
-        std::cout << "    flex_vertadr[" << flex_id << "]: " << m->flex_vertadr[flex_id]
-                  << std::endl;
-        std::cout << "    global_vert_id: " << global_vert_id << std::endl;
-        std::cout << "    body_id: " << body_id << std::endl;
+        // Details logged only on debug request/error, skipping spam here
       }
       // CASE B: The contact hit an element (volume/face)
       // This handles the "FC_pelvis_elem..." case
@@ -513,46 +510,13 @@ void ContactForcePublisher::compute(const mjModel *m, mjData *d, int plugin_id)
     }
 
     contact_pub_->publish(msg);
+    array_msg.contacts.push_back(msg);
+  }
 
-    // // Calculate contact force
-    // mjtNum contact_force[6] = {0, 0, 0, 0, 0, 0};
-    // mj_contactForce(m, d, cnt_id, contact_force);
-
-    // // Create and populate message
-    // mujoco_ros_utils::msg::ContactInfo msg;
-    // msg.id    = cnt_id;
-    // msg.geom1 = name1;
-    // msg.geom2 = name2;
-
-    // // Contact position
-    // msg.pos.x = contact.pos[0];
-    // msg.pos.y = contact.pos[1];
-    // msg.pos.z = contact.pos[2];
-
-    // // Contact frame (3x3 matrix stored row-wise)
-    // for (int i = 0; i < 9; i++)
-    // {
-    //   msg.frame[i] = contact.frame[i];
-    // }
-
-    // // Distance
-    // msg.dist = contact.dist;
-
-    // // Contact force (6D)
-    // for (int i = 0; i < 6; i++)
-    // {
-    //   msg.force[i] = contact_force[i];
-    // }
-
-    // // Normal force (first component)
-    // msg.normal_force = contact_force[0];
-
-    // // Friction force (magnitude of tangential components)
-    // msg.friction_force
-    //   = std::sqrt(contact_force[1] * contact_force[1] + contact_force[2] * contact_force[2]);
-
-    // // Publish
-    // contact_pub_->publish(msg);
+  // Publish the array message
+  if (!array_msg.contacts.empty())
+  {
+    contact_array_pub_->publish(array_msg);
   }
 
   // Spin ROS
