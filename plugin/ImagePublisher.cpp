@@ -215,7 +215,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
 
   // point_cloud rotation enabled
   const char *rotate_point_cloud_char = mj_getPluginConfig(m, plugin_id, ATTR_ROTATE_POINT_CLOUD);
-  bool        rotate_point_cloud      = true;
+  bool        rotate_point_cloud      = false;
   if (rotate_point_cloud_char && strlen(rotate_point_cloud_char) > 0)
   {
     if (std::string(rotate_point_cloud_char) == "false"
@@ -238,11 +238,14 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   // point_cloud_rotation_preset
   const char *point_cloud_rotation_preset_char
     = mj_getPluginConfig(m, plugin_id, ATTR_POINT_CLOUD_ROTATION_PRESET);
-  std::string point_cloud_rotation_preset = depthimage_to_pointcloud2::PCL_ROT_PRESET_RDF_TO_FLU;
-  if (rotate_point_cloud && point_cloud_rotation_preset_char
-      && strlen(point_cloud_rotation_preset_char) > 0)
+  std::string point_cloud_rotation_preset = depthimage_to_pointcloud2::PCL_ROT_NO_PRESET;
+  if (rotate_point_cloud)
   {
-    point_cloud_rotation_preset = point_cloud_rotation_preset_char;
+    point_cloud_rotation_preset = depthimage_to_pointcloud2::PCL_ROT_PRESET_RDF_TO_FLU;
+    if (point_cloud_rotation_preset_char && strlen(point_cloud_rotation_preset_char) > 0)
+    {
+      point_cloud_rotation_preset = point_cloud_rotation_preset_char;
+    }
   }
 
   // height
@@ -439,6 +442,7 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     , enable_parallel_processing_(enable_parallel)
     , last_fps_log_time_(std::chrono::steady_clock::now())
     , last_frame_time_(std::chrono::steady_clock::now())
+    , last_color_log_(std::chrono::steady_clock::now())
 {
   // Set PBO usage based on readback mode
   if (readback_mode_ == ReadbackMode::Legacy)
@@ -657,7 +661,7 @@ ImagePublisher::ImagePublisher(const mjModel *m,
 
   RCLCPP_INFO(nh_->get_logger(), "ImagePublisher initialized (range_max=%.2f)", range_max_);
   RCLCPP_INFO(nh_->get_logger(), "  Image size: %dx%d (%zu KB uncompressed)", viewport_.width,
-              viewport_.height, (3 * viewport_.width * viewport_.height) / 1024);
+              viewport_.height, static_cast<size_t>(3 * viewport_.width * viewport_.height) / 1024);
   RCLCPP_WARN(nh_->get_logger(),
               "  NOTE: Large images may cause image_transport compression bottleneck!");
   RCLCPP_WARN(nh_->get_logger(),
@@ -691,11 +695,10 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   // Safety check: ensure initialization is complete
   if (!initialized_)
   {
-    static bool first_warning = true;
-    if (first_warning)
+    if (first_compute_warning_)
     {
       RCLCPP_WARN(nh_->get_logger(), "compute() called before initialization complete, skipping");
-      first_warning = false;
+      first_compute_warning_ = false;
     }
     return;
   }
@@ -706,11 +709,10 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     return;
   }
 
-  static int compute_call_count = 0;
-  compute_call_count++;
-  if (compute_call_count <= 5 || compute_call_count % 100 == 0)
+  compute_call_count_++;
+  if (compute_call_count_ <= 5 || compute_call_count_ % 100 == 0)
   {
-    RCLCPP_DEBUG(nh_->get_logger(), "compute() call #%d", compute_call_count);
+    RCLCPP_DEBUG(nh_->get_logger(), "compute() call #%d", compute_call_count_);
   }
 
   // Update subscriber counts
@@ -721,10 +723,11 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 
   // Log subscriber info periodically
   RCLCPP_DEBUG_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 2000,
-                        "Active subscribers: color=%d depth=%d info=%lu cloud=%lu",
-                        color_pub_.getNumSubscribers(), depth_pub_.getNumSubscribers(),
-                        info_pub_->get_subscription_count(),
-                        point_cloud_pub_->get_subscription_count());
+                        "Active subscribers: color=%zu depth=%zu info=%zu cloud=%zu",
+                        static_cast<size_t>(color_pub_.getNumSubscribers()),
+                        static_cast<size_t>(depth_pub_.getNumSubscribers()),
+                        static_cast<size_t>(info_pub_->get_subscription_count()),
+                        static_cast<size_t>(point_cloud_pub_->get_subscription_count()));
 
   // If no one is listening, do nothing
   if (!publish_color_ && !publish_depth_ && !publish_info_ && !publish_cloud_)
@@ -747,7 +750,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     last_fps_log_time_ = now;
   }
 
-  if (compute_call_count <= 5)
+  if (compute_call_count_ <= 5)
   {
     RCLCPP_DEBUG(nh_->get_logger(), "Subscribers: color=%d depth=%d info=%d cloud=%d",
                  publish_color_, publish_depth_, publish_info_, publish_cloud_);
@@ -760,7 +763,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 
     auto gl_start = std::chrono::steady_clock::now();
 
-    if (compute_call_count <= 3)
+    if (compute_call_count_ <= 3)
     {
       RCLCPP_DEBUG(nh_->get_logger(), "Performing GL operations");
     }
@@ -777,7 +780,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 
     if (use_pbo_readback_)
     {
-      auto wait_for_sync = [this, compute_call_count](int sync_index) {
+      auto wait_for_sync = [this](int sync_index) {
         if (!pbo_sync_[sync_index])
         {
           return;
@@ -794,7 +797,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
           attempts++;
         }
 
-        if (wait_state == GL_WAIT_FAILED && compute_call_count <= 5)
+        if (wait_state == GL_WAIT_FAILED && compute_call_count_ <= 5)
         {
           RCLCPP_WARN(nh_->get_logger(),
                       "glClientWaitSync failed for PBO index %d after %d attempts", sync_index,
@@ -817,7 +820,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
           glBlitFramebuffer(viewport_.left, viewport_.bottom, viewport_.left + viewport_.width,
                             viewport_.bottom + viewport_.height, viewport_.left, viewport_.bottom,
                             viewport_.left + viewport_.width, viewport_.bottom + viewport_.height,
-                            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
           glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO_r);
           glReadBuffer(GL_COLOR_ATTACHMENT0);
@@ -829,7 +832,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
         }
 
         GLenum fbo_status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
-        if (fbo_status != GL_FRAMEBUFFER_COMPLETE && compute_call_count <= 5)
+        if (fbo_status != GL_FRAMEBUFFER_COMPLETE && compute_call_count_ <= 5)
         {
           RCLCPP_ERROR(nh_->get_logger(), "Framebuffer incomplete! Status: 0x%x", fbo_status);
         }
@@ -853,7 +856,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
                    GL_UNSIGNED_BYTE, 0);
 
       GLenum color_error = glGetError();
-      if (color_error != GL_NO_ERROR && compute_call_count <= 5)
+      if (color_error != GL_NO_ERROR && compute_call_count_ <= 5)
       {
         RCLCPP_ERROR(nh_->get_logger(),
                      "glReadPixels color error: 0x%x (using GL_RGB=0x%x, context format was 0x%x)",
@@ -865,7 +868,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
                    GL_DEPTH_COMPONENT, GL_FLOAT, 0);
 
       GLenum depth_error = glGetError();
-      if (depth_error != GL_NO_ERROR && compute_call_count <= 5)
+      if (depth_error != GL_NO_ERROR && compute_call_count_ <= 5)
       {
         RCLCPP_ERROR(nh_->get_logger(), "glReadPixels depth error: 0x%x", depth_error);
       }
@@ -873,7 +876,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
       glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 
       pbo_sync_[pbo_index_] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-      if (!pbo_sync_[pbo_index_] && compute_call_count <= 5)
+      if (!pbo_sync_[pbo_index_] && compute_call_count_ <= 5)
       {
         RCLCPP_WARN(nh_->get_logger(), "Failed to create GL fence for PBO index %d", pbo_index_);
       }
@@ -900,8 +903,21 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
         float *depth_ptr = static_cast<float *>(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY));
         if (depth_ptr)
         {
+          const size_t pixel_count = static_cast<size_t>(viewport_.width)
+                                     * static_cast<size_t>(viewport_.height);
           std::memcpy(depth_buffer_.get(), depth_ptr,
-                      sizeof(float) * viewport_.width * viewport_.height);
+                      sizeof(float) * pixel_count);
+
+          // glReadPixels returns the raw GPU depth map (reversed Z in MuJoCo's pipeline).
+          // When readDepthMap requests ZERONEAR output, mirror mjr_readPixels behavior here.
+          if (context_.readDepthMap == mjDEPTH_ZERONEAR)
+          {
+            for (size_t i = 0; i < pixel_count; i++)
+            {
+              depth_buffer_[i] = 1.0f - depth_buffer_[i];
+            }
+          }
+
           glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
         }
         else
@@ -913,33 +929,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
       }
       else
       {
-        if (pbo_frame_count_ == 0)
-        {
-          RCLCPP_INFO(nh_->get_logger(), "PBO warmup: using mjr_readPixels for comparison");
-          mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
-        }
-        else
-        {
-          glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height, GL_RGB,
-                       GL_UNSIGNED_BYTE, color_buffer_.get());
-
-          GLenum warmup_color_error = glGetError();
-          if (warmup_color_error != GL_NO_ERROR)
-          {
-            RCLCPP_ERROR(nh_->get_logger(), "Warmup glReadPixels color error: 0x%x",
-                         warmup_color_error);
-          }
-
-          glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height,
-                       GL_DEPTH_COMPONENT, GL_FLOAT, depth_buffer_.get());
-
-          GLenum warmup_depth_error = glGetError();
-          if (warmup_depth_error != GL_NO_ERROR)
-          {
-            RCLCPP_ERROR(nh_->get_logger(), "Warmup glReadPixels depth error: 0x%x",
-                         warmup_depth_error);
-          }
-        }
+        mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
       }
 
       if (context_.currentBuffer != mjFB_WINDOW)
@@ -949,7 +939,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 
       pbo_frame_count_++;
 
-      if (compute_call_count <= 3)
+      if (compute_call_count_ <= 3)
       {
         RCLCPP_INFO(nh_->get_logger(), "GL operations complete (PBO frame %d)", pbo_frame_count_);
       }
@@ -963,17 +953,18 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     auto gl_ms
       = std::chrono::duration_cast<std::chrono::microseconds>(gl_end - gl_start).count() / 1000.0;
 
-    static double total_gl_time   = 0.0;
-    static int    gl_sample_count = 0;
-    total_gl_time += gl_ms;
-    gl_sample_count++;
+    total_gl_time_ += gl_ms;
+    gl_sample_count_++;
 
     if (elapsed_since_log >= 2000)
     {
-      double avg_gl_ms = total_gl_time / gl_sample_count;
-      RCLCPP_DEBUG(nh_->get_logger(), "  GL render+readback: avg %.2fms per frame", avg_gl_ms);
-      total_gl_time   = 0.0;
-      gl_sample_count = 0;
+      if (gl_sample_count_ > 0)
+      {
+        double avg_gl_ms = total_gl_time_ / gl_sample_count_;
+        RCLCPP_DEBUG(nh_->get_logger(), "  GL render+readback: avg %.2fms per frame", avg_gl_ms);
+      }
+      total_gl_time_   = 0.0;
+      gl_sample_count_ = 0;
     }
   }
   catch (const std::exception &e)
@@ -988,24 +979,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   // Publish camera info always (needed by RViz2 and other tools)
   if (publish_info_)
   {
-    sensor_msgs::msg::CameraInfo info_msg;
-    info_msg.header.stamp     = stamp_now;
-    info_msg.header.frame_id  = frame_id_;
-    info_msg.height           = viewport_.height;
-    info_msg.width            = viewport_.width;
-    info_msg.distortion_model = "plumb_bob";
-    info_msg.d.resize(5, 0.0);
-    info_msg.k.fill(0.0);
-    info_msg.r.fill(0.0);
-    info_msg.p.fill(0.0);
-    double focal_scaling
-      = (1.0 / std::tan((m_->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0)) * viewport_.height / 2.0;
-    info_msg.k[0] = info_msg.p[0] = focal_scaling;
-    info_msg.k[2] = info_msg.p[2] = static_cast<double>(viewport_.width) / 2.0;
-    info_msg.k[4] = info_msg.p[5] = focal_scaling;
-    info_msg.k[5] = info_msg.p[6] = static_cast<double>(viewport_.height) / 2.0;
-    info_msg.k[8] = info_msg.p[10] = 1.0;
-    info_pub_->publish(info_msg);
+    info_pub_->publish(buildCameraInfo(stamp_now));
   }
 
   // Flip color buffer once if needed by any subscriber
@@ -1019,7 +993,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     auto      flip_row  = [&](int h) {
       const unsigned char *src_row = color_buffer_.get() + h * row_bytes;
       unsigned char *dst_row = color_buffer_flipped_.get() + (viewport_.height - 1 - h) * row_bytes;
-      
+
       // Convert RGB→BGR while copying (swap R and B channels)
       for (int w = 0; w < viewport_.width; w++)
       {
@@ -1052,127 +1026,91 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
       = std::chrono::duration_cast<std::chrono::microseconds>(flip_end - flip_start).count()
         / 1000.0;
 
-    static double total_flip_time   = 0.0;
-    static int    flip_sample_count = 0;
-    total_flip_time += flip_ms;
-    flip_sample_count++;
+    total_flip_time_ += flip_ms;
+    flip_sample_count_++;
 
     if (elapsed_since_log >= 2000)
     {
-      double      avg_flip_ms = total_flip_time / flip_sample_count;
-      const char *mode        = shouldParallelizeRows(viewport_.height) ? "parallel" : "serial";
-      RCLCPP_DEBUG(nh_->get_logger(), "  Color flip (%s): avg %.2fms per frame", mode, avg_flip_ms);
-      total_flip_time   = 0.0;
-      flip_sample_count = 0;
+      if (flip_sample_count_ > 0)
+      {
+        double      avg_flip_ms = total_flip_time_ / flip_sample_count_;
+        const char *mode        = shouldParallelizeRows(viewport_.height) ? "parallel" : "serial";
+        RCLCPP_DEBUG(nh_->get_logger(), "  Color flip (%s): avg %.2fms per frame", mode, avg_flip_ms);
+      }
+      total_flip_time_   = 0.0;
+      flip_sample_count_ = 0;
     }
   }
 
   // Publish color image directly from the compute thread for low latency
+  // NOTE: Do NOT use 'return' here — the depth/cloud buffer swap below must always run
   if (publish_color_)
   {
+    bool color_ok = true;
+
     // Validate viewport dimensions before creating message
-    if (viewport_.width <= 0 || viewport_.height <= 0 || viewport_.width > 10000 || viewport_.height > 10000)
+    if (viewport_.width <= 0 || viewport_.height <= 0 || viewport_.width > 10000
+        || viewport_.height > 10000)
     {
       RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
-                            "Invalid viewport dimensions: %dx%d", viewport_.width, viewport_.height);
-      return;
+                            "Invalid viewport dimensions: %dx%d", viewport_.width,
+                            viewport_.height);
+      color_ok = false;
     }
 
     // Validate buffer pointer
-    if (!color_buffer_flipped_)
+    if (color_ok && !color_buffer_flipped_)
     {
       RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
                             "color_buffer_flipped_ is null!");
-      return;
+      color_ok = false;
     }
 
-    // Create and publish color_msg
-    sensor_msgs::msg::Image color_msg;
-    color_msg.header.stamp    = stamp_now;
-    color_msg.header.frame_id = frame_id_;
-    color_msg.height          = static_cast<uint32_t>(viewport_.height);
-    color_msg.width           = static_cast<uint32_t>(viewport_.width);
-    color_msg.encoding        = "bgr8";  // Changed from rgb8 to match our RGB→BGR conversion
-    color_msg.is_bigendian    = 0;
-    
-    // Calculate step with proper type - step is bytes per row
-    const uint32_t step_size = static_cast<uint32_t>(3) * static_cast<uint32_t>(viewport_.width);
-    color_msg.step = step_size;
-    
-    // Validate buffer size before resize - use size_t to prevent overflow
-    const size_t required_size = static_cast<size_t>(3) * static_cast<size_t>(viewport_.width) * static_cast<size_t>(viewport_.height);
-    
-    // Sanity checks
-    if (required_size == 0)
+    if (color_ok)
     {
-      RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
-                            "Calculated image size is zero! (%dx%d)", viewport_.width, viewport_.height);
-      return;
-    }
-    
-    if (required_size > 100 * 1024 * 1024) // 100 MB sanity check
-    {
-      RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
-                            "Image size too large: %zu bytes (%dx%d)", 
-                            required_size, viewport_.width, viewport_.height);
-      return;
-    }
-    
-    // Verify step calculation matches expected size
-    const size_t expected_data_size = static_cast<size_t>(color_msg.step) * static_cast<size_t>(color_msg.height);
-    if (expected_data_size != required_size)
-    {
-      RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000,
-                            "Step calculation mismatch! step=%u height=%u expected=%zu actual=%zu",
-                            color_msg.step, color_msg.height, expected_data_size, required_size);
-      return;
-    }
-    
-    try
-    {
-      color_msg.data.resize(required_size);
-      std::memcpy(&color_msg.data[0], color_buffer_flipped_.get(), required_size);
-      
-      // Final validation before publishing
-      if (color_msg.data.size() != required_size)
+      // Create and publish color_msg
+      sensor_msgs::msg::Image color_msg;
+      color_msg.header.stamp    = stamp_now;
+      color_msg.header.frame_id = frame_id_;
+      color_msg.height          = static_cast<uint32_t>(viewport_.height);
+      color_msg.width           = static_cast<uint32_t>(viewport_.width);
+      color_msg.encoding        = "bgr8";
+      color_msg.is_bigendian    = 0;
+      color_msg.step            = static_cast<uint32_t>(3) * static_cast<uint32_t>(viewport_.width);
+
+      const size_t required_size = static_cast<size_t>(3) * static_cast<size_t>(viewport_.width)
+                                   * static_cast<size_t>(viewport_.height);
+
+      try
       {
-        RCLCPP_ERROR(nh_->get_logger(), "Data size mismatch after resize! expected=%zu actual=%zu",
-                     required_size, color_msg.data.size());
-        return;
+        color_msg.data.resize(required_size);
+        std::memcpy(&color_msg.data[0], color_buffer_flipped_.get(), required_size);
       }
-      
-      // Log message details for EVERY frame to debug the corruption
-      RCLCPP_DEBUG(nh_->get_logger(), 
-                  "PRE-PUBLISH: width=%u height=%u step=%u encoding='%s' bigendian=%d data.size=%zu (expected=%zu)",
-                  color_msg.width, color_msg.height, color_msg.step, color_msg.encoding.c_str(),
-                  color_msg.is_bigendian, color_msg.data.size(), required_size);
-      
-      // Also log the actual viewport to see if it matches
-      RCLCPP_DEBUG(nh_->get_logger(), "VIEWPORT: width=%d height=%d", viewport_.width, viewport_.height);
-    }
-    catch (const std::exception &e)
-    {
-      RCLCPP_ERROR(nh_->get_logger(), "Failed to prepare color message: %s", e.what());
-      return;
-    }
-    
-    color_pub_.publish(color_msg);
+      catch (const std::exception &e)
+      {
+        RCLCPP_ERROR(nh_->get_logger(), "Failed to prepare color message: %s", e.what());
+        color_ok = false;
+      }
 
-    static int  color_pub_count = 0;
-    static auto last_color_log  = std::chrono::steady_clock::now();
-    color_pub_count++;
+      if (color_ok)
+      {
+        color_pub_.publish(color_msg);
 
-    auto now_pub = std::chrono::steady_clock::now();
-    auto elapsed_pub
-      = std::chrono::duration_cast<std::chrono::milliseconds>(now_pub - last_color_log).count();
-    if (elapsed_pub >= 2000)
-    {
-      double pub_fps     = color_pub_count * 1000.0 / elapsed_pub;
-      size_t msg_size_kb = color_msg.data.size() / 1024;
-      RCLCPP_DEBUG(nh_->get_logger(), "  Color published: %.2f Hz (%d msgs, %zu KB each)", pub_fps,
-                   color_pub_count, msg_size_kb);
-      color_pub_count = 0;
-      last_color_log  = now_pub;
+        color_pub_count_++;
+
+        auto now_pub = std::chrono::steady_clock::now();
+        auto elapsed_pub
+          = std::chrono::duration_cast<std::chrono::milliseconds>(now_pub - last_color_log_).count();
+        if (elapsed_pub >= 2000)
+        {
+          double pub_fps     = color_pub_count_ * 1000.0 / elapsed_pub;
+          size_t msg_size_kb = color_msg.data.size() / 1024;
+          RCLCPP_DEBUG(nh_->get_logger(), "  Color published: %.2f Hz (%d msgs, %zu KB each)",
+                       pub_fps, color_pub_count_, msg_size_kb);
+          color_pub_count_ = 0;
+          last_color_log_  = now_pub;
+        }
+      }
     }
   }
 
@@ -1182,12 +1120,9 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     {
       std::lock_guard<std::mutex> lock(buffer_mutex_);
       // Swap buffers to hand off work to publish thread
+      // For point cloud, we need the RGB buffer (not BGR-converted), so swap the original
       color_buffer_.swap(color_buffer_back_);
       depth_buffer_.swap(depth_buffer_back_);
-      if (publish_cloud_)
-      {
-        color_buffer_flipped_.swap(color_buffer_flipped_back_);
-      }
       data_ready_ = true;
     }
     buffer_cv_.notify_one();
@@ -1246,8 +1181,29 @@ void ImagePublisher::free()
   RCLCPP_INFO(nh_->get_logger(), "ImagePublisher cleanup complete");
 }
 
-} // namespace MujocoRosUtils
-void MujocoRosUtils::ImagePublisher::publishThread()
+sensor_msgs::msg::CameraInfo ImagePublisher::buildCameraInfo(const rclcpp::Time &stamp) const
+{
+  sensor_msgs::msg::CameraInfo info_msg;
+  info_msg.header.stamp     = stamp;
+  info_msg.header.frame_id  = frame_id_;
+  info_msg.height           = viewport_.height;
+  info_msg.width            = viewport_.width;
+  info_msg.distortion_model = "plumb_bob";
+  info_msg.d.resize(5, 0.0);
+  info_msg.k.fill(0.0);
+  info_msg.r.fill(0.0);
+  info_msg.p.fill(0.0);
+  double focal_scaling
+    = (1.0 / std::tan((m_->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0)) * viewport_.height / 2.0;
+  info_msg.k[0] = info_msg.p[0] = focal_scaling;
+  info_msg.k[2] = info_msg.p[2] = static_cast<double>(viewport_.width) / 2.0;
+  info_msg.k[4] = info_msg.p[5] = focal_scaling;
+  info_msg.k[5] = info_msg.p[6] = static_cast<double>(viewport_.height) / 2.0;
+  info_msg.k[8] = info_msg.p[10] = 1.0;
+  return info_msg;
+}
+
+void ImagePublisher::publishThread()
 {
   RCLCPP_INFO(nh_->get_logger(), "publishThread started");
   print_confirm("ImagePublisher publish thread started\n");
@@ -1258,6 +1214,11 @@ void MujocoRosUtils::ImagePublisher::publishThread()
   while (!stop_thread_)
   {
     RCLCPP_DEBUG(nh_->get_logger(), "publishThread is waiting for data...");
+
+    // Snapshot buffer pointers under lock to prevent race condition with compute thread's swap
+    float         *local_depth_back    = nullptr;
+    float         *local_depth_flipped = nullptr;
+    unsigned char *local_color_back    = nullptr;
     {
       std::unique_lock<std::mutex> lock(buffer_mutex_);
       buffer_cv_.wait(lock, [this] {
@@ -1270,13 +1231,19 @@ void MujocoRosUtils::ImagePublisher::publishThread()
       }
 
       data_ready_ = false;
+
+      // Snapshot raw pointers while lock is held - this prevents the compute
+      // thread's swap from changing what we're processing mid-iteration
+      local_depth_back    = depth_buffer_back_.get();
+      local_depth_flipped = depth_buffer_flipped_.get();
+      local_color_back    = color_buffer_back_.get(); // RGB buffer, not BGR-converted
     }
 
     auto thread_start = std::chrono::steady_clock::now();
     publish_frame_count++;
 
     // Null pointer safety check
-    if (!m_ || !depth_buffer_back_ || !color_buffer_back_)
+    if (!m_ || !local_depth_back)
     {
       RCLCPP_ERROR(nh_->get_logger(), "[ImagePublisher] Null pointer detected in publish thread");
       continue;
@@ -1291,15 +1258,31 @@ void MujocoRosUtils::ImagePublisher::publishThread()
     // Precompute constant for depth conversion
     const float depth_scale = 1.0f - near / far;
 
+    // Debug: Log near/far values periodically
+    if (depth_log_count_ == 0)
+    {
+      RCLCPP_INFO(nh_->get_logger(), "Depth conversion: near=%.4f, far=%.4f, depth_scale=%.6f",
+                  near, far, depth_scale);
+    }
+    depth_log_count_ = (depth_log_count_ + 1) % 100;
+
     auto process_depth_row = [&](int row) {
       const int row_offset         = row * viewport_.width;
       const int flipped_row_offset = (viewport_.height - 1 - row) * viewport_.width;
       for (int col = 0; col < viewport_.width; col++)
       {
-        const int   idx         = row_offset + col;
-        const float depth_value = near / (1.0f - depth_buffer_back_[idx] * depth_scale);
-        depth_buffer_back_[idx] = depth_value;
-        depth_buffer_flipped_[flipped_row_offset + col] = depth_value;
+        const int idx = row_offset + col;
+
+        // Normalize depth map to ZERONEAR convention (0: near, 1: far) before linearization.
+        float depth_map_value = local_depth_back[idx];
+        if (context_.readDepthMap == mjDEPTH_ZEROFAR)
+        {
+          depth_map_value = 1.0f - depth_map_value;
+        }
+
+        const float depth_value = near / (1.0f - depth_map_value * depth_scale);
+        local_depth_back[idx]   = depth_value;
+        local_depth_flipped[flipped_row_offset + col] = depth_value;
       }
     };
 
@@ -1321,6 +1304,22 @@ void MujocoRosUtils::ImagePublisher::publishThread()
       }
     }
 
+    // Debug: Sample some depth values
+    if (depth_log_count_ == 1)
+    {
+      int   center_idx   = (viewport_.height / 2) * viewport_.width + (viewport_.width / 2);
+      float center_depth = local_depth_flipped[center_idx];
+      float min_depth    = local_depth_flipped[0];
+      float max_depth    = local_depth_flipped[0];
+      for (int i = 0; i < viewport_.width * viewport_.height; i++)
+      {
+        min_depth = std::min(min_depth, local_depth_flipped[i]);
+        max_depth = std::max(max_depth, local_depth_flipped[i]);
+      }
+      RCLCPP_INFO(nh_->get_logger(), "Depth values: min=%.4f, max=%.4f, center=%.4f", min_depth,
+                  max_depth, center_depth);
+    }
+
     auto depth_end = std::chrono::steady_clock::now();
     auto depth_ms
       = std::chrono::duration_cast<std::chrono::microseconds>(depth_end - depth_start).count()
@@ -1340,7 +1339,7 @@ void MujocoRosUtils::ImagePublisher::publishThread()
       depth_msg.is_bigendian    = 0;
       depth_msg.step            = static_cast<unsigned int>(sizeof(float) * viewport_.width);
       depth_msg.data.resize(sizeof(float) * viewport_.width * viewport_.height);
-      std::memcpy(&depth_msg.data[0], depth_buffer_flipped_.get(),
+      std::memcpy(&depth_msg.data[0], local_depth_flipped,
                   sizeof(float) * viewport_.width * viewport_.height);
       if (publish_depth_)
       {
@@ -1352,28 +1351,24 @@ void MujocoRosUtils::ImagePublisher::publishThread()
     sensor_msgs::msg::CameraInfo info_msg;
     if (publish_cloud_)
     {
-      info_msg.header.stamp     = stamp_now;
-      info_msg.header.frame_id  = frame_id_;
-      info_msg.height           = viewport_.height;
-      info_msg.width            = viewport_.width;
-      info_msg.distortion_model = "plumb_bob";
-      info_msg.d.resize(5, 0.0);
-      info_msg.k.fill(0.0);
-      info_msg.r.fill(0.0);
-      info_msg.p.fill(0.0);
-      double focal_scaling = (1.0 / std::tan((m_->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0))
-                             * viewport_.height / 2.0;
-      info_msg.k[0] = info_msg.p[0] = focal_scaling;
-      info_msg.k[2] = info_msg.p[2] = static_cast<double>(viewport_.width) / 2.0;
-      info_msg.k[4] = info_msg.p[5] = focal_scaling;
-      info_msg.k[5] = info_msg.p[6] = static_cast<double>(viewport_.height) / 2.0;
-      info_msg.k[8] = info_msg.p[10] = 1.0;
+      info_msg = buildCameraInfo(stamp_now);
     }
 
     // --- Publish Point Cloud ---
     if (publish_cloud_)
     {
-      // Use the already-flipped color buffer from compute thread - no redundant work!
+      // Flip the RGB color buffer vertically for point cloud (RGB, not BGR)
+      // We need to flip because OpenGL reads bottom-to-top but ROS images are top-to-bottom
+      const size_t pixel_count_rgb = static_cast<size_t>(viewport_.width) * viewport_.height * 3;
+      color_flipped_rgb_.resize(pixel_count_rgb);
+
+      const int row_bytes = viewport_.width * 3;
+      for (int h = 0; h < viewport_.height; h++)
+      {
+        const unsigned char *src_row = local_color_back + h * row_bytes;
+        unsigned char *dst_row = color_flipped_rgb_.data() + (viewport_.height - 1 - h) * row_bytes;
+        std::memcpy(dst_row, src_row, row_bytes);
+      }
 
       // Create a temporary color message for the conversion function
       sensor_msgs::msg::Image color_msg_for_cloud;
@@ -1385,13 +1380,21 @@ void MujocoRosUtils::ImagePublisher::publishThread()
       color_msg_for_cloud.is_bigendian    = 0;
       color_msg_for_cloud.step
         = static_cast<unsigned int>(sizeof(unsigned char) * 3 * viewport_.width);
-      color_msg_for_cloud.data.resize(sizeof(unsigned char) * 3 * viewport_.width
-                                      * viewport_.height);
-      std::memcpy(&color_msg_for_cloud.data[0], color_buffer_flipped_back_.get(),
-                  sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
+      color_msg_for_cloud.data.assign(color_flipped_rgb_.begin(), color_flipped_rgb_.end());
 
       image_geometry::PinholeCameraModel model;
       model.fromCameraInfo(info_msg);
+
+      // Debug: Log point cloud generation parameters
+      if (pcl_log_count_ == 0)
+      {
+        RCLCPP_INFO(nh_->get_logger(), "PointCloud params: range_max_=%.4f, use_quiet_nan_=%d",
+                    range_max_, use_quiet_nan_);
+        RCLCPP_INFO(nh_->get_logger(), "Camera model: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
+                    model.fx(), model.fy(), model.cx(), model.cy());
+      }
+      pcl_log_count_ = (pcl_log_count_ + 1) % 100;
+
       sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
         = std::make_shared<sensor_msgs::msg::PointCloud2>();
       cloud_msg->header       = depth_msg.header;
@@ -1405,23 +1408,30 @@ void MujocoRosUtils::ImagePublisher::publishThread()
       sensor_msgs::msg::Image::ConstSharedPtr color_msg_ptr(&color_msg_for_cloud,
                                                             [](const sensor_msgs::msg::Image *) {
                                                             });
-      cv_bridge::CvImageConstPtr              cv_ptr
-        = cv_bridge::toCvCopy(color_msg_ptr, sensor_msgs::image_encodings::RGB8);
+      // Wrap the RGB data as a cv::Mat without copying
+      cv::Mat rgb_mat(viewport_.height, viewport_.width, CV_8UC3,
+                      const_cast<unsigned char *>(color_msg_for_cloud.data.data()));
+      auto cv_ptr = std::make_shared<cv_bridge::CvImage>(
+        color_msg_for_cloud.header, sensor_msgs::image_encodings::RGB8, rgb_mat);
 
       sensor_msgs::msg::Image::ConstSharedPtr depth_msg_ptr(&depth_msg,
                                                             [](const sensor_msgs::msg::Image *) {
                                                             });
       if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_16UC1)
       {
-        depthimage_to_pointcloud2::convert<uint16_t>(depth_msg_ptr, cloud_msg, model, range_max_,
-                                                     use_quiet_nan_, point_cloud_rotation_preset_,
-                                                     cv_ptr);
+        depthimage_to_pointcloud2::convert<uint16_t>(
+          depth_msg_ptr, cloud_msg, model, range_max_, use_quiet_nan_,
+          rotate_point_cloud_ ? point_cloud_rotation_preset_
+                              : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
+          cv_ptr);
       }
       else if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_32FC1)
       {
-        depthimage_to_pointcloud2::convert<float>(depth_msg_ptr, cloud_msg, model, range_max_,
-                                                  use_quiet_nan_, point_cloud_rotation_preset_,
-                                                  cv_ptr);
+        depthimage_to_pointcloud2::convert<float>(
+          depth_msg_ptr, cloud_msg, model, range_max_, use_quiet_nan_,
+          rotate_point_cloud_ ? point_cloud_rotation_preset_
+                              : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
+          cv_ptr);
       }
       else
       {
@@ -1439,13 +1449,9 @@ void MujocoRosUtils::ImagePublisher::publishThread()
       = std::chrono::duration_cast<std::chrono::microseconds>(thread_end - thread_start).count()
         / 1000.0;
 
-    static double total_depth_time    = 0.0;
-    static double total_thread_time   = 0.0;
-    static int    thread_sample_count = 0;
-
-    total_depth_time += depth_ms;
-    total_thread_time += thread_ms;
-    thread_sample_count++;
+    total_depth_time_ += depth_ms;
+    total_thread_time_ += thread_ms;
+    thread_sample_count_++;
 
     auto elapsed_since_log
       = std::chrono::duration_cast<std::chrono::milliseconds>(thread_end - last_publish_log)
@@ -1453,19 +1459,24 @@ void MujocoRosUtils::ImagePublisher::publishThread()
 
     if (elapsed_since_log >= 2000)
     {
-      double      avg_depth_ms  = total_depth_time / thread_sample_count;
-      double      avg_thread_ms = total_thread_time / thread_sample_count;
-      const char *mode          = shouldParallelizeRows(viewport_.height) ? "parallel" : "serial";
+      if (thread_sample_count_ > 0)
+      {
+        double      avg_depth_ms  = total_depth_time_ / thread_sample_count_;
+        double      avg_thread_ms = total_thread_time_ / thread_sample_count_;
+        const char *mode          = shouldParallelizeRows(viewport_.height) ? "parallel" : "serial";
 
-      RCLCPP_INFO(nh_->get_logger(), "  Depth processing (%s): avg %.2fms per frame", mode,
-                  avg_depth_ms);
-      RCLCPP_INFO(nh_->get_logger(), "  Publish thread total: avg %.2fms per frame (depth+cloud)",
-                  avg_thread_ms);
+        RCLCPP_INFO(nh_->get_logger(), "  Depth processing (%s): avg %.2fms per frame", mode,
+                    avg_depth_ms);
+        RCLCPP_INFO(nh_->get_logger(), "  Publish thread total: avg %.2fms per frame (depth+cloud)",
+                    avg_thread_ms);
+      }
 
-      total_depth_time    = 0.0;
-      total_thread_time   = 0.0;
-      thread_sample_count = 0;
+      total_depth_time_    = 0.0;
+      total_thread_time_   = 0.0;
+      thread_sample_count_ = 0;
       last_publish_log    = thread_end;
     }
   }
 }
+
+} // namespace MujocoRosUtils
