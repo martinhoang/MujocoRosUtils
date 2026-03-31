@@ -547,50 +547,50 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
   sim_time_now.sec     = static_cast<int32_t>(d->time);
   sim_time_now.nanosec = static_cast<uint32_t>((d->time - sim_time_now.sec) * 1e9);
 
-  // // Call ROS callback
-  // if (rclcpp::ok() && node_ && initialized_)
-  // {
-  //   rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
-  //   rclcpp::Duration duration = now - last_update_;
-
-  //   if (duration.seconds() > control_period_)
-  //   {
-  //     // RCLCPP_INFO(node_->get_logger(), "Controller manager update: %.2f seconds since last
-  //     // update.", duration.seconds());
-  //     controller_manager_->read(now, duration);
-  //     controller_manager_->update(now, duration);
-  //     last_update_ = now;
-  //   }
-
-  //   // Write the data back to the model
-  //   controller_manager_->write(now, duration);
-  // }
-
-
-
   // Call ROS callback
   if (rclcpp::ok() && node_ && initialized_)
   {
     rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
     rclcpp::Duration duration = now - last_update_;
 
-    // Always call update() on every compute cycle to ensure controller switching
-    // and other state management happens promptly, even if simulation is slow
-    controller_manager_->update(now, duration);
-
-    if (duration.seconds() >= control_period_)
+    if (duration.seconds() > control_period_)
     {
-      // Only read/write at the configured control rate
+      // RCLCPP_INFO(node_->get_logger(), "Controller manager update: %.2f seconds since last
+      // update.", duration.seconds());
       controller_manager_->read(now, duration);
-      controller_manager_->write(now, duration);
+      controller_manager_->update(now, duration);
       last_update_ = now;
     }
-    else
-    {
-      // Always write at simulation rate to apply commands continuously
-      // controller_manager_->write(now, duration);
-    }
+
+    // Write the data back to the model
+    controller_manager_->write(now, duration);
   }
+
+
+
+  // // Call ROS callback
+  // if (rclcpp::ok() && node_ && initialized_)
+  // {
+  //   rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
+  //   rclcpp::Duration duration = now - last_update_;
+
+  //   // Always call update() on every compute cycle to ensure controller switching
+  //   // and other state management happens promptly, even if simulation is slow
+  //   controller_manager_->update(now, duration);
+
+  //   if (duration.seconds() >= control_period_)
+  //   {
+  //     // Only read/write at the configured control rate
+  //     controller_manager_->read(now, duration);
+  //     controller_manager_->write(now, duration);
+  //     last_update_ = now;
+  //   }
+  //   else
+  //   {
+  //     // Always write at simulation rate to apply commands continuously
+  //     // controller_manager_->write(now, duration);
+  //   }
+  // }
 }
 
 } // namespace MujocoRosUtils
