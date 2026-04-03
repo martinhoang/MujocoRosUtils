@@ -65,14 +65,6 @@ public:
    */
   void compute(const mjModel *m, mjData *d, int plugin_id);
 
-  /** \brief  Convert depth image to PointCloud2
-   *
-   */
-  static void convert(const sensor_msgs::msg::Image::ConstSharedPtr &depth_msg,
-                      const sensor_msgs::msg::Image::ConstSharedPtr &rgb_msg,
-                      sensor_msgs::msg::PointCloud2::SharedPtr      &cloud_msg,
-                      const image_geometry::PinholeCameraModel      &model);
-
   /** \brief Free buffer. */
   void free();
 
@@ -209,6 +201,29 @@ protected:
   int frame_count_ = 0;
   std::chrono::steady_clock::time_point last_frame_time_;
   //! @}
+
+  //! Diagnostic counters (per-instance to support multiple cameras)
+  //! @{
+  int compute_call_count_ = 0;
+  int depth_log_count_ = 0;
+  int pcl_log_count_ = 0;
+  double total_gl_time_ = 0.0;
+  int gl_sample_count_ = 0;
+  double total_flip_time_ = 0.0;
+  int flip_sample_count_ = 0;
+  int color_pub_count_ = 0;
+  std::chrono::steady_clock::time_point last_color_log_;
+  double total_depth_time_ = 0.0;
+  double total_thread_time_ = 0.0;
+  int thread_sample_count_ = 0;
+  bool first_compute_warning_ = true;
+  //! @}
+
+  //! Reusable buffer for RGB-flipped color data in point cloud generation
+  std::vector<unsigned char> color_flipped_rgb_;
+
+  //! Build a CameraInfo message from current camera parameters
+  sensor_msgs::msg::CameraInfo buildCameraInfo(const rclcpp::Time &stamp) const;
 };
 
 } // namespace MujocoRosUtils
