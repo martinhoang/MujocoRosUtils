@@ -1,0 +1,36 @@
+<mujoco model="contact_force_example">
+  <!-- Example configuration for ContactForcePublisher plugin -->
+  
+  <option timestep="0.001"/>
+  
+  <worldbody>
+    <body name="floor">
+      <geom name="floor_geom" type="plane" size="10 10 0.1" rgba="0.8 0.8 0.8 1"/>
+    </body>
+    
+    <body name="box" pos="0 0 1">
+      <freejoint/>
+      <geom name="box_geom" type="box" size="0.1 0.1 0.1" rgba="1 0 0 1" mass="1"/>
+    </body>
+    
+    <!-- Example 1: Monitor all contacts -->
+    <plugin plugin="MujocoRosUtils::ContactForcePublisher">
+      <!-- Empty geom_names means monitor all contacts -->
+      <config key="geom_names" value=""/>
+      <config key="frame_id" value="world"/>
+      <config key="topic_name" value="/contact_forces/all"/>
+      <config key="publish_rate" value="100"/>
+    </plugin>
+    
+    <!-- Example 2: Monitor specific geoms only -->
+    <!--
+    <plugin plugin="MujocoRosUtils::ContactForcePublisher">
+      <config key="geom_names" value="box_geom,floor_geom"/>
+      <config key="frame_id" value="world"/>
+      <config key="topic_name" value="/contact_forces/box_floor"/>
+      <config key="publish_rate" value="50"/>
+    </plugin>
+    -->
+  </worldbody>
+  
+</mujoco>

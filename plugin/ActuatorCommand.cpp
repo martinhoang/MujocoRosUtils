@@ -285,16 +285,44 @@ ActuatorCommand::~ActuatorCommand()
 {
   if(nh_)
   {
-    print_confirm("Shutting down ActuatorCommand plugin ROS node...\n");
-    rclcpp::shutdown();
+    print_confirm("Shutting down ActuatorCommand plugin ROS node...\\n");
+    
+    // First reset all ROS entities before calling shutdown
     joint_cmd_array_sub_.reset();
     joint_trajectory_sub_.reset();
     joint_cmd_joint_state_sub_.reset();
     joint_state_pub_.reset();
-    nh_.reset();
+    
+    // Clean up executor and node
+    if (executor_)
+    {
+      try
+      {
+        if (nh_)
+        {
+          executor_->remove_node(nh_);
+        }
+      }
+      catch (const std::exception &e)
+      {
+        std::cerr << "[ActuatorCommand] Error removing node from executor: " << e.what() << std::endl;
+      }
+    }
+    
     executor_.reset();
+    nh_.reset();
+    
     actuators_.clear();
     ctrl_.clear();
+    
+    // Only shutdown if this was the last plugin using ROS
+    // Note: This is problematic if multiple plugins exist
+    // Consider removing this or using a reference counter
+    if (rclcpp::ok())
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      rclcpp::shutdown();
+    }
   }
   else
   {

@@ -9,8 +9,11 @@ add_library(
   depth_conversions.hpp
   depth_traits.hpp
   ActuatorCommand.cpp
+  TopicControl.cpp
   ExternalForce.cpp
   SensorPublisher.cpp
+  ContactForcePublisher.cpp
+  GeomTfPublisher.cpp
   mujoco_utils.cpp
   MimicJoint.cpp
   RosControl.cpp
@@ -29,6 +32,7 @@ ament_target_dependencies(
   geometry_msgs
   visualization_msgs
   tf2_ros
+  tf2_msgs
   sensor_msgs
   cv_bridge
   image_geometry

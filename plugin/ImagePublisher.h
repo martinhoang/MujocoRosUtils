@@ -93,7 +93,7 @@ protected:
                  std::string point_cloud_topic_name, bool rotate_point_cloud,
                  const std::string &point_cloud_rotation_preset, int height, int width,
                  mjtNum publish_rate, double max_range, ReadbackMode readback_mode,
-                 bool enable_parallel);
+                 bool enable_parallel, bool use_time_based);
 
 protected:
   //! MuJoCo model
@@ -111,6 +111,11 @@ protected:
   ReadbackMode readback_mode_   = ReadbackMode::Pbo;
   bool         use_pbo_readback_ = true;
   bool         enable_parallel_processing_ = false;
+
+  //! Publishing mode
+  bool   use_time_based_publishing_ = false;     // false = step-based (default), true = time-based
+  double target_publish_interval_ms_ = 33.33;    // Target interval in milliseconds (default ~30 Hz)
+  std::chrono::steady_clock::time_point last_publish_time_;
 
   //! Rotate point cloud
   bool        rotate_point_cloud_          = false;
