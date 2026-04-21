@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Velodyne VLP-16 Puck lidar sites.
+
+  Spec:
+    Channels:            16
+    Vertical FoV:        30° (+15° to -15°), 2° step
+    Horizontal FoV:      360°, 0.2° step → 1800 rays per ring
+    Total sensors:       16 × 1800 = 28,800
+
+  Quaternion per layer: θ = 90° − e, quat = [cos(θ/2), 0, sin(θ/2), 0]
+  (pure R_y rotation, tilts site -Z to point radially outward at elevation e)
+
+  Include inside a <body> in worldbody:
+    <body name="lidar_body" pos="...">
+      <geom .../>
+      <include file="lidar_vlp16_sites.xml"/>
+    </body>
+-->
+<mujoco>
+  <!-- l00: e=-15° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l00" pos="0 0 0" quat="0.60876 0 0.79335 0"/>
+  </replicate>
+
+  <!-- l01: e=-13° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l01" pos="0 0 0" quat="0.62251 0 0.78261 0"/>
+  </replicate>
+
+  <!-- l02: e=-11° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l02" pos="0 0 0" quat="0.63608 0 0.77162 0"/>
+  </replicate>
+
+  <!-- l03: e=-9° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l03" pos="0 0 0" quat="0.64945 0 0.76041 0"/>
+  </replicate>
+
+  <!-- l04: e=-7° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l04" pos="0 0 0" quat="0.66262 0 0.74896 0"/>
+  </replicate>
+
+  <!-- l05: e=-5° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l05" pos="0 0 0" quat="0.67559 0 0.73728 0"/>
+  </replicate>
+
+  <!-- l06: e=-3° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l06" pos="0 0 0" quat="0.68835 0 0.72537 0"/>
+  </replicate>
+
+  <!-- l07: e=-1° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l07" pos="0 0 0" quat="0.70091 0 0.71325 0"/>
+  </replicate>
+
+  <!-- l08: e=+1° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l08" pos="0 0 0" quat="0.71325 0 0.70091 0"/>
+  </replicate>
+
+  <!-- l09: e=+3° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l09" pos="0 0 0" quat="0.72537 0 0.68835 0"/>
+  </replicate>
+
+  <!-- l10: e=+5° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l10" pos="0 0 0" quat="0.73728 0 0.67559 0"/>
+  </replicate>
+
+  <!-- l11: e=+7° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l11" pos="0 0 0" quat="0.74896 0 0.66262 0"/>
+  </replicate>
+
+  <!-- l12: e=+9° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l12" pos="0 0 0" quat="0.76041 0 0.64945 0"/>
+  </replicate>
+
+  <!-- l13: e=+11° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l13" pos="0 0 0" quat="0.77162 0 0.63608 0"/>
+  </replicate>
+
+  <!-- l14: e=+13° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l14" pos="0 0 0" quat="0.78261 0 0.62251 0"/>
+  </replicate>
+
+  <!-- l15: e=+15° -->
+  <replicate sep="-"  count="50" euler="0 0 18.0">
+    <site name="vlp16_l15" pos="0 0 0" quat="0.79335 0 0.60876 0"/>
+  </replicate>
+</mujoco>

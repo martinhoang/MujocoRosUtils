@@ -32,6 +32,7 @@ constexpr char ATTR_PUBLISH_RATE[]                = "publish_rate";
 constexpr char ATTR_MAX_RANGE[]                   = "max_range";
 constexpr char ATTR_READBACK_MODE[]               = "readback_mode";
 constexpr char ATTR_PARALLEL_PROCESSING[]         = "parallel_processing";
+constexpr char ATTR_POINT_CLOUD_DOWNSAMPLE[]      = "point_cloud_downsample";
 
 void ImagePublisher::RegisterPlugin()
 {
@@ -54,7 +55,8 @@ void ImagePublisher::RegisterPlugin()
                               ATTR_PUBLISH_RATE,
                               ATTR_MAX_RANGE,
                               ATTR_READBACK_MODE,
-                              ATTR_PARALLEL_PROCESSING};
+                              ATTR_PARALLEL_PROCESSING,
+                              ATTR_POINT_CLOUD_DOWNSAMPLE};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
   plugin.attributes = attributes;
@@ -385,6 +387,19 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
                 enable_parallel ? "true" : "false");
   }
 
+  // point_cloud_downsample
+  const char *cloud_downsample_char = mj_getPluginConfig(m, plugin_id, ATTR_POINT_CLOUD_DOWNSAMPLE);
+  int point_cloud_downsample = 1;
+  if (cloud_downsample_char && strlen(cloud_downsample_char) > 0)
+  {
+    point_cloud_downsample = static_cast<int>(strtol(cloud_downsample_char, nullptr, 10));
+    if (point_cloud_downsample < 1)
+    {
+      mju_error("[ImagePublisher] `point_cloud_downsample` must be >= 1.");
+      return nullptr;
+    }
+  }
+
   // Set sensor_id
   print_debug("[ImagePublisher::Create] Finding sensor_id, nsensor=%d\n", m->nsensor);
   int sensor_id = 0;
@@ -415,7 +430,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   ImagePublisher *instance = new ImagePublisher(
     m, d, sensor_id, frame_id, topic_namespace, color_topic_name, depth_topic_name, info_topic_name,
     point_cloud_topic_name, rotate_point_cloud, point_cloud_rotation_preset, height, width,
-    publish_rate, max_range, readback_mode, enable_parallel);
+    publish_rate, max_range, readback_mode, enable_parallel, point_cloud_downsample);
 
   print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void *)instance);
   return instance;
@@ -429,7 +444,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
                                std::string point_cloud_topic_name, bool rotate_point_cloud,
                                const std::string &point_cloud_rotation_preset, int height,
                                int width, mjtNum publish_rate, double max_range,
-                               ReadbackMode readback_mode, bool enable_parallel)
+                               ReadbackMode readback_mode, bool enable_parallel,
+                               int point_cloud_downsample)
     : m_(m)
     , sensor_id_(sensor_id)
     , camera_id_(m->sensor_objid[sensor_id])
@@ -440,6 +456,7 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     , publish_skip_(std::max(static_cast<int>(1.0 / (publish_rate * m->opt.timestep)), 1))
     , viewport_({0, 0, width, height})
     , enable_parallel_processing_(enable_parallel)
+    , point_cloud_downsample_(std::max(point_cloud_downsample, 1))
     , last_fps_log_time_(std::chrono::steady_clock::now())
     , last_frame_time_(std::chrono::steady_clock::now())
     , last_color_log_(std::chrono::steady_clock::now())
@@ -642,8 +659,6 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     print_debug("[ImagePublisher] WARNING: Failed to set logger level\n");
   }
 
-  RCLCPP_INFO(nh_->get_logger(), "ROS2 node created with INFO log level");
-
   auto qos = rclcpp::SensorDataQoS();
   RCLCPP_DEBUG(nh_->get_logger(), "Creating publishers...");
   // color_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(color_topic_name, qos);
@@ -744,7 +759,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   if (elapsed_since_log >= 2000) // Log every 2 seconds
   {
     double fps = frame_count_ * 1000.0 / elapsed_since_log;
-    RCLCPP_INFO(nh_->get_logger(), "Published FPS: %.2f (frames=%d, elapsed=%ldms)", fps,
+    RCLCPP_DEBUG(nh_->get_logger(), "Published FPS: %.2f (frames=%d, elapsed=%ldms)", fps,
                 frame_count_, elapsed_since_log);
     frame_count_       = 0;
     last_fps_log_time_ = now;
@@ -941,7 +956,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 
       if (compute_call_count_ <= 3)
       {
-        RCLCPP_INFO(nh_->get_logger(), "GL operations complete (PBO frame %d)", pbo_frame_count_);
+        RCLCPP_DEBUG(nh_->get_logger(), "GL operations complete (PBO frame %d)", pbo_frame_count_);
       }
     }
     else
@@ -1205,7 +1220,7 @@ sensor_msgs::msg::CameraInfo ImagePublisher::buildCameraInfo(const rclcpp::Time 
 
 void ImagePublisher::publishThread()
 {
-  RCLCPP_INFO(nh_->get_logger(), "publishThread started");
+  RCLCPP_DEBUG(nh_->get_logger(), "publishThread started");
   print_confirm("ImagePublisher publish thread started\n");
 
   auto last_publish_log    = std::chrono::steady_clock::now();
@@ -1261,7 +1276,7 @@ void ImagePublisher::publishThread()
     // Debug: Log near/far values periodically
     if (depth_log_count_ == 0)
     {
-      RCLCPP_INFO(nh_->get_logger(), "Depth conversion: near=%.4f, far=%.4f, depth_scale=%.6f",
+      RCLCPP_DEBUG(nh_->get_logger(), "Depth conversion: near=%.4f, far=%.4f, depth_scale=%.6f",
                   near, far, depth_scale);
     }
     depth_log_count_ = (depth_log_count_ + 1) % 100;
@@ -1316,7 +1331,7 @@ void ImagePublisher::publishThread()
         min_depth = std::min(min_depth, local_depth_flipped[i]);
         max_depth = std::max(max_depth, local_depth_flipped[i]);
       }
-      RCLCPP_INFO(nh_->get_logger(), "Depth values: min=%.4f, max=%.4f, center=%.4f", min_depth,
+      RCLCPP_DEBUG(nh_->get_logger(), "Depth values: min=%.4f, max=%.4f, center=%.4f", min_depth,
                   max_depth, center_depth);
     }
 
@@ -1388,9 +1403,9 @@ void ImagePublisher::publishThread()
       // Debug: Log point cloud generation parameters
       if (pcl_log_count_ == 0)
       {
-        RCLCPP_INFO(nh_->get_logger(), "PointCloud params: range_max_=%.4f, use_quiet_nan_=%d",
+        RCLCPP_DEBUG(nh_->get_logger(), "PointCloud params: range_max_=%.4f, use_quiet_nan_=%d",
                     range_max_, use_quiet_nan_);
-        RCLCPP_INFO(nh_->get_logger(), "Camera model: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
+        RCLCPP_DEBUG(nh_->get_logger(), "Camera model: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
                     model.fx(), model.fy(), model.cx(), model.cy());
       }
       pcl_log_count_ = (pcl_log_count_ + 1) % 100;
@@ -1398,46 +1413,104 @@ void ImagePublisher::publishThread()
       sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
         = std::make_shared<sensor_msgs::msg::PointCloud2>();
       cloud_msg->header       = depth_msg.header;
-      cloud_msg->height       = depth_msg.height;
-      cloud_msg->width        = depth_msg.width;
       cloud_msg->is_dense     = false;
       cloud_msg->is_bigendian = false;
+
+      // --- Downsample depth and color for cloud if requested ---
+      // This shrinks the images before cloud conversion: O(W*H / k²) instead of O(W*H).
+      // The rendered image is untouched; only the cloud resolution is reduced.
+      sensor_msgs::msg::Image::ConstSharedPtr depth_msg_for_cloud;
+      cv_bridge::CvImageConstPtr cv_ptr_for_cloud;
+      image_geometry::PinholeCameraModel cloud_model = model;
+
+      if (point_cloud_downsample_ > 1)
+      {
+        const int small_w = std::max(1, viewport_.width  / point_cloud_downsample_);
+        const int small_h = std::max(1, viewport_.height / point_cloud_downsample_);
+
+        // Resize depth image (nearest-neighbour to preserve depth values)
+        cv::Mat depth_full(viewport_.height, viewport_.width, CV_32FC1,
+                           const_cast<float *>(reinterpret_cast<const float *>(depth_msg.data.data())));
+        cv::Mat depth_small;
+        cv::resize(depth_full, depth_small, cv::Size(small_w, small_h), 0, 0, cv::INTER_NEAREST);
+
+        auto depth_small_msg = std::make_shared<sensor_msgs::msg::Image>();
+        depth_small_msg->header     = depth_msg.header;
+        depth_small_msg->height     = small_h;
+        depth_small_msg->width      = small_w;
+        depth_small_msg->encoding   = depth_msg.encoding;
+        depth_small_msg->is_bigendian = 0;
+        depth_small_msg->step       = static_cast<unsigned int>(sizeof(float) * small_w);
+        depth_small_msg->data.resize(sizeof(float) * small_w * small_h);
+        std::memcpy(depth_small_msg->data.data(), depth_small.data,
+                    sizeof(float) * small_w * small_h);
+        depth_msg_for_cloud = depth_small_msg;
+
+        // Resize color image
+        cv::Mat rgb_full(viewport_.height, viewport_.width, CV_8UC3,
+                         const_cast<unsigned char *>(color_msg_for_cloud.data.data()));
+        cv::Mat rgb_small;
+        cv::resize(rgb_full, rgb_small, cv::Size(small_w, small_h), 0, 0, cv::INTER_LINEAR);
+        auto cv_small = std::make_shared<cv_bridge::CvImage>(
+          color_msg_for_cloud.header, sensor_msgs::image_encodings::RGB8, rgb_small.clone());
+        cv_ptr_for_cloud = cv_small;
+
+        // Scale camera intrinsics
+        const double scale = 1.0 / point_cloud_downsample_;
+        sensor_msgs::msg::CameraInfo scaled_info = buildCameraInfo(stamp_now);
+        scaled_info.width  = small_w;
+        scaled_info.height = small_h;
+        scaled_info.k[0] *= scale; // fx
+        scaled_info.k[2] *= scale; // cx
+        scaled_info.k[4] *= scale; // fy
+        scaled_info.k[5] *= scale; // cy
+        scaled_info.p[0] *= scale; // fx
+        scaled_info.p[2] *= scale; // cx
+        scaled_info.p[5] *= scale; // fy
+        scaled_info.p[6] *= scale; // cy
+        cloud_model.fromCameraInfo(scaled_info);
+
+        cloud_msg->height = small_h;
+        cloud_msg->width  = small_w;
+      }
+      else
+      {
+        // No downsampling
+        cv::Mat rgb_mat(viewport_.height, viewport_.width, CV_8UC3,
+                        const_cast<unsigned char *>(color_msg_for_cloud.data.data()));
+        cv_ptr_for_cloud = std::make_shared<cv_bridge::CvImage>(
+          color_msg_for_cloud.header, sensor_msgs::image_encodings::RGB8, rgb_mat);
+        depth_msg_for_cloud = std::shared_ptr<sensor_msgs::msg::Image>(
+          const_cast<sensor_msgs::msg::Image *>(&depth_msg),
+          [](const sensor_msgs::msg::Image *) {});
+
+        cloud_msg->height = depth_msg.height;
+        cloud_msg->width  = depth_msg.width;
+      }
+
       sensor_msgs::PointCloud2Modifier pcd_modifier(*cloud_msg);
       pcd_modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
 
-      sensor_msgs::msg::Image::ConstSharedPtr color_msg_ptr(&color_msg_for_cloud,
-                                                            [](const sensor_msgs::msg::Image *) {
-                                                            });
-      // Wrap the RGB data as a cv::Mat without copying
-      cv::Mat rgb_mat(viewport_.height, viewport_.width, CV_8UC3,
-                      const_cast<unsigned char *>(color_msg_for_cloud.data.data()));
-      auto cv_ptr = std::make_shared<cv_bridge::CvImage>(
-        color_msg_for_cloud.header, sensor_msgs::image_encodings::RGB8, rgb_mat);
-
-      sensor_msgs::msg::Image::ConstSharedPtr depth_msg_ptr(&depth_msg,
-                                                            [](const sensor_msgs::msg::Image *) {
-                                                            });
-      if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_16UC1)
+      if (depth_msg_for_cloud->encoding == sensor_msgs::image_encodings::TYPE_16UC1)
       {
         depthimage_to_pointcloud2::convert<uint16_t>(
-          depth_msg_ptr, cloud_msg, model, range_max_, use_quiet_nan_,
+          depth_msg_for_cloud, cloud_msg, cloud_model, range_max_, use_quiet_nan_,
           rotate_point_cloud_ ? point_cloud_rotation_preset_
                               : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
-          cv_ptr);
+          cv_ptr_for_cloud);
       }
-      else if (depth_msg.encoding == sensor_msgs::image_encodings::TYPE_32FC1)
+      else if (depth_msg_for_cloud->encoding == sensor_msgs::image_encodings::TYPE_32FC1)
       {
         depthimage_to_pointcloud2::convert<float>(
-          depth_msg_ptr, cloud_msg, model, range_max_, use_quiet_nan_,
+          depth_msg_for_cloud, cloud_msg, cloud_model, range_max_, use_quiet_nan_,
           rotate_point_cloud_ ? point_cloud_rotation_preset_
                               : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
-          cv_ptr);
+          cv_ptr_for_cloud);
       }
       else
       {
         RCLCPP_WARN(nh_->get_logger(), "Depth image has unsupported encoding [%s]",
-                    depth_msg.encoding.c_str());
-        // Can't return, so just continue to the next loop iteration
+                    depth_msg_for_cloud->encoding.c_str());
         continue;
       }
 
@@ -1465,9 +1538,9 @@ void ImagePublisher::publishThread()
         double      avg_thread_ms = total_thread_time_ / thread_sample_count_;
         const char *mode          = shouldParallelizeRows(viewport_.height) ? "parallel" : "serial";
 
-        RCLCPP_INFO(nh_->get_logger(), "  Depth processing (%s): avg %.2fms per frame", mode,
+        RCLCPP_DEBUG(nh_->get_logger(), "  Depth processing (%s): avg %.2fms per frame", mode,
                     avg_depth_ms);
-        RCLCPP_INFO(nh_->get_logger(), "  Publish thread total: avg %.2fms per frame (depth+cloud)",
+        RCLCPP_DEBUG(nh_->get_logger(), "  Publish thread total: avg %.2fms per frame (depth+cloud)",
                     avg_thread_ms);
       }
 

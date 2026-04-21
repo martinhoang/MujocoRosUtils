@@ -93,7 +93,7 @@ protected:
                  std::string point_cloud_topic_name, bool rotate_point_cloud,
                  const std::string &point_cloud_rotation_preset, int height, int width,
                  mjtNum publish_rate, double max_range, ReadbackMode readback_mode,
-                 bool enable_parallel);
+                 bool enable_parallel, int point_cloud_downsample);
 
 protected:
   //! MuJoCo model
@@ -111,6 +111,9 @@ protected:
   ReadbackMode readback_mode_   = ReadbackMode::Pbo;
   bool         use_pbo_readback_ = true;
   bool         enable_parallel_processing_ = false;
+
+  //! Point cloud downsample factor (1 = full resolution, 2 = half res, etc.)
+  int point_cloud_downsample_ = 1;
 
   //! Rotate point cloud
   bool        rotate_point_cloud_          = false;

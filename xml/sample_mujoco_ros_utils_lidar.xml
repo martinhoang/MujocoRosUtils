@@ -1,0 +1,106 @@
+<mujoco model="sample_mujoco_ros_utils">
+  <compiler autolimits="true"/>
+
+  <extension>
+    <plugin plugin="MujocoRosUtils::ClockPublisher"/>
+    <plugin plugin="MujocoRosUtils::PosePublisher"/>
+    <!-- <plugin plugin="MujocoRosUtils::ActuatorCommand"/> -->
+    <!-- <plugin plugin="MujocoRosUtils::ExternalForce"/> -->
+    <plugin plugin="MujocoRosUtils::LidarPublisher"/>
+  </extension>
+
+  <asset>
+    <texture name="floor" type="2d" builtin="checker" rgb1="0.1 0.2 0.3" rgb2="0.2 0.3 0.4" width="300" height="300" mark="edge" markrgb="0.2 0.3 0.4"/>
+    <material name="floor" texture="floor" texrepeat="10 10" texuniform="true"/>
+  </asset>
+
+  <visual>
+    <headlight ambient="0.7 0.7 0.7" diffuse="0.2 0.2 0.2" specular="0.1 0.1 0.1"/>
+    <map znear="0.01"/>
+    <scale contactwidth="0.02" contactheight="0.5"/>
+    <rgba rangefinder="1 1 0.1 0.1"/>
+  </visual>
+
+  <statistic center="0 0 1" extent="1" meansize="0.1"/>
+	<option impratio="10" integrator="implicitfast" timestep="0.001" />
+
+  <worldbody>
+    <plugin plugin="MujocoRosUtils::ClockPublisher">
+      <config key="topic_name" value="/clock"/>
+      <config key="publish_rate" value="100"/>
+      <config key="use_sim_time" value="true"/>
+    </plugin>
+
+    <light pos="1 0 0.3" dir="-1 0 -0.3"/>
+    <light pos="-1 0 0.3" dir="1 0 -0.3"/>
+
+    <geom name="floor" type="plane" material="floor" size="10.0 10.0 0.01" pos="0 0 -0.01"/>
+
+    <body name="object" pos="0 0 0.2">
+      <freejoint/>
+      <replicate sep="-" count="10" euler="0 0 36">
+        <geom type="cylinder" pos="1.5 0 0" size="0.4 0.2" mass="0.1" rgba="0.5 1.0 0.5 1.0"/>
+      </replicate>
+    </body>
+
+    <body name="object2" pos="0 0 0.8">
+      <freejoint/>
+      <replicate sep="-" count="10" euler="0 0 36">
+        <geom type="box" pos="1.5 0 0" size="0.2 0.2 0.4" mass="0.1" rgba="0.5 1.0 0.5 1.0"/>
+      </replicate>
+    </body>
+
+    <!-- VLP-16 lidar body: position/orientation set here; sites come from the include.
+    All sites share this body so the chassis geom is excluded from rangefinder hits. -->
+    <body name="lidar_body" pos="0 0 0.5">
+
+      <!-- 2D lidar: 361 rays, -π to +π at 1° intervals.
+      quat = R_y(+90°): site Z → +X, so rangefinder (-Z) points in -X at step 0 (angle -π).
+      The replicate sweeps CCW, giving angles -π, -π+1°, ..., +π. -->
+      <replicate count="360" sep="-" euler="0 0 1.0">
+        <site name="lidar_2d_site" pos="0 0 0" quat="0.7071068 0 0.7071068 0"/>
+      </replicate>
+
+      <!-- visual chassis only — contype=0 keeps it out of collision and rangefinder detection -->
+      <geom type="cylinder" size="0.05 0.03" mass="0.1" rgba="0.8 0.3 0.3 1.0" contype="0" conaffinity="0"/>
+      <!-- 16 elevation rings, 360 beams each → 5760 sites total -->
+      <include file="lidar_vlp16_sites.xml"/>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <plugin name="pose_publisher" plugin="MujocoRosUtils::PosePublisher" objtype="xbody" objname="object">
+      <config key="frame_id" value="map"/>
+      <config key="pose_topic_name" value="/pose"/>
+      <config key="vel_topic_name" value="/vel"/>
+      <config key="publish_rate" value="30"/>
+      <config key="output_tf" value="false"/>
+    </plugin>
+
+    <!-- 2D lidar (LaserScan): 360 rangefinders cover -π to π at 1° increments.
+         The lidar body is positioned at (2 0 0.5) facing forward.
+         Sites are replicated with euler="0 0.017453 0" (1° around Z) so each
+         rangefinder Z-axis sweeps the horizontal plane. -->
+    <rangefinder name="lidar_2d" site="lidar_2d_site"/>
+    <plugin name="lidar_2d_publisher" plugin="MujocoRosUtils::LidarPublisher" objtype="xbody" objname="lidar_body">
+      <config key="sensor_name_prefix" value="lidar_2d"/>
+      <config key="frame_id"           value="lidar_frame"/>
+      <config key="topic_name"         value="/lidar_scan"/>
+      <config key="publish_rate"       value="10"/>
+      <config key="min_angle"          value="-3.14159265"/>
+      <config key="max_angle"          value="3.14159265"/>
+      <config key="angle_increment"    value="0.017453293"/>
+      <config key="range_min"          value="0.1"/>
+      <config key="range_max"          value="30.0"/>
+      <config key="qos"                value="best_effort;10"/>
+      <config key="output_tf"          value="true"/>
+      <config key="tf_parent_frame_id" value="map"/>
+      <config key="visualize_rays"     value="true"/>
+      <config key="ray_hit_color"      value="0 1 0 0.6"/>
+      <config key="ray_miss_color"     value="1 0 0 0.2"/>
+    </plugin>
+
+    <!-- VLP-16 3D lidar: 16 layers × 1800 rays = 28,800 sensors -->
+    <include file="lidar_vlp16_sensors.xml"/>
+  </sensor>
+</mujoco>

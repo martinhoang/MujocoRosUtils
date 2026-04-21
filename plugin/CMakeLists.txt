@@ -11,6 +11,7 @@ add_library(
   ActuatorCommand.cpp
   ExternalForce.cpp
   SensorPublisher.cpp
+  LidarPublisher.cpp
   mujoco_utils.cpp
   MimicJoint.cpp
   RosControl.cpp

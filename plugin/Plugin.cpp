@@ -4,6 +4,7 @@
 #include "ClockPublisher.h"
 #include "ExternalForce.h"
 #include "ImagePublisher.h"
+#include "LidarPublisher.h"
 #include "PosePublisher.h"
 #include "SensorPublisher.h"
 #include "MimicJoint.hpp"
@@ -20,6 +21,7 @@ mjPLUGIN_LIB_INIT
   ActuatorCommand::RegisterPlugin();
   ExternalForce::RegisterPlugin();
   SensorPublisher::RegisterPlugin();
+  LidarPublisher::RegisterPlugin();
   MimicJoint::RegisterPlugin();
   Ros2Control::RegisterPlugin();
 }
