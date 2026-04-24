@@ -73,7 +73,7 @@ void convert(const sensor_msgs::msg::Image::ConstSharedPtr &depth_msg,
              sensor_msgs::msg::PointCloud2::SharedPtr      &cloud_msg,
              const image_geometry::PinholeCameraModel &model, double range_max = 0.0,
              bool use_quiet_nan = false, const std::string &rotation_preset = "",
-             cv_bridge::CvImageConstPtr cv_ptr = nullptr)
+             cv_bridge::CvImageConstPtr cv_ptr = nullptr, double range_min = 0.0)
 {
   // Use correct principal point from calibration
   float center_x = model.cx();
@@ -122,6 +122,16 @@ void convert(const sensor_msgs::msg::Image::ConstSharedPtr &depth_msg,
       {
         T depth_max = DepthTraits<T>::fromMeters(range_max);
         if (depth > depth_max)
+        {
+          *iter_x_local = *iter_y_local = *iter_z_local = *iter_rgb_local = bad_point;
+          continue;
+        }
+      }
+
+      if (range_min != 0.0)
+      {
+        T depth_min = DepthTraits<T>::fromMeters(range_min);
+        if (depth < depth_min)
         {
           *iter_x_local = *iter_y_local = *iter_z_local = *iter_rgb_local = bad_point;
           continue;

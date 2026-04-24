@@ -29,6 +29,7 @@ constexpr char ATTR_POINT_CLOUD_ROTATION_PRESET[] = "point_cloud_rotation_preset
 constexpr char ATTR_HEIGHT[]                      = "height";
 constexpr char ATTR_WIDTH[]                       = "width";
 constexpr char ATTR_PUBLISH_RATE[]                = "publish_rate";
+constexpr char ATTR_MIN_RANGE[]                   = "min_range";
 constexpr char ATTR_MAX_RANGE[]                   = "max_range";
 constexpr char ATTR_READBACK_MODE[]               = "readback_mode";
 constexpr char ATTR_PARALLEL_PROCESSING[]         = "parallel_processing";
@@ -53,6 +54,7 @@ void ImagePublisher::RegisterPlugin()
                               ATTR_HEIGHT,
                               ATTR_WIDTH,
                               ATTR_PUBLISH_RATE,
+                              ATTR_MIN_RANGE,
                               ATTR_MAX_RANGE,
                               ATTR_READBACK_MODE,
                               ATTR_PARALLEL_PROCESSING,
@@ -308,6 +310,20 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     return nullptr;
   }
 
+  // min_range
+  print_debug("[ImagePublisher::Create] Reading min_range...\n");
+  const char *min_range_char = mj_getPluginConfig(m, plugin_id, ATTR_MIN_RANGE);
+  double      min_range      = 0.0;
+  if (min_range_char && strlen(min_range_char) > 0)
+  {
+    min_range = strtod(min_range_char, nullptr);
+    print_debug("[ImagePublisher::Create] min_range=%f\n", min_range);
+  }
+  else
+  {
+    print_debug("[ImagePublisher::Create] min_range not specified, using default=%f\n", min_range);
+  }
+
   // max_range
   print_debug("[ImagePublisher::Create] Reading max_range...\n");
   const char *max_range_char = mj_getPluginConfig(m, plugin_id, ATTR_MAX_RANGE);
@@ -430,7 +446,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   ImagePublisher *instance = new ImagePublisher(
     m, d, sensor_id, frame_id, topic_namespace, color_topic_name, depth_topic_name, info_topic_name,
     point_cloud_topic_name, rotate_point_cloud, point_cloud_rotation_preset, height, width,
-    publish_rate, max_range, readback_mode, enable_parallel, point_cloud_downsample);
+    publish_rate, min_range, max_range, readback_mode, enable_parallel, point_cloud_downsample);
 
   print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void *)instance);
   return instance;
@@ -443,7 +459,7 @@ ImagePublisher::ImagePublisher(const mjModel *m,
                                std::string depth_topic_name, std::string info_topic_name,
                                std::string point_cloud_topic_name, bool rotate_point_cloud,
                                const std::string &point_cloud_rotation_preset, int height,
-                               int width, mjtNum publish_rate, double max_range,
+                               int width, mjtNum publish_rate, double min_range, double max_range,
                                ReadbackMode readback_mode, bool enable_parallel,
                                int point_cloud_downsample)
     : m_(m)
@@ -671,10 +687,12 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   RCLCPP_DEBUG(nh_->get_logger(), "Publishers created");
 
   // If the ros2 params are provided, they will take precedence
+  range_min_     = nh_->get_parameter_or("range_min", min_range);
   range_max_     = nh_->get_parameter_or("range_max", max_range);
   use_quiet_nan_ = nh_->get_parameter_or("use_quiet_nan", true);
 
-  RCLCPP_INFO(nh_->get_logger(), "ImagePublisher initialized (range_max=%.2f)", range_max_);
+  RCLCPP_INFO(nh_->get_logger(), "ImagePublisher initialized (range_min=%.2f, range_max=%.2f)",
+              range_min_, range_max_);
   RCLCPP_INFO(nh_->get_logger(), "  Image size: %dx%d (%zu KB uncompressed)", viewport_.width,
               viewport_.height, static_cast<size_t>(3 * viewport_.width * viewport_.height) / 1024);
   RCLCPP_WARN(nh_->get_logger(),
@@ -1403,8 +1421,8 @@ void ImagePublisher::publishThread()
       // Debug: Log point cloud generation parameters
       if (pcl_log_count_ == 0)
       {
-        RCLCPP_DEBUG(nh_->get_logger(), "PointCloud params: range_max_=%.4f, use_quiet_nan_=%d",
-                    range_max_, use_quiet_nan_);
+        RCLCPP_DEBUG(nh_->get_logger(), "PointCloud params: range_min_=%.4f, range_max_=%.4f, use_quiet_nan_=%d",
+                    range_min_, range_max_, use_quiet_nan_);
         RCLCPP_DEBUG(nh_->get_logger(), "Camera model: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
                     model.fx(), model.fy(), model.cx(), model.cy());
       }
@@ -1497,7 +1515,7 @@ void ImagePublisher::publishThread()
           depth_msg_for_cloud, cloud_msg, cloud_model, range_max_, use_quiet_nan_,
           rotate_point_cloud_ ? point_cloud_rotation_preset_
                               : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
-          cv_ptr_for_cloud);
+          cv_ptr_for_cloud, range_min_);
       }
       else if (depth_msg_for_cloud->encoding == sensor_msgs::image_encodings::TYPE_32FC1)
       {
@@ -1505,7 +1523,7 @@ void ImagePublisher::publishThread()
           depth_msg_for_cloud, cloud_msg, cloud_model, range_max_, use_quiet_nan_,
           rotate_point_cloud_ ? point_cloud_rotation_preset_
                               : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
-          cv_ptr_for_cloud);
+          cv_ptr_for_cloud, range_min_);
       }
       else
       {

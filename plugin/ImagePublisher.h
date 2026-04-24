@@ -92,7 +92,7 @@ protected:
                  std::string depth_topic_name, std::string info_topic_name,
                  std::string point_cloud_topic_name, bool rotate_point_cloud,
                  const std::string &point_cloud_rotation_preset, int height, int width,
-                 mjtNum publish_rate, double max_range, ReadbackMode readback_mode,
+                 mjtNum publish_rate, double min_range, double max_range, ReadbackMode readback_mode,
                  bool enable_parallel, int point_cloud_downsample);
 
 protected:
@@ -130,6 +130,7 @@ protected:
 
   //! Parameters for point cloud conversion
   //! @{
+  double range_min_     = 0.0;
   double range_max_     = 0.0;
   bool   use_quiet_nan_ = true;
   //! @}
