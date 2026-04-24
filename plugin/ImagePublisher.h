@@ -106,7 +106,8 @@ protected:
   int camera_id_ = -1;
 
   //! Frame ID
-  std::string frame_id_ = "";
+  std::string frame_id_       = "";
+  std::string color_frame_id_ = "";
 
   ReadbackMode readback_mode_   = ReadbackMode::Pbo;
   bool         use_pbo_readback_ = true;
@@ -175,7 +176,8 @@ protected:
   // rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr       color_pub_;
   image_transport::Publisher                                  color_pub_;
   image_transport::Publisher                                  depth_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr  info_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr  color_info_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr  depth_info_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_pub_;
   bool                                                        publish_color_ = false;
   bool                                                        publish_depth_ = false;
@@ -222,7 +224,8 @@ protected:
   std::vector<unsigned char> color_flipped_rgb_;
 
   //! Build a CameraInfo message from current camera parameters
-  sensor_msgs::msg::CameraInfo buildCameraInfo(const rclcpp::Time &stamp) const;
+  sensor_msgs::msg::CameraInfo buildCameraInfo(const rclcpp::Time &stamp,
+                                               const std::string &frame_id) const;
 };
 
 } // namespace MujocoRosUtils

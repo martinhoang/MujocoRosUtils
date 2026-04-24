@@ -502,11 +502,23 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     = topic_namespace + (color_topic_name.empty() ? camera_name + "/color" : color_topic_name);
   depth_topic_name
     = topic_namespace + (depth_topic_name.empty() ? camera_name + "/depth" : depth_topic_name);
-  info_topic_name
-    = topic_namespace + (info_topic_name.empty() ? camera_name + "/camera_info" : info_topic_name);
+  // info_topic_name configures the DEPTH camera_info; color camera_info always follows color_topic
+  std::string depth_info_topic_name
+    = topic_namespace + (info_topic_name.empty() ? camera_name + "/depth/camera_info" : info_topic_name);
+  std::string color_info_topic_name = color_topic_name + "/camera_info";
   point_cloud_topic_name
     = topic_namespace
       + (point_cloud_topic_name.empty() ? camera_name + "/point_cloud" : point_cloud_topic_name);
+
+  // Derive color frame_id by replacing depth_optical_frame suffix with color_optical_frame
+  color_frame_id_ = frame_id_;
+  {
+    const std::string from = "depth_optical_frame";
+    const std::string to   = "color_optical_frame";
+    auto pos = color_frame_id_.rfind(from);
+    if (pos != std::string::npos)
+      color_frame_id_.replace(pos, from.size(), to);
+  }
 
   print_debug("[ImagePublisher] Constructor: Starting OpenGL initialization\n");
 
@@ -679,9 +691,10 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   RCLCPP_DEBUG(nh_->get_logger(), "Creating publishers...");
   // color_pub_ = nh_->create_publisher<sensor_msgs::msg::Image>(color_topic_name, qos);
   image_transport::ImageTransport it(nh_);
-  color_pub_ = it.advertise(color_topic_name, qos.get_rmw_qos_profile());
-  depth_pub_ = it.advertise(depth_topic_name, qos.get_rmw_qos_profile());
-  info_pub_  = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(info_topic_name, qos);
+  color_pub_      = it.advertise(color_topic_name, qos.get_rmw_qos_profile());
+  depth_pub_      = it.advertise(depth_topic_name, qos.get_rmw_qos_profile());
+  color_info_pub_ = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(color_info_topic_name, qos);
+  depth_info_pub_ = nh_->create_publisher<sensor_msgs::msg::CameraInfo>(depth_info_topic_name, qos);
   point_cloud_pub_
     = nh_->create_publisher<sensor_msgs::msg::PointCloud2>(point_cloud_topic_name, qos);
   RCLCPP_DEBUG(nh_->get_logger(), "Publishers created");
@@ -751,15 +764,17 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   // Update subscriber counts
   publish_color_ = color_pub_.getNumSubscribers() > 0;
   publish_depth_ = depth_pub_.getNumSubscribers() > 0;
-  publish_info_  = info_pub_->get_subscription_count() > 0;
+  publish_info_  = color_info_pub_->get_subscription_count() > 0
+                || depth_info_pub_->get_subscription_count() > 0;
   publish_cloud_ = point_cloud_pub_->get_subscription_count() > 0;
 
   // Log subscriber info periodically
   RCLCPP_DEBUG_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 2000,
-                        "Active subscribers: color=%zu depth=%zu info=%zu cloud=%zu",
+                        "Active subscribers: color=%zu depth=%zu color_info=%zu depth_info=%zu cloud=%zu",
                         static_cast<size_t>(color_pub_.getNumSubscribers()),
                         static_cast<size_t>(depth_pub_.getNumSubscribers()),
-                        static_cast<size_t>(info_pub_->get_subscription_count()),
+                        static_cast<size_t>(color_info_pub_->get_subscription_count()),
+                        static_cast<size_t>(depth_info_pub_->get_subscription_count()),
                         static_cast<size_t>(point_cloud_pub_->get_subscription_count()));
 
   // If no one is listening, do nothing
@@ -1009,10 +1024,11 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   // Get timestamp for all messages
   rclcpp::Time stamp_now = nh_->get_clock()->now();
 
-  // Publish camera info always (needed by RViz2 and other tools)
+  // Publish camera info for both color and depth
   if (publish_info_)
   {
-    info_pub_->publish(buildCameraInfo(stamp_now));
+    color_info_pub_->publish(buildCameraInfo(stamp_now, color_frame_id_));
+    depth_info_pub_->publish(buildCameraInfo(stamp_now, frame_id_));
   }
 
   // Flip color buffer once if needed by any subscriber
@@ -1214,11 +1230,12 @@ void ImagePublisher::free()
   RCLCPP_INFO(nh_->get_logger(), "ImagePublisher cleanup complete");
 }
 
-sensor_msgs::msg::CameraInfo ImagePublisher::buildCameraInfo(const rclcpp::Time &stamp) const
+sensor_msgs::msg::CameraInfo ImagePublisher::buildCameraInfo(const rclcpp::Time &stamp,
+                                                             const std::string &frame_id) const
 {
   sensor_msgs::msg::CameraInfo info_msg;
   info_msg.header.stamp     = stamp;
-  info_msg.header.frame_id  = frame_id_;
+  info_msg.header.frame_id  = frame_id;
   info_msg.height           = viewport_.height;
   info_msg.width            = viewport_.width;
   info_msg.distortion_model = "plumb_bob";
@@ -1384,7 +1401,7 @@ void ImagePublisher::publishThread()
     sensor_msgs::msg::CameraInfo info_msg;
     if (publish_cloud_)
     {
-      info_msg = buildCameraInfo(stamp_now);
+      info_msg = buildCameraInfo(stamp_now, frame_id_);
     }
 
     // --- Publish Point Cloud ---
@@ -1475,7 +1492,7 @@ void ImagePublisher::publishThread()
 
         // Scale camera intrinsics
         const double scale = 1.0 / point_cloud_downsample_;
-        sensor_msgs::msg::CameraInfo scaled_info = buildCameraInfo(stamp_now);
+        sensor_msgs::msg::CameraInfo scaled_info = buildCameraInfo(stamp_now, frame_id_);
         scaled_info.width  = small_w;
         scaled_info.height = small_h;
         scaled_info.k[0] *= scale; // fx
