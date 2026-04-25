@@ -10,7 +10,7 @@
 namespace MujocoRosUtils
 {
 
-constexpr char ATTR_FRAME_ID[]                = "frame_id";
+constexpr char ATTR_COLOR_FRAME_ID[]                = "frame_id";
 constexpr char ATTR_PUBLISH_RATE[]            = "publish_rate";
 constexpr char ATTR_OUTPUT_TF[]               = "output_tf";
 constexpr char ATTR_TF_CHILD_FRAME_ID[]       = "tf_child_frame_id";
@@ -25,7 +25,7 @@ void PosePublisher::RegisterPlugin()
   plugin.name = "MujocoRosUtils::PosePublisher";
   plugin.capabilityflags |= mjPLUGIN_SENSOR;
 
-  const char * attributes[] = {ATTR_FRAME_ID,     ATTR_POSE_TOPIC_NAME, ATTR_VEL_TOPIC_NAME,
+  const char * attributes[] = {ATTR_COLOR_FRAME_ID,     ATTR_POSE_TOPIC_NAME, ATTR_VEL_TOPIC_NAME,
                                ATTR_PUBLISH_RATE, ATTR_OUTPUT_TF,       ATTR_TF_CHILD_FRAME_ID};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
@@ -79,7 +79,7 @@ void PosePublisher::RegisterPlugin()
 PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_id)
 {
   // frame_id
-  const char * frame_id_char = mj_getPluginConfig(m, plugin_id, ATTR_FRAME_ID);
+  const char * frame_id_char = mj_getPluginConfig(m, plugin_id, ATTR_COLOR_FRAME_ID);
   std::string frame_id = "";
   if(frame_id_char && strlen(frame_id_char) > 0)
   {

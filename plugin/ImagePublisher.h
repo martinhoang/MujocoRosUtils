@@ -75,7 +75,8 @@ protected:
       \param m model
       \param d data
       \param sensor_id sensor ID
-      \param frame_id frame ID of topics header or TF parent
+      \param color_frame_id frame ID of topics header or TF parent
+      \param depth_frame_id frame ID of topics header or TF parent for depth image (optional, defaults to color_frame_id if not provided)
       \param topic_namespace namespace prefix for all topics
       \param color_topic_name topic name of color image
       \param depth_topic_name topic name of depth image
@@ -87,13 +88,27 @@ protected:
       \param width image width
       \param publish_rate publish rate
   */
-  ImagePublisher(const mjModel *m, mjData *d, int sensor_id, const std::string &frame_id,
-                 const std::string &topic_namespace, std::string color_topic_name,
-                 std::string depth_topic_name, std::string info_topic_name,
-                 std::string point_cloud_topic_name, bool rotate_point_cloud,
-                 const std::string &point_cloud_rotation_preset, int height, int width,
-                 mjtNum publish_rate, double min_range, double max_range, ReadbackMode readback_mode,
-                 bool enable_parallel, int point_cloud_downsample);
+  ImagePublisher(
+      const mjModel *m, 
+      mjData *d, 
+      int sensor_id, 
+      const std::string &color_frame_id,             
+      const std::string &depth_frame_id,
+      const std::string &topic_namespace, 
+      std::string color_topic_name,
+      std::string depth_topic_name, 
+      std::string info_topic_name,
+      std::string point_cloud_topic_name, 
+      bool rotate_point_cloud, 
+      const std::string &point_cloud_rotation_preset, 
+      int height, int width,
+      mjtNum publish_rate,
+      double min_range,
+      double max_range,
+      ReadbackMode readback_mode,
+      bool enable_parallel,
+      int point_cloud_downsample
+  );
 
 protected:
   //! MuJoCo model
@@ -108,6 +123,7 @@ protected:
   //! Frame ID
   std::string frame_id_       = "";
   std::string color_frame_id_ = "";
+  std::string depth_frame_id_ = "";
 
   ReadbackMode readback_mode_   = ReadbackMode::Pbo;
   bool         use_pbo_readback_ = true;
