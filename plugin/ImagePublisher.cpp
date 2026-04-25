@@ -550,6 +550,10 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   print_debug("[ImagePublisher] Constructor: glfwInit() succeeded\n");
 
   // Create invisible window, single-buffered
+  // Reset all hints to defaults first — on sim relaunch glfwInit() is a no-op
+  // (GLFW stays initialized), so leftover hints from the previous instance
+  // would persist without this call.
+  glfwDefaultWindowHints();
   glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
   glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_NATIVE_CONTEXT_API);
   // Use compatibility profile (requires OpenGL 3.2+) to allow MuJoCo's display lists
@@ -1011,6 +1015,12 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
       mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
     }
 
+    // Release the plugin's GL context so the MuJoCo viewer can reclaim its
+    // own context cleanly on the next frame.  Without this, the viewer must
+    // always call glfwMakeContextCurrent under contention, which can produce
+    // inconsistent GL state on simulation relaunch.
+    glfwMakeContextCurrent(nullptr);
+
     auto gl_end = std::chrono::steady_clock::now();
     auto gl_ms
       = std::chrono::duration_cast<std::chrono::microseconds>(gl_end - gl_start).count() / 1000.0;
@@ -1218,6 +1228,14 @@ void ImagePublisher::free()
     RCLCPP_DEBUG(nh_->get_logger(), "Thread joined");
   }
 
+  // All GL cleanup MUST happen with the plugin's own context current.
+  // Without this, the calls silently corrupt the viewer's GL state or leak
+  // GPU resources, causing incorrect depth rendering on the next plugin init.
+  if (window_)
+  {
+    glfwMakeContextCurrent(window_);
+  }
+
   RCLCPP_DEBUG(nh_->get_logger(), "Deleting PBOs");
   for (int i = 0; i < PBO_COUNT; ++i)
   {
@@ -1240,6 +1258,9 @@ void ImagePublisher::free()
   RCLCPP_DEBUG(nh_->get_logger(), "Destroying GLFW window");
   if (window_)
   {
+    // Release context before destroying window so the viewer can cleanly
+    // reclaim its own context on the next frame.
+    glfwMakeContextCurrent(nullptr);
     glfwDestroyWindow(window_);
     window_ = nullptr;
   }

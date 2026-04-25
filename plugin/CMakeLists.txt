@@ -27,6 +27,7 @@ ament_target_dependencies(
   PUBLIC
   rclcpp
   std_msgs
+  std_srvs
   geometry_msgs
   visualization_msgs
   tf2_ros

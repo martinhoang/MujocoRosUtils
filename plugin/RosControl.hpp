@@ -6,6 +6,7 @@
 #include <mujoco_system.hpp>
 #include <pluginlib/class_loader.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include <atomic>
 #include <memory>
@@ -47,6 +48,10 @@ protected:
   // Initialization state management
   bool        initialized_ = false;
   std::string config_file_path_;
+
+  // Simulation reset — set by service callback, applied in compute() to avoid mid-step races
+  std::atomic<bool>                                         reset_requested_{false};
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        reset_service_;
 
   static inline std::atomic<int> ros_control_instances_{0};
 };

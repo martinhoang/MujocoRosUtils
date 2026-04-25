@@ -1,3 +1,4 @@
+#include <mujoco/mujoco.h>   // provides mjVERSION_HEADER
 #include <mujoco/mjplugin.h>
 
 #include "ActuatorCommand.h"
@@ -13,7 +14,13 @@
 namespace MujocoRosUtils
 {
 
+// mjPLUGIN_LIB_INIT gained a required name argument in MuJoCo 3.8.0 to avoid
+// initialization function name collisions between plugins.
+#if mjVERSION_HEADER >= 380
+mjPLUGIN_LIB_INIT(MujocoRosUtils)
+#else
 mjPLUGIN_LIB_INIT
+#endif
 {
   ClockPublisher::RegisterPlugin();
   PosePublisher::RegisterPlugin();

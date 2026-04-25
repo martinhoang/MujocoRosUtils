@@ -398,6 +398,19 @@ bool Ros2Control::initialize()
     // Mark initialization as complete
     initialized_ = true;
     RCLCPP_INFO(node_->get_logger(), "Ros2Control initialization completed successfully");
+
+    // Register /reset_simulation service.
+    // Sets an atomic flag; the actual mj_resetData is applied inside compute()
+    // so it runs in the simulation thread rather than mid-step from a service callback.
+    reset_service_ = node_->create_service<std_srvs::srv::Trigger>(
+      "/reset_simulation",
+      [this](const std_srvs::srv::Trigger::Request::SharedPtr,
+             std_srvs::srv::Trigger::Response::SharedPtr res) {
+        reset_requested_ = true;
+        res->success      = true;
+        res->message      = "Simulation reset scheduled — will apply on next compute tick";
+        RCLCPP_INFO(node_->get_logger(), "[RosControl] Simulation reset requested");
+      });
   }
 
   return initialized_;
@@ -502,7 +515,28 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
   // Call ROS callback
   if (rclcpp::ok() && node_ && initialized_)
   {
+    // Apply pending simulation reset.
+    // The flag is set by the /reset_simulation service callback (executor thread).
+    // We apply it here (simulation thread) to keep mjData access single-threaded.
+    if (reset_requested_.exchange(false))
+    {
+      RCLCPP_INFO(node_->get_logger(), "[RosControl] Applying simulation reset");
+      mj_resetData(m, d);
+      last_update_ = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
+      return; // skip this tick; next tick starts from clean initial state
+    }
+
     rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
+
+    // Also handle external resets (e.g. viewer Backspace): sim time jumped backwards.
+    if (now < last_update_)
+    {
+      RCLCPP_INFO(node_->get_logger(),
+                  "[RosControl] Simulation reset detected (%.3f → %.3f s), resetting controller timing",
+                  last_update_.seconds(), now.seconds());
+      last_update_ = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
+    }
+
     rclcpp::Duration duration = now - last_update_;
 
     if (duration.seconds() > control_period_)
