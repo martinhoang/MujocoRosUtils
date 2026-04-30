@@ -522,8 +522,9 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
     {
       RCLCPP_INFO(node_->get_logger(), "[RosControl] Applying simulation reset");
       mj_resetData(m, d);
-      last_update_ = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
-      return; // skip this tick; next tick starts from clean initial state
+      last_update_             = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
+      hardware_reset_pending_  = true;
+      return; // skip this tick; next tick will write initial commands via period=0
     }
 
     rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
@@ -534,22 +535,26 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
       RCLCPP_INFO(node_->get_logger(),
                   "[RosControl] Simulation reset detected (%.3f → %.3f s), resetting controller timing",
                   last_update_.seconds(), now.seconds());
-      last_update_ = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
+      last_update_             = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
+      hardware_reset_pending_  = true;
     }
 
     rclcpp::Duration duration = now - last_update_;
 
     if (duration.seconds() > control_period_)
     {
-      // RCLCPP_INFO(node_->get_logger(), "Controller manager update: %.2f seconds since last
-      // update.", duration.seconds());
       controller_manager_->read(now, duration);
       controller_manager_->update(now, duration);
       last_update_ = now;
     }
 
-    // Write the data back to the model
-    controller_manager_->write(now, duration);
+    // If a reset just happened, force period=0 into write() so MujocoSystem::reset()
+    // fires and d->ctrl is restored to initial values — overriding any stale commands
+    // that the controllers may have computed in the update() above.
+    rclcpp::Duration write_period = hardware_reset_pending_.exchange(false)
+                                      ? rclcpp::Duration{0, 0}
+                                      : duration;
+    controller_manager_->write(now, write_period);
   }
 }
 

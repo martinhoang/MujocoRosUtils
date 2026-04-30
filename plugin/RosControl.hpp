@@ -51,6 +51,10 @@ protected:
 
   // Simulation reset — set by service callback, applied in compute() to avoid mid-step races
   std::atomic<bool>                                         reset_requested_{false};
+  // Set whenever a reset is detected (service or viewer Backspace).
+  // Forces write() with period=0 on the next tick so MujocoSystem::reset() runs
+  // and d->ctrl is held at initial values before any stale controller commands land.
+  std::atomic<bool>                                         hardware_reset_pending_{false};
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        reset_service_;
 
   static inline std::atomic<int> ros_control_instances_{0};

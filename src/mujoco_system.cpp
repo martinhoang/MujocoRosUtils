@@ -116,62 +116,63 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
 
 void MujocoSystem::reset(void)
 {
-  // Reset all joint states
   std::stringstream ss;
   for (auto &joint : impl_->joints_)
   {
     const char *joint_name_char = mj_id2name(impl_->model_, mjOBJ_JOINT, joint.id);
+    std::string joint_name      = (joint_name_char && strlen(joint_name_char) > 0)
+                                    ? joint_name_char
+                                    : "unknown_joint_" + std::to_string(joint.id);
 
-    std::string joint_name;
-    if (joint_name_char && strlen(joint_name_char) > 0)
-    {
-      joint_name = joint_name_char;
-    }
-    else
-    {
-      joint_name = "unknown_joint_" + std::to_string(joint.id);
-    }
-    ss << "Joint '" << joint_name << "' reset to: " << joint.initial_position << std::endl;
-    joint.position                            = joint.initial_position;
-    joint.position_cmd                        = joint.initial_position;
-    joint.velocity                            = joint.initial_velocity;
-    joint.velocity_cmd                        = joint.initial_velocity;
-    joint.effort                              = joint.initial_effort;
-    joint.effort_cmd                          = joint.initial_effort;
-    int joint_data_id_in_qpos                 = impl_->model_->jnt_qposadr[joint.id];
-    impl_->data_->qpos[joint_data_id_in_qpos] = joint.initial_position;
+    ss << "Joint '" << joint_name << "' reset to pos=" << joint.initial_position
+       << " vel=" << joint.initial_velocity << "\n";
 
-    // Initialize all available controllers for this joint
+    // ── mirror variables (also back-fill the command interfaces, which point here) ──
+    joint.position     = joint.initial_position;
+    joint.velocity     = joint.initial_velocity;
+    joint.effort       = joint.initial_effort;
+    joint.position_cmd = joint.initial_position;
+    joint.velocity_cmd = joint.initial_velocity;
+    joint.effort_cmd   = joint.initial_effort;
+
+    // ── MuJoCo physics state ──────────────────────────────────────────────────
+    const int qpos_idx                      = impl_->model_->jnt_qposadr[joint.id];
+    const int dof_idx                       = impl_->model_->jnt_dofadr[joint.id];
+    impl_->data_->qpos[qpos_idx]            = joint.initial_position;
+    impl_->data_->qvel[dof_idx]             = joint.initial_velocity;
+    impl_->data_->qfrc_applied[dof_idx]     = joint.initial_effort;
+
+    // ── MuJoCo actuator commands ─────────────────────────────────────────────
     if (joint.has_position_cmd && joint.position_actuator_id != static_cast<std::size_t>(-1))
-    {
       impl_->data_->ctrl[joint.position_actuator_id] = joint.initial_position;
-    }
     if (joint.has_velocity_cmd && joint.velocity_actuator_id != static_cast<std::size_t>(-1))
-    {
       impl_->data_->ctrl[joint.velocity_actuator_id] = joint.initial_velocity;
-    }
     if (joint.has_effort_cmd && joint.effort_actuator_id != static_cast<std::size_t>(-1))
-    {
       impl_->data_->ctrl[joint.effort_actuator_id] = joint.initial_effort;
+
+    // ── PID state (clears integral windup and error history) ─────────────────
+    if (joint.is_pid_enabled)
+    {
+      joint.position_pid.reset();
+      joint.velocity_pid.reset();
     }
   }
 
-  if (ss.str().length() > 0)
-  {
-    // RCLCPP_INFO(node_->get_logger(), "%s", ss.str().c_str());
-  }
+  if (!ss.str().empty())
+    RCLCPP_DEBUG(node_->get_logger(), "MujocoSystem reset:\n%s", ss.str().c_str());
   else
-  {
     RCLCPP_WARN(node_->get_logger(), "No joints to reset");
-  }
 
-  RCLCPP_DEBUG(node_->get_logger(), "MujocoSystem reset");
+  RCLCPP_DEBUG(node_->get_logger(), "MujocoSystem reset complete");
 }
 
 void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardware_info,
                                    const mjModel                          *m)
 {
+  RCLCPP_INFO(node_->get_logger(), "[register_joints] resizing joints_ to %zu (m=%p d=%p njnt=%ld nq=%ld)",
+              hardware_info.joints.size(), (void*)m, (void*)impl_->data_, (long)m->njnt, (long)m->nq);
   impl_->joints_.resize(hardware_info.joints.size());
+  RCLCPP_INFO(node_->get_logger(), "[register_joints] joints_ resized OK");
 
   // Try to load URDF model for joint limits
   urdf::Model urdf_model;
@@ -416,7 +417,7 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
 
     // Map MuJoCo actuators to this joint's command interfaces
     {
-      for (int idx = 0; idx < m->nu; ++idx)
+      for (int idx = 0; idx < static_cast<int>(m->nu); ++idx)
       {
         // Only actuators that target this joint
         if (m->actuator_trnid[2 * idx] != joint_id)
