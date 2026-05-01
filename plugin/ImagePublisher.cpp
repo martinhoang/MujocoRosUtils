@@ -635,6 +635,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     }
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     print_debug("[ImagePublisher] Constructor: PBOs created successfully\n");
+
+    print_debug("[ImagePublisher] Constructor: PBOs ready\n");
   }
   else
   {
@@ -842,8 +844,14 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     // Update abstract scene
     mjv_updateScene(m, d, &option_, nullptr, &camera_, mjCAT_STATIC | mjCAT_DYNAMIC, &scene_);
 
-    // Render scene in offscreen buffer
+    // Render scene in offscreen buffer.
+    // GL_DEPTH_CLAMP prevents near-plane clipping artifacts: without it, geometry inside the
+    // near plane leaves depth at the clear value (0 = far in reversed-Z), making close objects
+    // appear as see-through holes.  With clamping, those pixels receive depth = 1 (near),
+    // which linearises to the near-plane distance rather than the far-plane distance.
+    glEnable(GL_DEPTH_CLAMP);
     mjr_render(viewport_, &scene_, &context_);
+    glDisable(GL_DEPTH_CLAMP);
 
     if (use_pbo_readback_)
     {
@@ -887,7 +895,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
           glBlitFramebuffer(viewport_.left, viewport_.bottom, viewport_.left + viewport_.width,
                             viewport_.bottom + viewport_.height, viewport_.left, viewport_.bottom,
                             viewport_.left + viewport_.width, viewport_.bottom + viewport_.height,
-                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 
           glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO_r);
           glReadBuffer(GL_COLOR_ATTACHMENT0);
@@ -918,6 +926,8 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
         pbo_sync_[pbo_index_] = nullptr;
       }
 
+      // Color: read from offFBO_r (resolved, no MSAA artifacts).
+      // The READ_FRAMEBUFFER was set to offFBO_r (MSAA) or offFBO above.
       glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_color_[pbo_index_]);
       glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height, GL_RGB,
                    GL_UNSIGNED_BYTE, 0);
@@ -1345,11 +1355,12 @@ void ImagePublisher::publishThread()
     // Precompute constant for depth conversion
     const float depth_scale = 1.0f - near / far;
 
-    // Debug: Log near/far values periodically
+    // Log near/far on the first frame so the operator can verify clip plane distances.
     if (depth_log_count_ == 0)
     {
-      RCLCPP_DEBUG(nh_->get_logger(), "Depth conversion: near=%.4f, far=%.4f, depth_scale=%.6f",
-                   near, far, depth_scale);
+      RCLCPP_DEBUG(nh_->get_logger(),
+                  "[Depth] near=%.4f m, far=%.4f m (znear=%.4f * extent=%.4f)",
+                  near, far, m_->vis.map.znear, m_->stat.extent);
     }
     depth_log_count_ = (depth_log_count_ + 1) % 100;
 

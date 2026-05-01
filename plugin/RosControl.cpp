@@ -518,13 +518,37 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
     // Apply pending simulation reset.
     // The flag is set by the /reset_simulation service callback (executor thread).
     // We apply it here (simulation thread) to keep mjData access single-threaded.
+    //
+    // IMPORTANT: compute() is called from within mj_step() at the passive-forces stage.
+    // mj_resetData() zeros ALL derived state (qM, xpos, xmat, …). If we stop here,
+    // the remaining stages of mj_step() (fwdActuation, fwdAcceleration, Euler) run
+    // with qM=0 → qacc = M⁻¹·f = NaN → physics diverges → sim stops.
+    //
+    // The GUI "Backspace" reset works because it calls mj_resetData+mj_forward
+    // *between* mj_step() calls (from the render thread, with the sim mutex held).
+    //
+    // Our fix: after mj_resetData, manually re-run stages 1–6 of mj_step (kinematics
+    // through fwdVelocity) to restore kinematic consistency BEFORE the remaining
+    // stages continue.  We deliberately skip mj_passive() (we are inside it) and
+    // mj_fwdActuation/Acceleration/Constraint (mj_step() will handle those next).
     if (reset_requested_.exchange(false))
     {
       RCLCPP_INFO(node_->get_logger(), "[RosControl] Applying simulation reset");
       mj_resetData(m, d);
+      // Restore kinematic consistency so remaining mj_step() stages don't see qM=0.
+      mj_kinematics(m, d);       // xpos, xmat, xquat from new qpos
+      mj_comPos(m, d);           // qM (joint-space inertia matrix) — CRITICAL
+      mj_collision(m, d);        // contact detection at initial pose
+      mj_makeConstraint(m, d);   // constraint equations
+      mj_projectConstraint(m, d); // constraint projection
+      mj_fwdVelocity(m, d);      // velocity-dependent terms (qfrc_bias, cacc)
       last_update_             = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
       hardware_reset_pending_  = true;
-      return; // skip this tick; next tick will write initial commands via period=0
+      // Set sim_time_now to post-reset value (d->time = 0) so duration=0 below,
+      // causing read/update to be skipped while write(period=0) still fires on this
+      // same tick to sync ctrl[] to initial positions.
+      sim_time_now.sec     = 0;
+      sim_time_now.nanosec = 0;
     }
 
     rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
@@ -548,9 +572,9 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
       last_update_ = now;
     }
 
-    // If a reset just happened, force period=0 into write() so MujocoSystem::reset()
-    // fires and d->ctrl is restored to initial values — overriding any stale commands
-    // that the controllers may have computed in the update() above.
+    // If a reset just happened, force period=0 into write() so MujocoSystem::write()
+    // syncs all command state back to the post-reset physics state instead of
+    // overwriting qpos/qvel with stale pre-reset commanded values.
     rclcpp::Duration write_period = hardware_reset_pending_.exchange(false)
                                       ? rclcpp::Duration{0, 0}
                                       : duration;
