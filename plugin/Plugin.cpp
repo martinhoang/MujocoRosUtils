@@ -9,6 +9,7 @@
 #include "PosePublisher.h"
 #include "SensorPublisher.h"
 #include "MimicJoint.hpp"
+#include "PoseRandomizer.h"
 #include "RosControl.hpp"
 
 namespace MujocoRosUtils
@@ -30,6 +31,7 @@ mjPLUGIN_LIB_INIT
   SensorPublisher::RegisterPlugin();
   LidarPublisher::RegisterPlugin();
   MimicJoint::RegisterPlugin();
+  PoseRandomizer::RegisterPlugin();
   Ros2Control::RegisterPlugin();
 }
 

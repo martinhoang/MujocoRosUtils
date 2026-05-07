@@ -14,6 +14,7 @@ add_library(
   LidarPublisher.cpp
   mujoco_utils.cpp
   MimicJoint.cpp
+  PoseRandomizer.cpp
   RosControl.cpp
   # mujoco_ros2_control.cpp
   )

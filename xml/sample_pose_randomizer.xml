@@ -1,0 +1,54 @@
+<mujoco model="pose_randomizer_demo">
+  <!--
+    Demonstrates MujocoRosUtils::PoseRandomizer.
+
+    The plugin attaches to any body that owns a <freejoint/> and randomizes
+    its pose at every simulation reset by drawing uniform offsets around the
+    body's nominal position/orientation (taken from m->qpos0).
+
+    Attributes (all optional, default to "0.0 0.0" = no randomization):
+      x_range      "min max"  metres,  world-frame X offset
+      y_range      "min max"  metres,  world-frame Y offset
+      z_range      "min max"  metres,  world-frame Z offset
+      roll_range   "min max"  radians, rotation about world X
+      pitch_range  "min max"  radians, rotation about world Y
+      yaw_range    "min max"  radians, rotation about world Z
+  -->
+
+  <worldbody>
+    <!-- A cube that is randomly placed within ±5 cm in XY and ±30° in yaw -->
+    <body name="object" pos="0 0 0.4">
+      <freejoint/>
+      <geom type="box" size="0.05 0.05 0.05" rgba="0.8 0.3 0.1 1"/>
+
+      <plugin plugin="MujocoRosUtils::PoseRandomizer">
+        <config key="x_range"     value="-0.05 0.05"/>
+        <config key="y_range"     value="-0.05 0.05"/>
+        <config key="z_range"     value="0.0   0.0"/>
+        <config key="roll_range"  value="0.0   0.0"/>
+        <config key="pitch_range" value="0.0   0.0"/>
+        <config key="yaw_range"   value="-0.5236 0.5236"/>  <!-- ±30° -->
+      </plugin>
+    </body>
+
+    <!-- A second object: only Z height varies -->
+    <body name="part2" pos="0.3 0 0.3">
+      <freejoint/>
+      <geom type="sphere" size="0.03" rgba="0.2 0.6 0.9 1"/>
+
+      <plugin plugin="MujocoRosUtils::PoseRandomizer">
+        <config key="z_range" value="-0.02 0.02"/>
+      </plugin>
+    </body>
+
+    <geom name="floor" type="plane" size="2 2 0.1" rgba="0.5 0.5 0.5 1"/>
+  </worldbody>
+
+  <!--
+    Load the shared library so MuJoCo can find the plugin.
+    Adjust the path to match your installation.
+  -->
+  <extension>
+    <plugin plugin="MujocoRosUtils::PoseRandomizer"/>
+  </extension>
+</mujoco>
