@@ -35,6 +35,18 @@ constexpr char ATTR_MAX_RANGE[]                   = "max_range";
 constexpr char ATTR_READBACK_MODE[]               = "readback_mode";
 constexpr char ATTR_PARALLEL_PROCESSING[]         = "parallel_processing";
 constexpr char ATTR_POINT_CLOUD_DOWNSAMPLE[]      = "point_cloud_downsample";
+// Names of the MuJoCo cameras to use for color and depth rendering.
+// When the plugin is attached to xbody (recommended), both keys are required.
+// When attached to a camera (legacy), depth_camera_name defaults to that camera and
+// color_camera_name is optional (defaults to depth camera).
+constexpr char ATTR_DEPTH_CAMERA_NAME[] = "depth_camera_name";
+constexpr char ATTR_COLOR_CAMERA_NAME[] = "color_camera_name";
+
+// Optional: separate render resolution for the depth camera in dual-camera mode.
+// If omitted, defaults to the color camera resolution (height/width).
+// In single-camera mode these are ignored (depth and color share one render).
+constexpr char ATTR_DEPTH_HEIGHT[] = "depth_height";
+constexpr char ATTR_DEPTH_WIDTH[]  = "depth_width";
 
 void ImagePublisher::RegisterPlugin()
 {
@@ -60,7 +72,11 @@ void ImagePublisher::RegisterPlugin()
                               ATTR_MAX_RANGE,
                               ATTR_READBACK_MODE,
                               ATTR_PARALLEL_PROCESSING,
-                              ATTR_POINT_CLOUD_DOWNSAMPLE};
+                              ATTR_POINT_CLOUD_DOWNSAMPLE,
+                              ATTR_DEPTH_CAMERA_NAME,
+                              ATTR_COLOR_CAMERA_NAME,
+                              ATTR_DEPTH_HEIGHT,
+                              ATTR_DEPTH_WIDTH};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
   plugin.attributes = attributes;
@@ -442,10 +458,63 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     mju_error("[ImagePublisher::Create] Plugin not found in sensors!");
     return nullptr;
   }
-  if (m->sensor_objtype[sensor_id] != mjOBJ_CAMERA)
+
+  // Resolve depth camera ID.
+  // Priority: depth_camera_name config key > sensor objname camera (legacy, objtype="camera").
+  // When attached to xbody (recommended), depth_camera_name must be set explicitly.
+  int depth_camera_id = -1;
   {
-    mju_error("[ImagePublisher::Create] Plugin must be attached to a camera!");
-    return nullptr;
+    const char *depth_camera_name_char = mj_getPluginConfig(m, plugin_id, ATTR_DEPTH_CAMERA_NAME);
+    if (depth_camera_name_char && strlen(depth_camera_name_char) > 0)
+    {
+      depth_camera_id = mj_name2id(m, mjOBJ_CAMERA, depth_camera_name_char);
+      if (depth_camera_id < 0)
+      {
+        mju_error("[ImagePublisher] depth_camera_name '%s' not found in model!",
+                  depth_camera_name_char);
+        return nullptr;
+      }
+      print_debug("[ImagePublisher::Create] depth_camera_name=%s (id=%d)\n", depth_camera_name_char,
+                  depth_camera_id);
+    }
+    else if (m->sensor_objtype[sensor_id] == mjOBJ_CAMERA)
+    {
+      // Legacy: plugin attached directly to a camera element; use it as the depth camera.
+      depth_camera_id = m->sensor_objid[sensor_id];
+      print_debug("[ImagePublisher::Create] depth_camera from sensor objname (id=%d)\n",
+                  depth_camera_id);
+    }
+    else
+    {
+      mju_error("[ImagePublisher] depth_camera_name config key is required when plugin is "
+                "attached to an xbody (objtype='xbody').");
+      return nullptr;
+    }
+  }
+
+  // Resolve color camera ID.
+  // Priority: color_camera_name config key > same as depth camera.
+  int color_camera_id = depth_camera_id;
+  {
+    const char *color_camera_name_char = mj_getPluginConfig(m, plugin_id, ATTR_COLOR_CAMERA_NAME);
+    if (color_camera_name_char && strlen(color_camera_name_char) > 0)
+    {
+      int id = mj_name2id(m, mjOBJ_CAMERA, color_camera_name_char);
+      if (id < 0)
+      {
+        mju_error("[ImagePublisher] color_camera_name '%s' not found in model!",
+                  color_camera_name_char);
+        return nullptr;
+      }
+      color_camera_id = id;
+      print_debug("[ImagePublisher::Create] color_camera_name=%s (id=%d)\n", color_camera_name_char,
+                  id);
+    }
+    else
+    {
+      print_debug("[ImagePublisher::Create] color_camera same as depth camera (id=%d)\n",
+                  color_camera_id);
+    }
   }
 
   print_debug("[ImagePublisher::Create] Creating ImagePublisher instance...\n");
@@ -454,10 +523,10 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     sensor_id, width, height, publish_rate);
 
   ImagePublisher *instance = new ImagePublisher(
-    m, d, sensor_id, color_frame_id, depth_frame_id, topic_namespace, color_topic_name,
-    depth_topic_name, info_topic_name, point_cloud_topic_name, rotate_point_cloud,
-    point_cloud_rotation_preset, height, width, publish_rate, min_range, max_range, readback_mode,
-    enable_parallel, point_cloud_downsample);
+    m, d, sensor_id, depth_camera_id, color_camera_id, color_frame_id, depth_frame_id,
+    topic_namespace, color_topic_name, depth_topic_name, info_topic_name, point_cloud_topic_name,
+    rotate_point_cloud, point_cloud_rotation_preset, height, width, publish_rate, min_range,
+    max_range, readback_mode, enable_parallel, point_cloud_downsample);
 
   print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void *)instance);
   return instance;
@@ -465,8 +534,8 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
 
 ImagePublisher::ImagePublisher(const mjModel *m,
                                mjData *, // d
-                               int sensor_id, const std::string &color_frame_id,
-                               const std::string &depth_frame_id,
+                               int sensor_id, int depth_camera_id, int color_camera_id,
+                               const std::string &color_frame_id, const std::string &depth_frame_id,
                                const std::string &topic_namespace, std::string color_topic_name,
                                std::string depth_topic_name, std::string info_topic_name,
                                std::string point_cloud_topic_name, bool rotate_point_cloud,
@@ -476,7 +545,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
                                int point_cloud_downsample)
     : m_(m)
     , sensor_id_(sensor_id)
-    , camera_id_(m->sensor_objid[sensor_id])
+    , camera_id_(depth_camera_id)
+    , color_camera_id_(color_camera_id)
     , color_frame_id_(color_frame_id)
     , depth_frame_id_(depth_frame_id)
     , readback_mode_(readback_mode)
@@ -519,19 +589,31 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   std::string depth_info_topic_name
     = topic_namespace
       + (info_topic_name.empty() ? camera_name + "/depth/camera_info" : info_topic_name);
-  std::string color_info_topic_name = color_topic_name + "/camera_info";
+  // color_info always derived from the color topic path (replace last segment with "camera_info")
+  std::string color_info_topic_name;
+  {
+    const auto pos        = color_topic_name.rfind('/');
+    color_info_topic_name = (pos != std::string::npos)
+                              ? color_topic_name.substr(0, pos + 1) + "camera_info"
+                              : color_topic_name + "/camera_info";
+  }
   point_cloud_topic_name
     = topic_namespace
       + (point_cloud_topic_name.empty() ? camera_name + "/point_cloud" : point_cloud_topic_name);
 
-  // Derive color frame_id by replacing depth_optical_frame suffix with color_optical_frame
-  color_frame_id_ = frame_id_;
+  // Derive color/depth frame_ids as fallbacks when not explicitly configured
+  if (color_frame_id_.empty())
   {
+    color_frame_id_        = frame_id_;
     const std::string from = "depth_optical_frame";
     const std::string to   = "color_optical_frame";
     auto              pos  = color_frame_id_.rfind(from);
     if (pos != std::string::npos)
       color_frame_id_.replace(pos, from.size(), to);
+  }
+  if (depth_frame_id_.empty())
+  {
+    depth_frame_id_ = frame_id_;
   }
 
   print_debug("[ImagePublisher] Constructor: Starting OpenGL initialization\n");
@@ -597,10 +679,20 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   mjr_resizeOffscreen(viewport_.width, viewport_.height, &context_);
   print_debug("[ImagePublisher] Constructor: Offscreen buffers resized\n");
 
-  // Init camera
+  // Init depth camera (used for depth rendering and as the sensor attachment point)
   camera_.type       = mjCAMERA_FIXED;
   camera_.fixedcamid = camera_id_;
   print_debug("[ImagePublisher] Constructor: Camera initialized (fixed cam id=%d)\n", camera_id_);
+
+  // Init color camera (may be the same as depth camera when color_camera_id_ == camera_id_)
+  color_camera_.type       = mjCAMERA_FIXED;
+  color_camera_.fixedcamid = color_camera_id_;
+  if (color_camera_id_ != camera_id_)
+  {
+    print_debug("[ImagePublisher] Constructor: Dual-camera mode enabled (color cam id=%d, "
+                "depth cam id=%d)\n",
+                color_camera_id_, camera_id_);
+  }
 
   print_debug("[ImagePublisher] Constructor: Setting framebuffer to offscreen\n");
   mjr_setBuffer(mjFB_OFFSCREEN, &context_);
@@ -841,189 +933,218 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     // \todo Is it OK to override the current context of OpenGL?
     glfwMakeContextCurrent(window_);
 
-    // Update abstract scene
-    mjv_updateScene(m, d, &option_, nullptr, &camera_, mjCAT_STATIC | mjCAT_DYNAMIC, &scene_);
-
-    // Render scene in offscreen buffer.
-    // GL_DEPTH_CLAMP prevents near-plane clipping artifacts: without it, geometry inside the
-    // near plane leaves depth at the clear value (0 = far in reversed-Z), making close objects
-    // appear as see-through holes.  With clamping, those pixels receive depth = 1 (near),
-    // which linearises to the near-plane distance rather than the far-plane distance.
-    glEnable(GL_DEPTH_CLAMP);
-    mjr_render(viewport_, &scene_, &context_);
-    glDisable(GL_DEPTH_CLAMP);
-
-    if (use_pbo_readback_)
+    if (color_camera_id_ != camera_id_)
     {
-      auto wait_for_sync = [this](int sync_index) {
-        if (!pbo_sync_[sync_index])
-        {
-          return;
-        }
+      // Dual-camera mode: single render pass from the color camera for BOTH color and depth.
+      //
+      // Depth is rendered from the COLOR camera's perspective (same FOV and position), not from
+      // the physical depth sensor position.  This ensures depth(u,v) and color(u,v) land on the
+      // same ray, giving correct pixel-to-pixel correspondence for pointcloud coloring and object
+      // pose estimation.  Off-center objects are no longer skewed by FOV/baseline mismatch.
+      //
+      // This mirrors what the RealSense SDK's "aligned depth to color" stream does in firmware.
+      // In simulation we skip that intermediate step and render everything from one viewpoint.
+      //
+      // The depth camera element in the XML (depth_camera_name) is still used as the sensor
+      // scheduling anchor; it no longer drives the render perspective.
+      mjv_updateScene(m, d, &option_, nullptr, &color_camera_, mjCAT_STATIC | mjCAT_DYNAMIC,
+                      &scene_);
+      glEnable(GL_DEPTH_CLAMP);
+      mjr_render(viewport_, &scene_, &context_);
+      glDisable(GL_DEPTH_CLAMP);
+      mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
+    }
+    else
+    {
+      // Single-camera mode (legacy / default): render once for both color and depth.
 
-        constexpr GLuint64 timeout_ns = 1000000ULL; // 1 ms per wait call
-        int                attempts   = 0;
-        GLenum             wait_state = GL_TIMEOUT_EXPIRED;
+      // Update abstract scene
+      mjv_updateScene(m, d, &option_, nullptr, &camera_, mjCAT_STATIC | mjCAT_DYNAMIC, &scene_);
 
-        while (wait_state == GL_TIMEOUT_EXPIRED && attempts < 200)
-        {
-          wait_state
-            = glClientWaitSync(pbo_sync_[sync_index], GL_SYNC_FLUSH_COMMANDS_BIT, timeout_ns);
-          attempts++;
-        }
+      // Render scene in offscreen buffer.
+      // GL_DEPTH_CLAMP prevents near-plane clipping artifacts: without it, geometry inside the
+      // near plane leaves depth at the clear value (0 = far in reversed-Z), making close objects
+      // appear as see-through holes.  With clamping, those pixels receive depth = 1 (near),
+      // which linearises to the near-plane distance rather than the far-plane distance.
+      glEnable(GL_DEPTH_CLAMP);
+      mjr_render(viewport_, &scene_, &context_);
+      glDisable(GL_DEPTH_CLAMP);
 
-        if (wait_state == GL_WAIT_FAILED && compute_call_count_ <= 5)
-        {
-          RCLCPP_WARN(nh_->get_logger(),
-                      "glClientWaitSync failed for PBO index %d after %d attempts", sync_index,
-                      attempts);
-        }
-
-        glDeleteSync(pbo_sync_[sync_index]);
-        pbo_sync_[sync_index] = nullptr;
-      };
-
-      if (context_.currentBuffer != mjFB_WINDOW)
+      if (use_pbo_readback_)
       {
-        if (context_.offSamples)
-        {
-          glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO);
-          glReadBuffer(GL_COLOR_ATTACHMENT0);
-          glBindFramebuffer(GL_DRAW_FRAMEBUFFER, context_.offFBO_r);
-          glDrawBuffer(GL_COLOR_ATTACHMENT0);
-
-          glBlitFramebuffer(viewport_.left, viewport_.bottom, viewport_.left + viewport_.width,
-                            viewport_.bottom + viewport_.height, viewport_.left, viewport_.bottom,
-                            viewport_.left + viewport_.width, viewport_.bottom + viewport_.height,
-                            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-
-          glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO_r);
-          glReadBuffer(GL_COLOR_ATTACHMENT0);
-        }
-        else
-        {
-          glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO);
-          glReadBuffer(GL_COLOR_ATTACHMENT0);
-        }
-
-        GLenum fbo_status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
-        if (fbo_status != GL_FRAMEBUFFER_COMPLETE && compute_call_count_ <= 5)
-        {
-          RCLCPP_ERROR(nh_->get_logger(), "Framebuffer incomplete! Status: 0x%x", fbo_status);
-        }
-      }
-      else
-      {
-        glReadBuffer(GL_BACK);
-      }
-
-      pbo_index_      = pbo_frame_count_ % PBO_COUNT;
-      pbo_next_index_ = (pbo_frame_count_ + 1) % PBO_COUNT;
-
-      if (pbo_sync_[pbo_index_])
-      {
-        glDeleteSync(pbo_sync_[pbo_index_]);
-        pbo_sync_[pbo_index_] = nullptr;
-      }
-
-      // Color: read from offFBO_r (resolved, no MSAA artifacts).
-      // The READ_FRAMEBUFFER was set to offFBO_r (MSAA) or offFBO above.
-      glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_color_[pbo_index_]);
-      glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height, GL_RGB,
-                   GL_UNSIGNED_BYTE, 0);
-
-      GLenum color_error = glGetError();
-      if (color_error != GL_NO_ERROR && compute_call_count_ <= 5)
-      {
-        RCLCPP_ERROR(nh_->get_logger(),
-                     "glReadPixels color error: 0x%x (using GL_RGB=0x%x, context format was 0x%x)",
-                     color_error, GL_RGB, context_.readPixelFormat);
-      }
-
-      glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_depth_[pbo_index_]);
-      glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height,
-                   GL_DEPTH_COMPONENT, GL_FLOAT, 0);
-
-      GLenum depth_error = glGetError();
-      if (depth_error != GL_NO_ERROR && compute_call_count_ <= 5)
-      {
-        RCLCPP_ERROR(nh_->get_logger(), "glReadPixels depth error: 0x%x", depth_error);
-      }
-
-      glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-
-      pbo_sync_[pbo_index_] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-      if (!pbo_sync_[pbo_index_] && compute_call_count_ <= 5)
-      {
-        RCLCPP_WARN(nh_->get_logger(), "Failed to create GL fence for PBO index %d", pbo_index_);
-      }
-
-      if (pbo_frame_count_ >= PBO_COUNT)
-      {
-        wait_for_sync(pbo_next_index_);
-
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_color_[pbo_next_index_]);
-        unsigned char *color_ptr
-          = static_cast<unsigned char *>(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY));
-        if (color_ptr)
-        {
-          std::memcpy(color_buffer_.get(), color_ptr,
-                      sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
-          glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-        }
-        else
-        {
-          RCLCPP_ERROR(nh_->get_logger(), "Failed to map color PBO!");
-        }
-
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_depth_[pbo_next_index_]);
-        float *depth_ptr = static_cast<float *>(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY));
-        if (depth_ptr)
-        {
-          const size_t pixel_count
-            = static_cast<size_t>(viewport_.width) * static_cast<size_t>(viewport_.height);
-          std::memcpy(depth_buffer_.get(), depth_ptr, sizeof(float) * pixel_count);
-
-          // glReadPixels returns the raw GPU depth map (reversed Z in MuJoCo's pipeline).
-          // When readDepthMap requests ZERONEAR output, mirror mjr_readPixels behavior here.
-          if (context_.readDepthMap == mjDEPTH_ZERONEAR)
+        auto wait_for_sync = [this](int sync_index) {
+          if (!pbo_sync_[sync_index])
           {
-            for (size_t i = 0; i < pixel_count; i++)
-            {
-              depth_buffer_[i] = 1.0f - depth_buffer_[i];
-            }
+            return;
           }
 
-          glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+          constexpr GLuint64 timeout_ns = 1000000ULL; // 1 ms per wait call
+          int                attempts   = 0;
+          GLenum             wait_state = GL_TIMEOUT_EXPIRED;
+
+          while (wait_state == GL_TIMEOUT_EXPIRED && attempts < 200)
+          {
+            wait_state
+              = glClientWaitSync(pbo_sync_[sync_index], GL_SYNC_FLUSH_COMMANDS_BIT, timeout_ns);
+            attempts++;
+          }
+
+          if (wait_state == GL_WAIT_FAILED && compute_call_count_ <= 5)
+          {
+            RCLCPP_WARN(nh_->get_logger(),
+                        "glClientWaitSync failed for PBO index %d after %d attempts", sync_index,
+                        attempts);
+          }
+
+          glDeleteSync(pbo_sync_[sync_index]);
+          pbo_sync_[sync_index] = nullptr;
+        };
+
+        if (context_.currentBuffer != mjFB_WINDOW)
+        {
+          if (context_.offSamples)
+          {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, context_.offFBO_r);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
+
+            glBlitFramebuffer(viewport_.left, viewport_.bottom, viewport_.left + viewport_.width,
+                              viewport_.bottom + viewport_.height, viewport_.left, viewport_.bottom,
+                              viewport_.left + viewport_.width, viewport_.bottom + viewport_.height,
+                              GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO_r);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+          }
+          else
+          {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+          }
+
+          GLenum fbo_status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+          if (fbo_status != GL_FRAMEBUFFER_COMPLETE && compute_call_count_ <= 5)
+          {
+            RCLCPP_ERROR(nh_->get_logger(), "Framebuffer incomplete! Status: 0x%x", fbo_status);
+          }
         }
         else
         {
-          RCLCPP_ERROR(nh_->get_logger(), "Failed to map depth PBO!");
+          glReadBuffer(GL_BACK);
+        }
+
+        pbo_index_      = pbo_frame_count_ % PBO_COUNT;
+        pbo_next_index_ = (pbo_frame_count_ + 1) % PBO_COUNT;
+
+        if (pbo_sync_[pbo_index_])
+        {
+          glDeleteSync(pbo_sync_[pbo_index_]);
+          pbo_sync_[pbo_index_] = nullptr;
+        }
+
+        // Color: read from offFBO_r (resolved, no MSAA artifacts).
+        // The READ_FRAMEBUFFER was set to offFBO_r (MSAA) or offFBO above.
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_color_[pbo_index_]);
+        glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height, GL_RGB,
+                     GL_UNSIGNED_BYTE, 0);
+
+        GLenum color_error = glGetError();
+        if (color_error != GL_NO_ERROR && compute_call_count_ <= 5)
+        {
+          RCLCPP_ERROR(
+            nh_->get_logger(),
+            "glReadPixels color error: 0x%x (using GL_RGB=0x%x, context format was 0x%x)",
+            color_error, GL_RGB, context_.readPixelFormat);
+        }
+
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_depth_[pbo_index_]);
+        glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height,
+                     GL_DEPTH_COMPONENT, GL_FLOAT, 0);
+
+        GLenum depth_error = glGetError();
+        if (depth_error != GL_NO_ERROR && compute_call_count_ <= 5)
+        {
+          RCLCPP_ERROR(nh_->get_logger(), "glReadPixels depth error: 0x%x", depth_error);
         }
 
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+        pbo_sync_[pbo_index_] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (!pbo_sync_[pbo_index_] && compute_call_count_ <= 5)
+        {
+          RCLCPP_WARN(nh_->get_logger(), "Failed to create GL fence for PBO index %d", pbo_index_);
+        }
+
+        if (pbo_frame_count_ >= PBO_COUNT)
+        {
+          wait_for_sync(pbo_next_index_);
+
+          glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_color_[pbo_next_index_]);
+          unsigned char *color_ptr
+            = static_cast<unsigned char *>(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY));
+          if (color_ptr)
+          {
+            std::memcpy(color_buffer_.get(), color_ptr,
+                        sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+          }
+          else
+          {
+            RCLCPP_ERROR(nh_->get_logger(), "Failed to map color PBO!");
+          }
+
+          glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_depth_[pbo_next_index_]);
+          float *depth_ptr = static_cast<float *>(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY));
+          if (depth_ptr)
+          {
+            const size_t pixel_count
+              = static_cast<size_t>(viewport_.width) * static_cast<size_t>(viewport_.height);
+            std::memcpy(depth_buffer_.get(), depth_ptr, sizeof(float) * pixel_count);
+
+            // glReadPixels returns the raw GPU depth map (reversed Z in MuJoCo's pipeline).
+            // When readDepthMap requests ZERONEAR output, mirror mjr_readPixels behavior here.
+            if (context_.readDepthMap == mjDEPTH_ZERONEAR)
+            {
+              for (size_t i = 0; i < pixel_count; i++)
+              {
+                depth_buffer_[i] = 1.0f - depth_buffer_[i];
+              }
+            }
+
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+          }
+          else
+          {
+            RCLCPP_ERROR(nh_->get_logger(), "Failed to map depth PBO!");
+          }
+
+          glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        }
+        else
+        {
+          mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
+        }
+
+        if (context_.currentBuffer != mjFB_WINDOW)
+        {
+          mjr_restoreBuffer(&context_);
+        }
+
+        pbo_frame_count_++;
+
+        if (compute_call_count_ <= 3)
+        {
+          RCLCPP_DEBUG(nh_->get_logger(), "GL operations complete (PBO frame %d)",
+                       pbo_frame_count_);
+        }
       }
       else
       {
         mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
       }
 
-      if (context_.currentBuffer != mjFB_WINDOW)
-      {
-        mjr_restoreBuffer(&context_);
-      }
-
-      pbo_frame_count_++;
-
-      if (compute_call_count_ <= 3)
-      {
-        RCLCPP_DEBUG(nh_->get_logger(), "GL operations complete (PBO frame %d)", pbo_frame_count_);
-      }
-    }
-    else
-    {
-      mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
-    }
+    } // end single-camera else block
 
     // Release the plugin's GL context so the MuJoCo viewer can reclaim its
     // own context cleanly on the next frame.  Without this, the viewer must
@@ -1061,8 +1182,10 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   // Publish camera info for both color and depth
   if (publish_info_)
   {
-    color_info_pub_->publish(buildCameraInfo(stamp_now, color_frame_id_));
-    depth_info_pub_->publish(buildCameraInfo(stamp_now, frame_id_));
+    color_info_pub_->publish(buildCameraInfo(stamp_now, color_frame_id_, color_camera_id_));
+    // In dual-camera mode depth is rendered from the color camera, so depth intrinsics = color intrinsics.
+    const int depth_cam_for_info = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
+    depth_info_pub_->publish(buildCameraInfo(stamp_now, depth_frame_id_, depth_cam_for_info));
   }
 
   // Flip color buffer once if needed by any subscriber
@@ -1278,7 +1401,8 @@ void ImagePublisher::free()
 }
 
 sensor_msgs::msg::CameraInfo ImagePublisher::buildCameraInfo(const rclcpp::Time &stamp,
-                                                             const std::string  &frame_id) const
+                                                             const std::string  &frame_id,
+                                                             int                 cam_id) const
 {
   sensor_msgs::msg::CameraInfo info_msg;
   info_msg.header.stamp     = stamp;
@@ -1291,7 +1415,7 @@ sensor_msgs::msg::CameraInfo ImagePublisher::buildCameraInfo(const rclcpp::Time 
   info_msg.r.fill(0.0);
   info_msg.p.fill(0.0);
   double focal_scaling
-    = (1.0 / std::tan((m_->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0)) * viewport_.height / 2.0;
+    = (1.0 / std::tan((m_->cam_fovy[cam_id] * M_PI / 180.0) / 2.0)) * viewport_.height / 2.0;
   info_msg.k[0] = info_msg.p[0] = focal_scaling;
   info_msg.k[2] = info_msg.p[2] = static_cast<double>(viewport_.width) / 2.0;
   info_msg.k[4] = info_msg.p[5] = focal_scaling;
@@ -1358,9 +1482,8 @@ void ImagePublisher::publishThread()
     // Log near/far on the first frame so the operator can verify clip plane distances.
     if (depth_log_count_ == 0)
     {
-      RCLCPP_DEBUG(nh_->get_logger(),
-                  "[Depth] near=%.4f m, far=%.4f m (znear=%.4f * extent=%.4f)",
-                  near, far, m_->vis.map.znear, m_->stat.extent);
+      RCLCPP_DEBUG(nh_->get_logger(), "[Depth] near=%.4f m, far=%.4f m (znear=%.4f * extent=%.4f)",
+                   near, far, m_->vis.map.znear, m_->stat.extent);
     }
     depth_log_count_ = (depth_log_count_ + 1) % 100;
 
@@ -1449,7 +1572,8 @@ void ImagePublisher::publishThread()
     sensor_msgs::msg::CameraInfo info_msg;
     if (publish_cloud_)
     {
-      info_msg = buildCameraInfo(stamp_now, frame_id_);
+      const int depth_cam_for_info = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
+      info_msg = buildCameraInfo(stamp_now, depth_frame_id_, depth_cam_for_info);
     }
 
     // --- Publish Point Cloud ---
@@ -1471,7 +1595,7 @@ void ImagePublisher::publishThread()
       // Create a temporary color message for the conversion function
       sensor_msgs::msg::Image color_msg_for_cloud;
       color_msg_for_cloud.header.stamp    = stamp_now;
-      color_msg_for_cloud.header.frame_id = frame_id_;
+      color_msg_for_cloud.header.frame_id = color_frame_id_;
       color_msg_for_cloud.height          = viewport_.height;
       color_msg_for_cloud.width           = viewport_.width;
       color_msg_for_cloud.encoding        = "rgb8";
@@ -1541,10 +1665,13 @@ void ImagePublisher::publishThread()
         cv_ptr_for_cloud = cv_small;
 
         // Scale camera intrinsics
-        const double                 scale       = 1.0 / point_cloud_downsample_;
-        sensor_msgs::msg::CameraInfo scaled_info = buildCameraInfo(stamp_now, frame_id_);
-        scaled_info.width                        = small_w;
-        scaled_info.height                       = small_h;
+        const double                 scale = 1.0 / point_cloud_downsample_;
+        const int                    depth_cam_for_info
+          = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
+        sensor_msgs::msg::CameraInfo scaled_info
+          = buildCameraInfo(stamp_now, depth_frame_id_, depth_cam_for_info);
+        scaled_info.width  = small_w;
+        scaled_info.height = small_h;
         scaled_info.k[0] *= scale; // fx
         scaled_info.k[2] *= scale; // cx
         scaled_info.k[4] *= scale; // fy

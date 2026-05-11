@@ -10,7 +10,7 @@
 namespace MujocoRosUtils
 {
 
-constexpr char ATTR_COLOR_FRAME_ID[]                = "frame_id";
+constexpr char ATTR_COLOR_FRAME_ID[]          = "frame_id";
 constexpr char ATTR_PUBLISH_RATE[]            = "publish_rate";
 constexpr char ATTR_OUTPUT_TF[]               = "output_tf";
 constexpr char ATTR_TF_CHILD_FRAME_ID[]       = "tf_child_frame_id";

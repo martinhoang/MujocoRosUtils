@@ -89,18 +89,20 @@ protected:
       \param publish_rate publish rate
   */
   ImagePublisher(
-      const mjModel *m, 
-      mjData *d, 
-      int sensor_id, 
-      const std::string &color_frame_id,             
+      const mjModel *m,
+      mjData *d,
+      int sensor_id,
+      int depth_camera_id,
+      int color_camera_id,
+      const std::string &color_frame_id,
       const std::string &depth_frame_id,
-      const std::string &topic_namespace, 
+      const std::string &topic_namespace,
       std::string color_topic_name,
-      std::string depth_topic_name, 
+      std::string depth_topic_name,
       std::string info_topic_name,
-      std::string point_cloud_topic_name, 
-      bool rotate_point_cloud, 
-      const std::string &point_cloud_rotation_preset, 
+      std::string point_cloud_topic_name,
+      bool rotate_point_cloud,
+      const std::string &point_cloud_rotation_preset,
       int height, int width,
       mjtNum publish_rate,
       double min_range,
@@ -117,8 +119,11 @@ protected:
   //! Sensor ID
   int sensor_id_ = -1;
 
-  //! Camera ID
+  //! Camera ID (depth camera — the sensor attachment point, used for depth rendering)
   int camera_id_ = -1;
+
+  //! Color camera ID (used for color rendering; equals camera_id_ in single-camera mode)
+  int color_camera_id_ = -1;
 
   //! Frame ID
   std::string frame_id_       = "";
@@ -166,7 +171,8 @@ protected:
   //! Variables for visualization and rendering in MuJoCo
   //! @{
   mjvScene    scene_;
-  mjvCamera   camera_;
+  mjvCamera   camera_;       // depth camera (sensor attachment)
+  mjvCamera   color_camera_; // color camera (equals camera_ in single-camera mode)
   mjvOption   option_;
   mjrContext  context_;
   GLFWwindow *window_;
@@ -239,9 +245,11 @@ protected:
   //! Reusable buffer for RGB-flipped color data in point cloud generation
   std::vector<unsigned char> color_flipped_rgb_;
 
-  //! Build a CameraInfo message from current camera parameters
+  //! Build a CameraInfo message from current camera parameters.
+  //! cam_id selects which MuJoCo camera's FOV to use for intrinsics.
   sensor_msgs::msg::CameraInfo buildCameraInfo(const rclcpp::Time &stamp,
-                                               const std::string &frame_id) const;
+                                               const std::string &frame_id,
+                                               int cam_id) const;
 };
 
 } // namespace MujocoRosUtils
