@@ -39,7 +39,7 @@ public:
   CallbackReturn on_deactivate(const State &previous_state);
 
   /// Initialization of the hardware interface from data parsed from the robot's URDF.
-  CallbackReturn on_init(const hardware_interface::HardwareInfo &hardware_info) override;
+  CallbackReturn on_init(const hardware_interface::HardwareComponentInterfaceParams &params) override;
   std::vector<hardware_interface::StateInterface>   export_state_interfaces() override;
   std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
   return_type read(const rclcpp::Time &time, const rclcpp::Duration &period) override;

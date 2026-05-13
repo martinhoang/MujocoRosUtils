@@ -1,5 +1,6 @@
 #include "mujoco_system.hpp"
 
+#include "hardware_interface/types/hardware_component_interface_params.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -509,10 +510,9 @@ CallbackReturn MujocoSystem::on_deactivate(const State &previous_state)
   return CallbackReturn::SUCCESS;
 }
 
-CallbackReturn MujocoSystem::on_init(const HardwareInfo &hardware_info)
+CallbackReturn MujocoSystem::on_init(const hardware_interface::HardwareComponentInterfaceParams &params)
 {
-  // Initialize the hardware interface from the URDF data
-  if (hardware_interface::SystemInterface::on_init(hardware_info) != CallbackReturn::SUCCESS)
+  if (hardware_interface::SystemInterface::on_init(params) != CallbackReturn::SUCCESS)
   {
     return CallbackReturn::ERROR;
   }
