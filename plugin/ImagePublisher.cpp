@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <iostream>
 #include <mujoco/mujoco.h>
 #include <sensor_msgs/image_encodings.hpp>
@@ -48,6 +48,10 @@ constexpr char ATTR_COLOR_CAMERA_NAME[] = "color_camera_name";
 constexpr char ATTR_DEPTH_HEIGHT[] = "depth_height";
 constexpr char ATTR_DEPTH_WIDTH[]  = "depth_width";
 
+// Per-camera depth clip planes (metres).  0 = use model global (vis.map.znear/zfar * stat.extent).
+constexpr char ATTR_DEPTH_NEAR[] = "depth_near";
+constexpr char ATTR_DEPTH_FAR[]  = "depth_far";
+
 void ImagePublisher::RegisterPlugin()
 {
   mjpPlugin plugin;
@@ -76,7 +80,9 @@ void ImagePublisher::RegisterPlugin()
                               ATTR_DEPTH_CAMERA_NAME,
                               ATTR_COLOR_CAMERA_NAME,
                               ATTR_DEPTH_HEIGHT,
-                              ATTR_DEPTH_WIDTH};
+                              ATTR_DEPTH_WIDTH,
+                              ATTR_DEPTH_NEAR,
+                              ATTR_DEPTH_FAR};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
   plugin.attributes = attributes;
@@ -364,6 +370,24 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     print_debug("[ImagePublisher::Create] max_range not specified, using default=%f\n", max_range);
   }
 
+  // depth_near / depth_far — per-camera clip planes for depth rendering and linearisation.
+  // 0 (default) = use MuJoCo model globals (vis.map.znear * stat.extent, zfar * stat.extent).
+  // Setting sensible camera-specific values (e.g. depth_near="0.1" depth_far="5.0") avoids
+  // the typical "mostly black/white" depth display caused by the very large global far plane.
+  float depth_near = 0.0f;
+  float depth_far  = 0.0f;
+  {
+    const char *c = mj_getPluginConfig(m, plugin_id, ATTR_DEPTH_NEAR);
+    if (c && strlen(c) > 0)
+      depth_near = static_cast<float>(strtod(c, nullptr));
+  }
+  {
+    const char *c = mj_getPluginConfig(m, plugin_id, ATTR_DEPTH_FAR);
+    if (c && strlen(c) > 0)
+      depth_far = static_cast<float>(strtod(c, nullptr));
+  }
+  print_debug("[ImagePublisher::Create] depth_near=%.3f, depth_far=%.3f\n", depth_near, depth_far);
+
   ImagePublisher::ReadbackMode readback_mode = ImagePublisher::ReadbackMode::Legacy;
   const char *readback_mode_char             = mj_getPluginConfig(m, plugin_id, ATTR_READBACK_MODE);
   if (readback_mode_char && strlen(readback_mode_char) > 0)
@@ -526,7 +550,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     m, d, sensor_id, depth_camera_id, color_camera_id, color_frame_id, depth_frame_id,
     topic_namespace, color_topic_name, depth_topic_name, info_topic_name, point_cloud_topic_name,
     rotate_point_cloud, point_cloud_rotation_preset, height, width, publish_rate, min_range,
-    max_range, readback_mode, enable_parallel, point_cloud_downsample);
+    max_range, readback_mode, enable_parallel, point_cloud_downsample, depth_near, depth_far);
 
   print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void *)instance);
   return instance;
@@ -542,7 +566,7 @@ ImagePublisher::ImagePublisher(const mjModel *m,
                                const std::string &point_cloud_rotation_preset, int height,
                                int width, mjtNum publish_rate, double min_range, double max_range,
                                ReadbackMode readback_mode, bool enable_parallel,
-                               int point_cloud_downsample)
+                               int point_cloud_downsample, float depth_near, float depth_far)
     : m_(m)
     , sensor_id_(sensor_id)
     , camera_id_(depth_camera_id)
@@ -556,6 +580,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     , viewport_({0, 0, width, height})
     , enable_parallel_processing_(enable_parallel)
     , point_cloud_downsample_(std::max(point_cloud_downsample, 1))
+    , depth_near_(depth_near)
+    , depth_far_(depth_far)
     , last_fps_log_time_(std::chrono::steady_clock::now())
     , last_frame_time_(std::chrono::steady_clock::now())
     , last_color_log_(std::chrono::steady_clock::now())
@@ -662,6 +688,10 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   print_debug("[ImagePublisher] Constructor: Initializing MuJoCo visualization structures\n");
   mjv_defaultCamera(&camera_);
   mjv_defaultOption(&option_);
+  // Sentinel: negative label is never a valid mjtLabel value.
+  // LidarPublisher::visualize() checks for this and skips adding debug geoms (e.g. ray lines)
+  // so they do not appear in the offscreen camera images.
+  option_.label = -1;
   mjv_defaultScene(&scene_);
   mjr_defaultContext(&context_);
   print_debug("[ImagePublisher] Constructor: MuJoCo defaults initialized\n");
@@ -949,6 +979,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
       // scheduling anchor; it no longer drives the render perspective.
       mjv_updateScene(m, d, &option_, nullptr, &color_camera_, mjCAT_STATIC | mjCAT_DYNAMIC,
                       &scene_);
+      applyDepthClip(scene_);
       glEnable(GL_DEPTH_CLAMP);
       mjr_render(viewport_, &scene_, &context_);
       glDisable(GL_DEPTH_CLAMP);
@@ -960,6 +991,7 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
 
       // Update abstract scene
       mjv_updateScene(m, d, &option_, nullptr, &camera_, mjCAT_STATIC | mjCAT_DYNAMIC, &scene_);
+      applyDepthClip(scene_);
 
       // Render scene in offscreen buffer.
       // GL_DEPTH_CLAMP prevents near-plane clipping artifacts: without it, geometry inside the
@@ -1473,8 +1505,13 @@ void ImagePublisher::publishThread()
     auto depth_start = std::chrono::steady_clock::now();
 
     // --- Process Depth Data ---
-    float near = static_cast<float>(m_->vis.map.znear * m_->stat.extent);
-    float far  = static_cast<float>(m_->vis.map.zfar * m_->stat.extent);
+    // Use the scene's actual frustum values — these may have been overridden by applyDepthClip()
+    // to camera-specific clip planes (depth_near / depth_far config keys).  Falling back to the
+    // model global (vis.map.znear * stat.extent) produces a very large far range (e.g. 250 m for
+    // a room-scale scene) which makes depth images appear nearly binary (all-black near, all-white
+    // far) in RViz2 and other visualisers.
+    float near = scene_.camera[0].frustum_near;
+    float far  = scene_.camera[0].frustum_far;
 
     // Precompute constant for depth conversion
     const float depth_scale = 1.0f - near / far;
@@ -1703,13 +1740,21 @@ void ImagePublisher::publishThread()
       sensor_msgs::PointCloud2Modifier pcd_modifier(*cloud_msg);
       pcd_modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
 
+      const int pcl_threads = shouldParallelizeRows(static_cast<int>(cloud_msg->height))
+#ifdef _OPENMP
+                                ? omp_get_max_threads()
+#else
+                                ? 1
+#endif
+                                : 1;
+
       if (depth_msg_for_cloud->encoding == sensor_msgs::image_encodings::TYPE_16UC1)
       {
         depthimage_to_pointcloud2::convert<uint16_t>(
           depth_msg_for_cloud, cloud_msg, cloud_model, range_max_, use_quiet_nan_,
           rotate_point_cloud_ ? point_cloud_rotation_preset_
                               : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
-          cv_ptr_for_cloud, range_min_);
+          cv_ptr_for_cloud, range_min_, pcl_threads);
       }
       else if (depth_msg_for_cloud->encoding == sensor_msgs::image_encodings::TYPE_32FC1)
       {
@@ -1717,7 +1762,7 @@ void ImagePublisher::publishThread()
           depth_msg_for_cloud, cloud_msg, cloud_model, range_max_, use_quiet_nan_,
           rotate_point_cloud_ ? point_cloud_rotation_preset_
                               : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
-          cv_ptr_for_cloud, range_min_);
+          cv_ptr_for_cloud, range_min_, pcl_threads);
       }
       else
       {

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <image_geometry/pinhole_camera_model.h>
+#include <image_geometry/pinhole_camera_model.hpp>
 #include <image_transport/image_transport.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -109,7 +109,9 @@ protected:
       double max_range,
       ReadbackMode readback_mode,
       bool enable_parallel,
-      int point_cloud_downsample
+      int point_cloud_downsample,
+      float depth_near = 0.0f,
+      float depth_far  = 0.0f
   );
 
 protected:
@@ -136,6 +138,31 @@ protected:
 
   //! Point cloud downsample factor (1 = full resolution, 2 = half res, etc.)
   int point_cloud_downsample_ = 1;
+
+  //! Per-camera depth clip planes (metres). 0 = use MuJoCo model globals.
+  //! Setting these prevents the "mostly black/white" depth image caused by the large global far
+  //! plane (vis.map.zfar * stat.extent can be 250 m for a room-scale scene).
+  float depth_near_ = 0.0f;
+  float depth_far_  = 0.0f;
+
+  /** Override scene frustum with per-camera clip planes (if configured).
+   *  Call this immediately after mjv_updateScene() and before mjr_render().
+   *  mjr_render() reads scene.camera[*].frustum_near/far to build the projection matrix, so
+   *  overriding them here changes both the rendering AND the depth buffer linearisation range.
+   */
+  inline void applyDepthClip(mjvScene &scn)
+  {
+    if (depth_near_ > 0.0f)
+    {
+      scn.camera[0].frustum_near = depth_near_;
+      scn.camera[1].frustum_near = depth_near_;
+    }
+    if (depth_far_ > 0.0f)
+    {
+      scn.camera[0].frustum_far = depth_far_;
+      scn.camera[1].frustum_far = depth_far_;
+    }
+  }
 
   //! Rotate point cloud
   bool        rotate_point_cloud_          = false;
