@@ -10,10 +10,15 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <cv_bridge/cv_bridge.hpp>
 #include <iostream>
 #include <mujoco/mujoco.h>
 #include <sensor_msgs/image_encodings.hpp>
+
+#if RCLCPP_VERSION_MAJOR >= 28
+#include <cv_bridge/cv_bridge.hpp>
+#else
+#include <cv_bridge/cv_bridge.h>
+#endif
 
 namespace MujocoRosUtils
 {

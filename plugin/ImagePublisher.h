@@ -1,6 +1,11 @@
 #pragma once
 
+#include <rclcpp/version.h>
+#if RCLCPP_VERSION_MAJOR >= 28
 #include <image_geometry/pinhole_camera_model.hpp>
+#else
+#include <image_geometry/pinhole_camera_model.h>
+#endif
 #include <image_transport/image_transport.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
