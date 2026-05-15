@@ -755,11 +755,18 @@ void LidarPublisher::compute(const mjModel *m, mjData *d, int)
   // Use the last excluded body for mj_multiRay (innermost geom, minimises re-casts).
   // geomgroup_filter_: 1=include group, 0=exclude (MuJoCo API semantics).
   const int multiray_bodyexclude = excluded_body_ids_.empty() ? -1 : excluded_body_ids_.back();
+#if mjVERSION_HEADER >= 3008000
   mj_multiRay(m, d, site_pos, ray_dirs_world_.data(), geomgroup_filter_.data(),
               static_cast<mjtByte>(1), // flg_static: include static geoms
               multiray_bodyexclude, ray_geomid_.data(), ray_dist_.data(),
               nullptr, // normals not needed
               nray_, static_cast<mjtNum>(range_max_));
+#else
+  mj_multiRay(m, d, site_pos, ray_dirs_world_.data(), geomgroup_filter_.data(),
+              static_cast<mjtByte>(1), // flg_static: include static geoms
+              multiray_bodyexclude, ray_geomid_.data(), ray_dist_.data(),
+              nray_, static_cast<mjtNum>(range_max_));
+#endif
 
   // Re-cast any ray that still lands on an excluded body (handles multiple excludes).
   // Each re-cast steps just past the excluded-body hit and calls mj_ray for the next.
@@ -799,9 +806,13 @@ void LidarPublisher::compute(const mjModel *m, mjData *d, int)
           site_pos[2] + dir[2] * new_start,
         };
         int          new_geomid = -1;
-        mjtNum       normal[3]  = {0, 0, 0};
+#if mjVERSION_HEADER >= 3008000
         const mjtNum d_local
-          = mj_ray(m, d, new_origin, dir, geomgroup_filter_.data(), 1, -1, &new_geomid, normal);
+          = mj_ray(m, d, new_origin, dir, geomgroup_filter_.data(), 1, -1, &new_geomid, nullptr);
+#else
+        const mjtNum d_local
+          = mj_ray(m, d, new_origin, dir, geomgroup_filter_.data(), 1, -1, &new_geomid);
+#endif
         if (d_local >= 0)
         {
           ray_dist_[i]   = new_start + d_local; // distance from site_pos

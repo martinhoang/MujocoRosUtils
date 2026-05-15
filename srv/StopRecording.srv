@@ -1,0 +1,11 @@
+# StopRecording.srv — finalize and flush the active recording
+#
+# Request
+bool discard  # If true, discard (delete) the recording without saving to disk
+
+---
+# Response
+bool    success
+string  message
+int32   frames_recorded
+float64 duration_seconds
