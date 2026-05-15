@@ -14,6 +14,11 @@
 #include <mujoco/mujoco.h>
 #include <sensor_msgs/image_encodings.hpp>
 
+#ifdef HAS_CUDA
+#include "depth_processing_cuda.cuh"
+#include <cuda_runtime.h>
+#endif
+
 #if RCLCPP_VERSION_MAJOR >= 28
 #include <cv_bridge/cv_bridge.hpp>
 #else
@@ -57,6 +62,13 @@ constexpr char ATTR_DEPTH_WIDTH[]  = "depth_width";
 constexpr char ATTR_DEPTH_NEAR[] = "depth_near";
 constexpr char ATTR_DEPTH_FAR[]  = "depth_far";
 
+// Optional: override the SimDataRegistry key used for in-process data sharing.
+// When set, this value is used instead of the ROS namespace as the registry key,
+// allowing each camera to have a unique registry key even when multiple cameras
+// share the same ROS namespace.
+// Example: <config key="registry_key" value="camera_front"/>
+constexpr char ATTR_REGISTRY_KEY[] = "registry_key";
+
 void ImagePublisher::RegisterPlugin()
 {
   mjpPlugin plugin;
@@ -87,7 +99,8 @@ void ImagePublisher::RegisterPlugin()
                               ATTR_DEPTH_HEIGHT,
                               ATTR_DEPTH_WIDTH,
                               ATTR_DEPTH_NEAR,
-                              ATTR_DEPTH_FAR};
+                              ATTR_DEPTH_FAR,
+                              ATTR_REGISTRY_KEY};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
   plugin.attributes = attributes;
@@ -418,6 +431,16 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
       readback_mode = ImagePublisher::ReadbackMode::Pbo;
       print_debug("[ImagePublisher::Create] readback_mode=pbo\n");
     }
+    else if (readback_mode_str == "cuda")
+    {
+#ifdef HAS_CUDA
+      readback_mode = ImagePublisher::ReadbackMode::Cuda;
+      print_debug("[ImagePublisher::Create] readback_mode=cuda\n");
+#else
+      print_debug("[ImagePublisher::Create] readback_mode=cuda requested but not compiled in — falling back to pbo\n");
+      readback_mode = ImagePublisher::ReadbackMode::Pbo;
+#endif
+    }
   }
   else
   {
@@ -557,6 +580,17 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     rotate_point_cloud, point_cloud_rotation_preset, height, width, publish_rate, min_range,
     max_range, readback_mode, enable_parallel, point_cloud_downsample, depth_near, depth_far);
 
+  // Optional registry_key override: lets a camera use a unique in-process
+  // registry key independently of its ROS topic namespace.  Important when
+  // several cameras share the same namespace (they would otherwise overwrite
+  // each other in SimDataRegistry).
+  const char * rk_char = mj_getPluginConfig(m, plugin_id, ATTR_REGISTRY_KEY);
+  if (rk_char && strlen(rk_char) > 0)
+  {
+    instance->registry_key_ = std::string(rk_char);
+    print_debug("[ImagePublisher::Create] registry_key override=%s\n", rk_char);
+  }
+
   print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void *)instance);
   return instance;
 }
@@ -600,10 +634,38 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   {
     use_pbo_readback_ = true;
   }
+  else if (readback_mode_ == ReadbackMode::Cuda)
+  {
+    use_pbo_readback_ = true; // CUDA path still uses PBO for GL→CPU transfer
+  }
   else // Auto
   {
     use_pbo_readback_ = true; // Default to PBO for Auto mode
   }
+
+#ifdef HAS_CUDA
+  if (readback_mode_ == ReadbackMode::Cuda)
+  {
+    cudaError_t err = cudaSetDevice(0);
+    if (err != cudaSuccess)
+    {
+      RCLCPP_WARN(rclcpp::get_logger("ImagePublisher"),
+                  "CUDA init failed (%s) — falling back to PBO readback",
+                  cudaGetErrorString(err));
+      readback_mode_ = ReadbackMode::Pbo;
+    }
+    else
+    {
+      cudaStreamCreate(reinterpret_cast<cudaStream_t*>(&cuda_stream_));
+      cuda_rot_preset_ = cuda_img_proc::rotationPresetToInt(point_cloud_rotation_preset_);
+    }
+  }
+#endif
+
+  // Build the SimDataRegistry key from the topic namespace (strip trailing slash).
+  registry_key_ = topic_namespace;
+  if (!registry_key_.empty() && registry_key_.back() == '/')
+    registry_key_.pop_back();
 
   std::string camera_name = std::string(mj_id2name(m, mjOBJ_CAMERA, camera_id_));
   if (frame_id_.empty())
@@ -862,7 +924,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   RCLCPP_INFO(nh_->get_logger(), "  Target publish rate: %.1f Hz (skip=%d, timestep=%.4f)",
               publish_rate, publish_skip_, m->opt.timestep);
   RCLCPP_INFO(nh_->get_logger(), "  Readback mode: %s",
-              use_pbo_readback_ ? "PBO (async GPU transfer)" : "Legacy (mjr_readPixels)");
+              readback_mode_ == ReadbackMode::Cuda ? "CUDA (async GPU kernels)"
+              : use_pbo_readback_ ? "PBO (async GPU transfer)" : "Legacy (mjr_readPixels)");
 #ifdef _OPENMP
   RCLCPP_INFO(nh_->get_logger(), "  Parallel processing: %s (OpenMP available)",
               enable_parallel_processing_ ? "ENABLED" : "DISABLED");
@@ -925,8 +988,13 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     static_cast<size_t>(depth_info_pub_->get_subscription_count()),
     static_cast<size_t>(point_cloud_pub_->get_subscription_count()));
 
-  // If no one is listening, do nothing
-  if (!publish_color_ && !publish_depth_ && !publish_info_ && !publish_cloud_)
+  // Only push to the registry if a SimDataAggregator has registered interest in this key.
+  // When no aggregator is present in the XML the consumer count is zero, so this is a
+  // single lock + map-lookup that returns false — no flip, no copy, no memory overhead.
+  const bool has_registry_consumers =
+      !registry_key_.empty() && SimDataRegistry::instance().hasCameraConsumer(registry_key_);
+  if (!publish_color_ && !publish_depth_ && !publish_info_ && !publish_cloud_
+      && !has_registry_consumers)
   {
     return;
   }
@@ -1225,8 +1293,8 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     depth_info_pub_->publish(buildCameraInfo(stamp_now, depth_frame_id_, depth_cam_for_info));
   }
 
-  // Flip color buffer once if needed by any subscriber
-  bool need_color_flip = publish_color_ || publish_cloud_;
+  // Flip color buffer once if needed by any subscriber or the in-process registry
+  bool need_color_flip = publish_color_ || publish_cloud_ || has_registry_consumers;
   if (need_color_flip)
   {
     auto flip_start = std::chrono::steady_clock::now();
@@ -1283,6 +1351,20 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
       }
       total_flip_time_   = 0.0;
       flip_sample_count_ = 0;
+    }
+
+    // Push to the in-process SimDataRegistry so SimDataAggregator (and any other
+    // code in the same process) can read the frame without going through DDS.
+    if (has_registry_consumers && color_buffer_flipped_)
+    {
+      CameraFrame frame;
+      frame.height   = viewport_.height;
+      frame.width    = viewport_.width;
+      frame.sim_time = d->time;
+      frame.valid    = true;
+      const size_t n = static_cast<size_t>(viewport_.height) * viewport_.width * 3;
+      frame.data.assign(color_buffer_flipped_.get(), color_buffer_flipped_.get() + n);
+      SimDataRegistry::instance().updateCameraFrame(registry_key_, std::move(frame));
     }
   }
 
@@ -1425,6 +1507,21 @@ void ImagePublisher::free()
   mjr_freeContext(&context_);
   mjv_freeScene(&scene_);
 
+#ifdef HAS_CUDA
+  if (cuda_bufs_.d_depth_raw)    cudaFree(cuda_bufs_.d_depth_raw);
+  if (cuda_bufs_.d_depth_linear) cudaFree(cuda_bufs_.d_depth_linear);
+  if (cuda_bufs_.d_color_raw)    cudaFree(cuda_bufs_.d_color_raw);
+  if (cuda_bufs_.d_cloud)        cudaFree(cuda_bufs_.d_cloud);
+  if (cuda_bufs_.h_depth_linear) cudaFreeHost(cuda_bufs_.h_depth_linear);
+  if (cuda_bufs_.h_cloud)        cudaFreeHost(cuda_bufs_.h_cloud);
+  cuda_bufs_ = {};
+  if (cuda_stream_)
+  {
+    cudaStreamDestroy(static_cast<cudaStream_t>(cuda_stream_));
+    cuda_stream_ = nullptr;
+  }
+#endif
+
   RCLCPP_DEBUG(nh_->get_logger(), "Destroying GLFW window");
   if (window_)
   {
@@ -1549,21 +1646,121 @@ void ImagePublisher::publishThread()
       }
     };
 
-#ifdef _OPENMP
-    if (shouldParallelizeRows(viewport_.height))
+    // Pointer to the linearized, top-down depth buffer used for depth_msg and cloud.
+    // Normally this is local_depth_flipped (CPU path); CUDA path sets it to pinned host memory.
+    const float* depth_for_msg = local_depth_flipped;
+
+    // Pointer to the raw RGB (bottom-up) color buffer for the cloud.
+    // In CUDA mode the kernel handles the y-flip itself, so this points at the raw buffer.
+    bool cuda_cloud_ready = false;  // set true when CUDA has filled cuda_bufs_.h_cloud
+
+#ifdef HAS_CUDA
+    if (readback_mode_ == ReadbackMode::Cuda)
     {
-#pragma omp parallel for schedule(static)
-      for (int h = 0; h < viewport_.height; h++)
+      const int W    = viewport_.width;
+      const int H    = viewport_.height;
+      const int ps   = 16;  // point_step: xyz(12) + rgb(4) — matches setPointCloud2FieldsByString
+      const size_t n_px  = static_cast<size_t>(W) * H;
+      const size_t n_rgb = n_px * 3;
+
+      // (Re)allocate if dimensions changed
+      if (!cuda_bufs_.isAllocated() || cuda_bufs_.width != W
+          || cuda_bufs_.height != H || cuda_bufs_.point_step != ps)
       {
-        process_depth_row(h);
+        // Release old buffers
+        if (cuda_bufs_.d_depth_raw)    cudaFree(cuda_bufs_.d_depth_raw);
+        if (cuda_bufs_.d_depth_linear) cudaFree(cuda_bufs_.d_depth_linear);
+        if (cuda_bufs_.d_color_raw)    cudaFree(cuda_bufs_.d_color_raw);
+        if (cuda_bufs_.d_cloud)        cudaFree(cuda_bufs_.d_cloud);
+        if (cuda_bufs_.h_depth_linear) cudaFreeHost(cuda_bufs_.h_depth_linear);
+        if (cuda_bufs_.h_cloud)        cudaFreeHost(cuda_bufs_.h_cloud);
+        cuda_bufs_ = {};
+
+        cudaMalloc(&cuda_bufs_.d_depth_raw,    n_px * sizeof(float));
+        cudaMalloc(&cuda_bufs_.d_depth_linear, n_px * sizeof(float));
+        cudaMalloc(&cuda_bufs_.d_color_raw,    n_rgb);
+        cudaMalloc(&cuda_bufs_.d_cloud,        n_px * ps);
+        cudaMallocHost(&cuda_bufs_.h_depth_linear, n_px * sizeof(float));
+        cudaMallocHost(&cuda_bufs_.h_cloud,        n_px * ps);
+        cuda_bufs_.width      = W;
+        cuda_bufs_.height     = H;
+        cuda_bufs_.point_step = ps;
       }
+
+      cudaStream_t stream = static_cast<cudaStream_t>(cuda_stream_);
+
+      // --- Depth: H2D → linearise kernel → D2H ---
+      cudaMemcpyAsync(cuda_bufs_.d_depth_raw, local_depth_back,
+                      n_px * sizeof(float), cudaMemcpyHostToDevice, stream);
+
+      const int zerofar_conv = (context_.readDepthMap == mjDEPTH_ZEROFAR) ? 1 : 0;
+      cuda_img_proc::launchDepthLinearizeFlip(
+          static_cast<const float*>(cuda_bufs_.d_depth_raw),
+          static_cast<float*>(cuda_bufs_.d_depth_linear),
+          W, H, near, far, zerofar_conv, stream);
+
+      cudaMemcpyAsync(cuda_bufs_.h_depth_linear,
+                      cuda_bufs_.d_depth_linear,
+                      n_px * sizeof(float), cudaMemcpyDeviceToHost, stream);
+
+      // --- Cloud: H2D color → cloud kernel → D2H (full res only; downsample falls back to CPU) ---
+      if (publish_cloud_ && point_cloud_downsample_ <= 1)
+      {
+        cudaMemcpyAsync(cuda_bufs_.d_color_raw, local_color_back,
+                        n_rgb, cudaMemcpyHostToDevice, stream);
+
+        // Camera intrinsics (match buildCameraInfo formula)
+        const int cam_id = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
+        const float focal = (1.0f / std::tan((m_->cam_fovy[cam_id] * static_cast<float>(M_PI) / 180.0f) / 2.0f))
+                            * static_cast<float>(H) / 2.0f;
+        const float fx = focal;
+        const float fy = focal;
+        const float cx = static_cast<float>(W) / 2.0f;
+        const float cy = static_cast<float>(H) / 2.0f;
+
+        const float bad_point = std::numeric_limits<float>::quiet_NaN();
+        const int   rot_preset = rotate_point_cloud_ ? cuda_rot_preset_ : 0;
+
+        cuda_img_proc::launchDepthToCloud(
+            static_cast<const float*>(cuda_bufs_.d_depth_linear),
+            static_cast<const uint8_t*>(cuda_bufs_.d_color_raw),
+            1 /*color_y_flip: raw buffer is bottom-up from OpenGL*/,
+            static_cast<uint8_t*>(cuda_bufs_.d_cloud),
+            W, H, fx, fy, cx, cy,
+            static_cast<float>(range_min_), static_cast<float>(range_max_),
+            ps, 0u, 4u, 8u, 12u,
+            rot_preset, bad_point, stream);
+
+        cudaMemcpyAsync(cuda_bufs_.h_cloud, cuda_bufs_.d_cloud,
+                        n_px * ps, cudaMemcpyDeviceToHost, stream);
+        cuda_cloud_ready = true;
+      }
+
+      // Wait for all async operations to complete
+      cudaStreamSynchronize(stream);
+
+      // Use the pinned host depth buffer for depth_msg
+      depth_for_msg = cuda_bufs_.h_depth_linear;
     }
-    else
+    else  // CPU path
 #endif
     {
-      for (int h = 0; h < viewport_.height; h++)
+#ifdef _OPENMP
+      if (shouldParallelizeRows(viewport_.height))
       {
-        process_depth_row(h);
+#pragma omp parallel for schedule(static)
+        for (int h = 0; h < viewport_.height; h++)
+        {
+          process_depth_row(h);
+        }
+      }
+      else
+#endif
+      {
+        for (int h = 0; h < viewport_.height; h++)
+        {
+          process_depth_row(h);
+        }
       }
     }
 
@@ -1571,13 +1768,13 @@ void ImagePublisher::publishThread()
     if (depth_log_count_ == 1)
     {
       int   center_idx   = (viewport_.height / 2) * viewport_.width + (viewport_.width / 2);
-      float center_depth = local_depth_flipped[center_idx];
-      float min_depth    = local_depth_flipped[0];
-      float max_depth    = local_depth_flipped[0];
+      float center_depth = depth_for_msg[center_idx];
+      float min_depth    = depth_for_msg[0];
+      float max_depth    = depth_for_msg[0];
       for (int i = 0; i < viewport_.width * viewport_.height; i++)
       {
-        min_depth = std::min(min_depth, local_depth_flipped[i]);
-        max_depth = std::max(max_depth, local_depth_flipped[i]);
+        min_depth = std::min(min_depth, depth_for_msg[i]);
+        max_depth = std::max(max_depth, depth_for_msg[i]);
       }
       RCLCPP_DEBUG(nh_->get_logger(), "Depth values: min=%.4f, max=%.4f, center=%.4f", min_depth,
                    max_depth, center_depth);
@@ -1602,7 +1799,7 @@ void ImagePublisher::publishThread()
       depth_msg.is_bigendian    = 0;
       depth_msg.step            = static_cast<unsigned int>(sizeof(float) * viewport_.width);
       depth_msg.data.resize(sizeof(float) * viewport_.width * viewport_.height);
-      std::memcpy(&depth_msg.data[0], local_depth_flipped,
+      std::memcpy(&depth_msg.data[0], depth_for_msg,
                   sizeof(float) * viewport_.width * viewport_.height);
       if (publish_depth_)
       {
@@ -1621,6 +1818,45 @@ void ImagePublisher::publishThread()
     // --- Publish Point Cloud ---
     if (publish_cloud_)
     {
+      sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
+        = std::make_shared<sensor_msgs::msg::PointCloud2>();
+      cloud_msg->header       = depth_msg.header;
+      cloud_msg->is_dense     = false;
+      cloud_msg->is_bigendian = false;
+
+#ifdef HAS_CUDA
+      // CUDA fast path: cloud data already computed in cuda_bufs_.h_cloud (full res only)
+      if (cuda_cloud_ready)
+      {
+        const int W = viewport_.width;
+        const int H = viewport_.height;
+        const int ps = cuda_bufs_.point_step;
+        cloud_msg->height    = H;
+        cloud_msg->width     = W;
+        cloud_msg->point_step = static_cast<uint32_t>(ps);
+        cloud_msg->row_step   = static_cast<uint32_t>(ps * W);
+        cloud_msg->fields.resize(4);
+        auto mkfield = [](const std::string& n, uint32_t off, uint8_t dtype, uint32_t count) {
+          sensor_msgs::msg::PointField f;
+          f.name     = n;
+          f.offset   = off;
+          f.datatype = dtype;
+          f.count    = count;
+          return f;
+        };
+        cloud_msg->fields[0] = mkfield("x",   0, sensor_msgs::msg::PointField::FLOAT32, 1);
+        cloud_msg->fields[1] = mkfield("y",   4, sensor_msgs::msg::PointField::FLOAT32, 1);
+        cloud_msg->fields[2] = mkfield("z",   8, sensor_msgs::msg::PointField::FLOAT32, 1);
+        cloud_msg->fields[3] = mkfield("rgb", 12, sensor_msgs::msg::PointField::FLOAT32, 1);
+        cloud_msg->data.resize(static_cast<size_t>(H) * W * ps);
+        std::memcpy(cloud_msg->data.data(), cuda_bufs_.h_cloud,
+                    static_cast<size_t>(H) * W * ps);
+        point_cloud_pub_->publish(*cloud_msg);
+        continue; // skip CPU cloud path below (jump to next iteration)
+      }
+#endif
+
+      // CPU cloud path (also used as CUDA fallback for downsampled clouds)
       // Flip the RGB color buffer vertically for point cloud (RGB, not BGR)
       // We need to flip because OpenGL reads bottom-to-top but ROS images are top-to-bottom
       const size_t pixel_count_rgb = static_cast<size_t>(viewport_.width) * viewport_.height * 3;
@@ -1659,12 +1895,6 @@ void ImagePublisher::publishThread()
                      model.fx(), model.fy(), model.cx(), model.cy());
       }
       pcl_log_count_ = (pcl_log_count_ + 1) % 100;
-
-      sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
-        = std::make_shared<sensor_msgs::msg::PointCloud2>();
-      cloud_msg->header       = depth_msg.header;
-      cloud_msg->is_dense     = false;
-      cloud_msg->is_bigendian = false;
 
       // --- Downsample depth and color for cloud if requested ---
       // This shrinks the images before cloud conversion: O(W*H / k²) instead of O(W*H).

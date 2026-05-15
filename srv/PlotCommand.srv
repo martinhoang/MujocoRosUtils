@@ -1,0 +1,45 @@
+# SimPlotter dynamic control service.
+#
+# Operations
+# ----------
+#   add_plot   : Create a new plot window.
+#                args: pos="tl 10 10 480 300"   (anchor x y w h; anchor: tl|tr|bl|br)
+#                      range_x="auto" | "-5 0"
+#                      range_y="auto" | "-3.14 3.14"
+#                      range_y2="auto" | "-1 1"   (enables right Y axis)
+#                      max_pts="500"
+#                      update_every="10"
+#
+#   del_plot   : Remove a plot window (plot is required).
+#
+#   add_line   : Add a data line to a plot (plot + line required).
+#                args: src="joint.shoulder_pan_joint.position"
+#                      color="1.0 0.3 0.3"   (RGB float, optional — auto if omitted)
+#                      yaxis="1"             (1=left default, 2=right)
+#
+#   del_line   : Remove a line from a plot (plot + line required).
+#
+#   mod_plot   : Modify plot settings (plot required).
+#                args: any subset of add_plot args.
+#
+#   mod_line   : Modify line settings (plot + line required).
+#                args: any subset of add_line args.
+#
+#   clear      : Clear ring-buffer data.  plot="" clears all plots.
+#
+#   pause      : Pause data collection.   plot="" pauses all; line="" pauses all lines in plot.
+#
+#   resume     : Resume data collection.  Same scoping as pause.
+#
+#   export     : Export ring-buffer to CSV.  plot required.
+#                args: path="/tmp/plot.csv"  (optional, auto-named if omitted)
+#
+#   list       : Return JSON describing all current plots/lines.  (no args needed)
+#
+string operation   # add_plot | del_plot | add_line | del_line | mod_plot | mod_line | clear | pause | resume | export | list
+string plot        # plot name  (required for most operations)
+string line        # line label (required for line operations)
+string[] args      # key=value pairs, e.g. ["src=joint.foo.position", "color=1.0 0.3 0.3"]
+---
+bool success
+string message

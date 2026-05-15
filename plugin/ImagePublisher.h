@@ -23,6 +23,8 @@
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <string>
 
+#include "SimDataRegistry.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -40,7 +42,8 @@ public:
   {
     Auto,
     Pbo,
-    Legacy
+    Legacy,
+    Cuda
   };
 
   /** \brief Register plugin. */
@@ -136,6 +139,10 @@ protected:
   std::string frame_id_       = "";
   std::string color_frame_id_ = "";
   std::string depth_frame_id_ = "";
+
+  //! Key used to publish rendered color frames into SimDataRegistry (= namespace without trailing /).
+  //! Empty means registry publishing is disabled for this instance.
+  std::string registry_key_ = "";
 
   ReadbackMode readback_mode_   = ReadbackMode::Pbo;
   bool         use_pbo_readback_ = true;
@@ -276,6 +283,25 @@ protected:
 
   //! Reusable buffer for RGB-flipped color data in point cloud generation
   std::vector<unsigned char> color_flipped_rgb_;
+
+#ifdef HAS_CUDA
+  //! CUDA depth-processing state (active when readback_mode_ == Cuda)
+  //! @{
+  void* cuda_stream_     = nullptr;  ///< cudaStream_t, cast in .cpp
+  int   cuda_rot_preset_ = 0;        ///< rotationPresetToInt() result for cloud kernel
+
+  struct CudaBuffers {
+    void*  d_depth_raw    = nullptr;  // float H×W device
+    void*  d_depth_linear = nullptr;  // float H×W device
+    void*  d_color_raw    = nullptr;  // uint8 H×W×3 device
+    void*  d_cloud        = nullptr;  // uint8 H×W×point_step device
+    float* h_depth_linear = nullptr;  // float H×W pinned host
+    void*  h_cloud        = nullptr;  // uint8 H×W×point_step pinned host
+    int width = 0, height = 0, point_step = 0;
+    bool isAllocated() const { return d_depth_raw != nullptr; }
+  } cuda_bufs_;
+  //! @}
+#endif
 
   //! Build a CameraInfo message from current camera parameters.
   //! cam_id selects which MuJoCo camera's FOV to use for intrinsics.
