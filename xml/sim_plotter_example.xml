@@ -112,7 +112,7 @@
         <config key="plot1_line2" value="label=ctrl command (rad/s);src=actuator.arm_velocity.ctrl;color=0.58 0.40 0.74;y=2"/>
 
         <!-- Plot 2 — Phase portrait: actuator force vs joint velocity (scatter) -->
-        <config key="plot2" value="title=Phase Portrait — force vs velocity;pos=tr 0 0 560 700;max_pts=3000"/>
+        <config key="plot2" value="title=Phase Portrait — force vs velocity;pos=tr 0 0 560 700;max_pts=10000"/>
         <config key="plot2_line0" value="label=force vs velocity;type=scatter;src_x=joint.arm_joint.velocity;src=actuator.arm_velocity.force;color=1.0 0.6 0.1"/>
       </instance>
     </plugin>
@@ -178,7 +178,7 @@
     This sets arm_velocity ctrl = 2.0 rad/s so the arm spins immediately.
   -->
   <keyframe>
-    <key name="spinning" ctrl="2.0" qvel="2.0"/>
+    <key name="spinning" qpos="0" ctrl="20.0" qvel="20.0" time="0"/>
   </keyframe>
 
 </mujoco>

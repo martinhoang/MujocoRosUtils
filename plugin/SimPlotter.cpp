@@ -470,6 +470,8 @@ void SimPlotter::applyPlotFromArgs(PlotConfig & pc,
   }
   if (kv.count("update_every")) { /* handled at plugin level, not per-plot */ }
   if (kv.count("title")) pc.title = kv.at("title");
+  if (kv.count("persist"))
+    pc.persist_on_reset = (kv.at("persist") == "true" || kv.at("persist") == "1");
 }
 
 void SimPlotter::applyLineFromArgs(LineConfig & lc,
@@ -486,6 +488,8 @@ void SimPlotter::applyLineFromArgs(LineConfig & lc,
   {
     lc.yaxis = std::stoi(kv.at("yaxis"));
   }
+  if (kv.count("persist"))
+    lc.persist_on_reset = (kv.at("persist") == "true" || kv.at("persist") == "1");
 }
 
 // ─── RegisterPlugin ───────────────────────────────────────────────────────────
@@ -634,6 +638,15 @@ SimPlotter * SimPlotter::Create(const mjModel * m, mjData *, int plugin_id)
     parseRange("range_y2", pc.auto_range_y2, pc.range_y2);
     if (!pc.auto_range_y2) pc.has_y2 = true;
 
+    // Scrolling time window: how many seconds of history to show when
+    // auto-scroll is active.  0 = show all data (no scrolling).
+    if (pmap.count("time_window"))
+      pc.time_window = std::stod(pmap.at("time_window"));
+
+    // persist=true → all lines in this plot keep data across sim resets by default
+    if (pmap.count("persist"))
+      pc.persist_on_reset = (pmap.at("persist") == "true" || pmap.at("persist") == "1");
+
     const int max_pts = pmap.count("max_pts") ? std::stoi(pmap.at("max_pts")) : 500;
 
     // ── Per-line config ────────────────────────────────────────────────────
@@ -683,6 +696,12 @@ SimPlotter * SimPlotter::Create(const mjModel * m, mjData *, int plugin_id)
       else if (lmap.count("yaxis")) lc.yaxis = std::stoi(lmap.at("yaxis"));
       if (lc.yaxis == 2) pc.has_y2 = true;
 
+      // persist_on_reset: line-level overrides plot-level default
+      if (lmap.count("persist"))
+        lc.persist_on_reset = (lmap.at("persist") == "true" || lmap.at("persist") == "1");
+      else
+        lc.persist_on_reset = pc.persist_on_reset;
+
       pc.lines.push_back(std::move(lc));
       ++total_line_idx;
     }
@@ -708,17 +727,9 @@ SimPlotter::SimPlotter(std::vector<PlotConfig> plots,
     , win_h_(win_h)
     , model_(m)
 {
-  // Install debug X11 error handler FIRST — catches whatever triggers serial 115.
   g_prev_x11_handler = XSetErrorHandler(debugX11ErrorHandler);
-  fprintf(stderr, "[SimPlotter DEBUG] X11 error handler installed\n"); fflush(stderr);
-
-  fprintf(stderr, "[SimPlotter DEBUG] calling startRenderThread()\n"); fflush(stderr);
   startRenderThread();
-  fprintf(stderr, "[SimPlotter DEBUG] startRenderThread() returned\n"); fflush(stderr);
-
-  fprintf(stderr, "[SimPlotter DEBUG] calling startRosThread()\n"); fflush(stderr);
   startRosThread(node_name);
-  fprintf(stderr, "[SimPlotter DEBUG] startRosThread() returned\n"); fflush(stderr);
 }
 
 SimPlotter::~SimPlotter()
@@ -730,12 +741,13 @@ SimPlotter::~SimPlotter()
 
 void SimPlotter::reset(const mjModel *, int)
 {
-  // Clear all ring buffers — render thread sees empty data on next snapshot
+  // Clear ring buffers on sim reset, unless the line has persist_on_reset=true.
   std::lock_guard<std::mutex> lk(mutex_);
   last_compute_time_ = -1.0;
   for (auto & pc : plots_)
     for (auto & lc : pc.lines)
-      lc.ring = RingBuffer(lc.ring.capacity);
+      if (!lc.persist_on_reset)
+        lc.ring = RingBuffer(lc.ring.capacity);
 }
 
 void SimPlotter::compute(const mjModel *, mjData * d, int)
@@ -772,6 +784,7 @@ void SimPlotter::compute(const mjModel *, mjData * d, int)
 
 void SimPlotter::startRenderThread()
 {
+  running_sptr_ = std::make_shared<std::atomic<bool>>(true);
   running_ = true;
   render_thread_ = std::thread(&SimPlotter::renderLoop, this);
 }
@@ -779,9 +792,35 @@ void SimPlotter::startRenderThread()
 void SimPlotter::stopThreads()
 {
   stop_executor_ = true;
-  running_       = false;
+  running_ = false;
+  if (running_sptr_) running_sptr_->store(false);
 
-  if (render_thread_.joinable()) render_thread_.join();
+  // Nudge the render thread to exit its SDL event loop promptly so it reaches
+  // the `while (running_sp->load())` check sooner.
+  if (SDL_WasInit(SDL_INIT_VIDEO))
+  {
+    SDL_Event e{};
+    e.type = SDL_QUIT;
+    SDL_PushEvent(&e);   // thread-safe per SDL docs
+  }
+
+  // DETACH instead of join.
+  //
+  // On CTRL+L reload MuJoCo creates the new plugin before destroying the old
+  // one.  If we joined here we would block MuJoCo's main thread waiting for
+  // the old render thread, which might itself be blocked inside
+  // SDL_RenderPresent / XPutImage waiting for the X11 display lock — the same
+  // lock held by MuJoCo's main thread → deadlock.
+  //
+  // Detaching is safe because:
+  //  • running_sptr_ (shared_ptr<atomic<bool>>) is captured by value inside
+  //    renderLoop(), so the flag stays alive until the render thread exits.
+  //  • After the while(running_sp) loop the render thread only uses local
+  //    variables and process-global SDL/ImGui state — no more `this` accesses.
+  //  • g_render_slot_cv serialises ImGui/SDL init/destroy between instances,
+  //    so the new render thread waits until this one calls release_slot().
+  if (render_thread_.joinable()) render_thread_.detach();
+
   if (executor_) executor_->cancel();
   if (ros_thread_.joinable()) ros_thread_.join();
 }
@@ -802,6 +841,7 @@ struct PlotSnap
   float                  x, y, w, h;
   bool                   auto_x, auto_y, auto_y2;
   double                 range_x[2], range_y[2], range_y2[2];
+  double                 time_window;   ///< scrolling window width (seconds); 0 = show all
   bool                   has_y2;
   bool                   all_scatter = false; ///< true when every line is scatter
   std::vector<LineSnap>  lines;
@@ -955,17 +995,31 @@ RenderBackend chooseBestBackend(const SysCaps & c)
 
 void SimPlotter::renderLoop()
 {
-  fprintf(stderr, "[SimPlotter DEBUG] renderLoop: thread started\n"); fflush(stderr);
+  // Capture running flag into a shared_ptr so it stays valid even after
+  // the plugin object is destroyed (which happens on CTRL+L reload when
+  // the old plugin is destroyed after the new one is already constructed).
+  auto running_sp = running_sptr_;
+
 
   // ── Claim the render slot ─────────────────────────────────────────────────
   // Block until no other SimPlotter render thread is active, then take the slot.
   // This prevents concurrent ImGui/ImPlot context use that would crash on reload.
+  // A 10-second timeout guards against the unlikely case where the previous
+  // thread crashed or was detached without releasing the slot.
   RenderBackend backend;
   bool          use_nvidia_egl = false;   // captured for fallback cleanup
   {
     std::unique_lock<std::mutex> slot_lk(g_render_slot_mtx);
-    g_render_slot_cv.wait(slot_lk, [] { return !g_render_slot_taken; });
-    if (!running_) return;           // stopped while waiting — nothing to do
+    bool got = g_render_slot_cv.wait_for(slot_lk, std::chrono::seconds(10),
+                                         [] { return !g_render_slot_taken; });
+    if (!got)
+    {
+      fprintf(stderr, "[SimPlotter] WARN: render-slot wait timed out; force-resetting slot.\n");
+      fflush(stderr);
+      g_sdl_refcount      = 0;
+      g_render_slot_taken = false;
+    }
+    if (!running_sp->load()) return;   // stopped while waiting — nothing to do
     g_render_slot_taken = true;
 
     // Probe system capabilities and choose backend (logged to stderr).
@@ -996,7 +1050,6 @@ void SimPlotter::renderLoop()
     }
 
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "1");
-    fprintf(stderr, "[SimPlotter DEBUG] renderLoop: calling SDL_Init\n"); fflush(stderr);
     if (g_sdl_refcount == 0 && SDL_Init(SDL_INIT_VIDEO) != 0)
     {
       fprintf(stderr, "[SimPlotter] SDL_Init failed: %s\n", SDL_GetError());
@@ -1006,7 +1059,6 @@ void SimPlotter::renderLoop()
     }
     ++g_sdl_refcount;
   }
-  fprintf(stderr, "[SimPlotter DEBUG] renderLoop: SDL_Init OK\n"); fflush(stderr);
 
   // ── SDL2 window + backend-specific context ────────────────────────────────
   auto release_slot = [&]() {
@@ -1016,27 +1068,45 @@ void SimPlotter::renderLoop()
     g_render_slot_cv.notify_all();
   };
 
-  fprintf(stderr, "[SimPlotter DEBUG] renderLoop: calling SDL_CreateWindow\n"); fflush(stderr);
   const Uint32 win_flags_base = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
   SDL_Window * window = SDL_CreateWindow(
       "SimPlotter",
       SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
       win_w_, win_h_,
       win_flags_base | (backend == RenderBackend::EGL_OPENGL ? SDL_WINDOW_OPENGL : 0));
+  if (!window && backend == RenderBackend::EGL_OPENGL)
+  {
+    // SDL_CreateWindow itself can fail with "Could not get EGL display" when
+    // SDL_VIDEO_X11_FORCE_EGL=1 is set but EGL is not available on the X11
+    // display (e.g. running inside a nested X server, VNC, or after a driver
+    // change).  Fall back to software renderer immediately.
+    fprintf(stderr,
+            "[SimPlotter] SDL_CreateWindow (EGL) failed: %s\n"
+            "[SimPlotter] Falling back to software renderer.\n",
+            SDL_GetError());
+    unsetenv("SDL_VIDEO_X11_FORCE_EGL");
+    if (use_nvidia_egl) unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
+    SDL_GL_ResetAttributes();
+    backend = RenderBackend::SOFTWARE;
+
+    window = SDL_CreateWindow(
+        "SimPlotter",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        win_w_, win_h_,
+        win_flags_base);
+  }
   if (!window)
   {
     fprintf(stderr, "[SimPlotter] SDL_CreateWindow failed: %s\n", SDL_GetError());
     release_slot();
     return;
   }
-  fprintf(stderr, "[SimPlotter DEBUG] renderLoop: SDL_CreateWindow OK\n"); fflush(stderr);
 
   // Backend-specific handles (exactly one is non-null).
   SDL_GLContext  gl_ctx   = nullptr;
   SDL_Renderer * renderer = nullptr;
 
   if (backend == RenderBackend::EGL_OPENGL) {
-    fprintf(stderr, "[SimPlotter DEBUG] renderLoop: creating EGL/OpenGL context\n"); fflush(stderr);
     gl_ctx = SDL_GL_CreateContext(window);
     if (!gl_ctx) {
       fprintf(stderr,
@@ -1072,8 +1142,6 @@ void SimPlotter::renderLoop()
         release_slot();
         return;
       }
-      fprintf(stderr, "[SimPlotter DEBUG] renderLoop: software fallback window created OK\n");
-      fflush(stderr);
     } else {
       SDL_GL_MakeCurrent(window, gl_ctx);
       SDL_GL_SetSwapInterval(0);  // uncapped — our sleep controls fps
@@ -1081,7 +1149,6 @@ void SimPlotter::renderLoop()
   }
 
   if (backend == RenderBackend::SOFTWARE) {
-    fprintf(stderr, "[SimPlotter DEBUG] renderLoop: calling SDL_CreateRenderer (SOFTWARE)\n"); fflush(stderr);
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!renderer) {
       fprintf(stderr, "[SimPlotter] SDL_CreateRenderer failed: %s\n", SDL_GetError());
@@ -1089,7 +1156,6 @@ void SimPlotter::renderLoop()
       release_slot();
       return;
     }
-    fprintf(stderr, "[SimPlotter DEBUG] renderLoop: SDL_CreateRenderer OK\n"); fflush(stderr);
   }
 
   // ── ImGui + ImPlot init ───────────────────────────────────────────────────
@@ -1106,23 +1172,58 @@ void SimPlotter::renderLoop()
   if (backend == RenderBackend::EGL_OPENGL) {
     ImGui_ImplSDL2_InitForOpenGL(window, gl_ctx);
     ImGui_ImplOpenGL3_Init("#version 150");
-    fprintf(stderr, "[SimPlotter DEBUG] renderLoop: ImGui/OpenGL3 init OK — GPU path\n");
   } else {
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
-    fprintf(stderr, "[SimPlotter DEBUG] renderLoop: ImGui/SDLRenderer2 init OK — software path\n");
   }
-  fprintf(stderr, "[SimPlotter DEBUG] renderLoop: ImGui init complete — starting render loop\n"); fflush(stderr);
 
   // ── Render loop ───────────────────────────────────────────────────────────
   std::vector<PlotSnap> snaps;
 
-  struct CursorLock { bool locked = false; double t = 0.0; };
+  struct CursorLock {
+    bool   locked           = false;
+    double t                = 0.0;
+    bool   was_auto_scroll  = true;   // saved state to restore on unlock
+    bool   was_paused       = false;
+  };
   std::map<std::string, CursorLock> cursor_locks;
 
-  // Per-plot UI state: needs_fit triggers a one-shot SetNextAxesToFit();
-  // paused freezes the display snapshot while physics keeps running.
-  struct PlotUiState { bool needs_fit = true; bool paused = false; };
+  // Per-plot UI state.
+  // auto_scroll: when true the x-axis follows the latest data point;
+  //              turned off when the user scrolls/drags the plot,
+  //              turned back on via the "⟳ Follow" button.
+  // paused:      freezes the display snapshot while physics keeps running.
+  struct PlotUiState
+  {
+    bool auto_scroll    = true;
+    bool paused         = false;
+    bool last_hovered   = false;
+
+    // One-shot X zoom: applied as ImGuiCond_Always for one frame, then cleared.
+    // Disables auto_scroll.
+    bool   pending_x_zoom = false;
+    double x_zoom_min = 0, x_zoom_max = 10;
+
+    // Follow window width (seconds). 0 = show full history.
+    // Scroll zoom while Following adjusts this rather than disabling Follow.
+    double scroll_window = 0.0;
+
+    // Y zoom: pending = applied once with Always (then ImPlot manages freely).
+    // has_y_override = true disables per-frame auto-fit.
+    bool   pending_y_zoom  = false;
+    double y_zoom_min = -1, y_zoom_max = 1;
+    bool   has_y_override  = false;
+
+    bool   pending_y2_zoom = false;
+    double y2_zoom_min = -1, y2_zoom_max = 1;
+    bool   has_y2_override = false;
+
+    // Scatter-only: X auto-fit override (set when user zooms/pans X on a scatter plot).
+    bool   has_x_override  = false;
+
+    // Visible X range from the previous frame, used for Y auto-fit computation.
+    double last_vis_x_min = 0, last_vis_x_max = 1e9;
+  };
   std::map<std::string, PlotUiState> plot_ui;
 
   // Drag-skip: on the software path, XPutImage during a window drag competes
@@ -1132,7 +1233,7 @@ void SimPlotter::renderLoop()
   bool     window_moving   = false;
   auto     last_move_time  = std::chrono::steady_clock::now();
 
-  while (running_)
+  while (running_sp->load())
   {
     // Each frame must restore this thread's ImGui/ImPlot context — another
     // SimPlotter instance running concurrently may have changed the globals.
@@ -1144,10 +1245,10 @@ void SimPlotter::renderLoop()
     while (SDL_PollEvent(&event))
     {
       ImGui_ImplSDL2_ProcessEvent(&event);
-      if (event.type == SDL_QUIT) running_ = false;
+      if (event.type == SDL_QUIT) running_sp->store(false);
       if (event.type == SDL_WINDOWEVENT)
       {
-        if (event.window.event == SDL_WINDOWEVENT_CLOSE) running_ = false;
+        if (event.window.event == SDL_WINDOWEVENT_CLOSE) running_sp->store(false);
         if (event.window.event == SDL_WINDOWEVENT_MOVED)
         {
           window_moving  = true;
@@ -1155,7 +1256,7 @@ void SimPlotter::renderLoop()
         }
       }
     }
-    if (!running_) break;
+    if (!running_sp->load()) break;
 
     // ── Skip rendering while dragging — do not send XPutImage to X server ──
     if (window_moving)
@@ -1196,6 +1297,7 @@ void SimPlotter::renderLoop()
           std::memcpy(ps.range_x,  pc.range_x,  sizeof(ps.range_x));
           std::memcpy(ps.range_y,  pc.range_y,  sizeof(ps.range_y));
           std::memcpy(ps.range_y2, pc.range_y2, sizeof(ps.range_y2));
+          ps.time_window = pc.time_window;
           ps.has_y2 = pc.has_y2;
           bool all_scat = !pc.lines.empty();
           for (const auto & lc : pc.lines)
@@ -1247,6 +1349,10 @@ void SimPlotter::renderLoop()
     const float cell_h  = (fh - 4.f * (rows + 1) - ImGui::GetFrameHeight())
                           / static_cast<float>(rows);
 
+    // Standard ImPlot padding (no rotated Y title to accommodate — shown in header instead).
+    ImPlot::PushStyleVar(ImPlotStyleVar_PlotPadding,  ImVec2(10, 10));
+    ImPlot::PushStyleVar(ImPlotStyleVar_LabelPadding, ImVec2(5,   5));
+
     for (int i = 0; i < n_plots; ++i)
     {
       const auto & ps  = snaps[i];
@@ -1255,45 +1361,142 @@ void SimPlotter::renderLoop()
 
       if (col > 0) ImGui::SameLine();
 
+      // Save cell left edge in screen space so header can compute available width.
+      const float cell_start_x = ImGui::GetCursorScreenPos().x;
       ImGui::BeginGroup();
       PlotUiState & ui = plot_ui[ps.name];
 
-      // Control buttons + title on one line
+      // Compute latest timestamp across all lines in this plot (for auto-scroll).
+      double latest_t = 0.0;
+      for (const auto & ls : ps.lines)
+        if (!ls.times.empty()) latest_t = std::max(latest_t, ls.times.back());
+
+      // Y-axis label(s): computed before button bar so we can show them as
+      // readable horizontal text in the header.  ImPlot's built-in rotated label
+      // is only ~13 px wide (one font-size), which is unreadable in practice.
+      // We suppress it (pass "" to SetupAxis) and show the label here instead.
+      // All lines on the axis are joined with " / " and truncated to 32 chars.
+      auto buildAxisLabel = [&](int axis_id) -> std::string
+      {
+        std::string lbl;
+        for (const auto & ls : ps.lines)
+        {
+          if (ls.yaxis != axis_id) continue;
+          if (!lbl.empty()) lbl += " / ";
+          lbl += ls.label;
+        }
+        if (lbl.size() > 32) lbl = lbl.substr(0, 29) + "...";
+        return lbl;
+      };
+      const std::string y1_lbl = buildAxisLabel(1);
+      const std::string y2_lbl = buildAxisLabel(2);
+
+      // Control buttons + title on one line.
+      // "⟳ Follow": turns auto-scroll ON (green when active, dim when off).
+      // "Pause/Run": freezes the display snapshot.
+      // All button labels are suffixed with ##<plot_name> to give each plot's
+      // buttons a unique ImGui ID (ImGui uses label text as ID by default).
       ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3, 1));
-      if (ImGui::SmallButton(ui.paused ? "Run " : "Pause"))
+      const std::string id = "##" + ps.name;
+      if (ImGui::SmallButton((std::string(ui.paused ? "Run " : "Pause") + id).c_str()))
         ui.paused = !ui.paused;
       ImGui::SameLine(0, 4);
-      if (ImGui::SmallButton("Fit"))
-        ui.needs_fit = true;
+      if (!ps.all_scatter)
+      {
+        // Follow button (toggle): X tracks latest data; zoom scroll adjusts window width.
+        if (ui.auto_scroll)
+          ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 0.9f));
+        else
+          ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_Button));
+        if (ImGui::SmallButton((std::string(ui.auto_scroll ? "Follow ON " : "Follow OFF") + id).c_str()))
+          ui.auto_scroll = !ui.auto_scroll;
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 4);
+
+        // Fit X button (one-shot action): fit X to all data, disable Follow.
+        if (ImGui::SmallButton(("Fit X" + id).c_str()))
+        {
+          double xmin =  std::numeric_limits<double>::max();
+          double xmax = -std::numeric_limits<double>::max();
+          for (const auto & ls : ps.lines)
+            for (double t : ls.times) { xmin = std::min(xmin, t); xmax = std::max(xmax, t); }
+          if (xmin <= xmax)
+          {
+            const double margin = std::max((xmax - xmin) * 0.05, 0.1);
+            ui.pending_x_zoom = true;
+            ui.x_zoom_min     = xmin - margin;
+            ui.x_zoom_max     = xmax + margin;
+          }
+          ui.auto_scroll   = false;
+          ui.scroll_window = 0.0;
+        }
+        ImGui::SameLine(0, 4);
+
+        // Fit Y button (toggle): Y continuously auto-fits to visible data (green = active).
+        const bool fit_y = !ui.has_y_override;
+        if (fit_y)
+          ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 0.9f));
+        else
+          ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_Button));
+        if (ImGui::SmallButton((std::string(fit_y ? "Fit Y ON " : "Fit Y OFF") + id).c_str()))
+        {
+          ui.has_y_override  = fit_y;
+          ui.has_y2_override = fit_y;
+        }
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 4);
+      }
+      else
+      {
+        // Scatter: "Fit" button re-enables auto-fit on both axes.
+        const bool fitting = !ui.has_x_override && !ui.has_y_override;
+        if (fitting)
+          ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 0.9f));
+        else
+          ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_Button));
+        if (ImGui::SmallButton((std::string(fitting ? "Fit ON " : "Fit OFF") + id).c_str()))
+        {
+          ui.has_x_override = false;
+          ui.has_y_override = false;
+        }
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 4);
+      }
       ImGui::PopStyleVar();
+      // Header: title + Y label(s) on one line with the buttons, truncated so
+      // they never overflow cell_w (which would break the column layout).
       ImGui::SameLine(0, 8);
-      ImGui::TextDisabled("%s", ps.title.c_str());
+      {
+        std::string header = ps.title;
+        if (!y1_lbl.empty())              header += "  |  " + y1_lbl;
+        if (ps.has_y2 && !y2_lbl.empty()) header += "  |  Y2: " + y2_lbl;
+        // Compute available width from current cursor to right edge of this cell.
+        const float avail_w = (cell_start_x + cell_w) - ImGui::GetCursorScreenPos().x - 4.f;
+        // Binary-search longest prefix that fits, then append "…".
+        if (avail_w > 0.f && ImGui::CalcTextSize(header.c_str()).x > avail_w)
+        {
+          const std::string ellipsis = "...";
+          const float el_w = ImGui::CalcTextSize(ellipsis.c_str()).x;
+          const float fit_w = avail_w - el_w;
+          int lo = 0, hi = (int)header.size();
+          while (lo < hi)
+          {
+            const int mid = (lo + hi + 1) / 2;
+            const auto sub = header.substr(0, mid);
+            if (ImGui::CalcTextSize(sub.c_str()).x <= fit_w) lo = mid;
+            else                                              hi = mid - 1;
+          }
+          header = header.substr(0, lo) + ellipsis;
+        }
+        ImGui::TextDisabled("%s", header.c_str());
+      }
 
       ImVec2 plot_size(cell_w, cell_h - ImGui::GetTextLineHeightWithSpacing());
       (void)row;
 
-      // Queue a one-shot axis fit (cleared after use so user zoom is preserved).
-      if (ui.needs_fit) { ImPlot::SetNextAxesToFit(); ui.needs_fit = false; }
       if (ImPlot::BeginPlot(("##plot_" + ps.name).c_str(), plot_size,
                              ImPlotFlags_Crosshairs))
       {
-        // Y-axis title: only show label when exactly one line is on that axis.
-        // With multiple lines the concatenated string is too long when rotated 90°;
-        // the legend already shows each line's name and color.
-        auto buildAxisLabel = [&](int axis_id) -> std::string
-        {
-          std::string lbl;
-          int count = 0;
-          for (const auto & ls : ps.lines)
-          {
-            if (ls.yaxis != axis_id) continue;
-            ++count;
-            lbl = ls.label.size() > 20 ? ls.label.substr(0, 17) + "..." : ls.label;
-          }
-          return (count == 1) ? lbl : "";
-        };
-        const std::string y1_lbl = buildAxisLabel(1);
-        const std::string y2_lbl = buildAxisLabel(2);
 
         // ── Axis setup ───────────────────────────────────────────────────
         // For scatter plots derive the X axis label from the first scatter line's src_x
@@ -1304,26 +1507,126 @@ void SimPlotter::renderLoop()
             if (ls.is_scatter && !ls.x_label.empty()) { x_axis_label = ls.x_label; break; }
         }
 
-        // Axis setup: explicit limits use ImGuiCond_Once so the user can zoom
-        // freely after the initial view.  AutoFit is NOT used — instead a
-        // one-shot SetNextAxesToFit() is queued via needs_fit (above) so zoom
-        // is never clobbered every frame.
-        ImPlot::SetupAxis(ImAxis_X1, x_axis_label.c_str());
-        if (!ps.auto_x)
-          ImPlot::SetupAxisLimits(ImAxis_X1, ps.range_x[0], ps.range_x[1], ImGuiCond_Once);
-        ImPlot::SetupAxisFormat(ImAxis_X1, "%.2f");  // fixed width: no jumping
+        // Determine the visible X range for this frame (needed for Y auto-fit).
+        // For auto_scroll / one-shot zoom the range is known exactly; otherwise
+        // fall back to the range saved from the previous frame.
+        double vis_x0 = ui.last_vis_x_min;
+        double vis_x1 = ui.last_vis_x_max;
 
-        ImPlot::SetupAxis(ImAxis_Y1, y1_lbl.c_str());
-        if (!ps.auto_y)
-          ImPlot::SetupAxisLimits(ImAxis_Y1, ps.range_y[0], ps.range_y[1], ImGuiCond_Once);
-        ImPlot::SetupAxisFormat(ImAxis_Y1, "%.3f");  // fixed width
+        ImPlot::SetupAxis(ImAxis_X1, x_axis_label.c_str());
+        if (ps.all_scatter)
+        {
+          // Scatter X auto-fit: compute extent from all data unless user has zoomed/panned.
+          if (!ui.has_x_override)
+          {
+            double xmin =  std::numeric_limits<double>::max();
+            double xmax = -std::numeric_limits<double>::max();
+            for (const auto & ls : ps.lines)
+              for (double v : ls.times) { xmin = std::min(xmin, v); xmax = std::max(xmax, v); }
+            if (xmin <= xmax)
+            {
+              const double margin = std::max((xmax - xmin) * 0.08, 0.05);
+              ImPlot::SetupAxisLimits(ImAxis_X1, xmin - margin, xmax + margin, ImGuiCond_Always);
+            }
+          }
+        }
+        else if (!ps.all_scatter && ui.auto_scroll && latest_t > 0.0)
+        {
+          // Follow mode: window end = latest_t; width = scroll_window (0 = full history).
+          vis_x1 = latest_t;
+          if (ui.scroll_window > 0.0)
+            vis_x0 = vis_x1 - ui.scroll_window;
+          else
+            vis_x0 = (ps.time_window > 0.0) ? (vis_x1 - ps.time_window) : 0.0;
+          ImPlot::SetupAxisLimits(ImAxis_X1, vis_x0, vis_x1, ImGuiCond_Always);
+        }
+        else if (ui.pending_x_zoom)
+        {
+          // One-shot manual zoom: apply then hand back to ImPlot.
+          vis_x0 = ui.x_zoom_min;
+          vis_x1 = ui.x_zoom_max;
+          ImPlot::SetupAxisLimits(ImAxis_X1, vis_x0, vis_x1, ImGuiCond_Always);
+          ui.pending_x_zoom = false;
+        }
+        else if (!ps.auto_x)
+        {
+          ImPlot::SetupAxisLimits(ImAxis_X1, ps.range_x[0], ps.range_x[1], ImGuiCond_Once);
+        }
+        // else: auto_x=true → ImPlot manages X freely.
+
+        // Y auto-fit helper: scan lines on a given axis within the visible X range.
+        // For scatter plots the X data is not time, so we scan all data unconditionally.
+        auto computeYFit = [&](int yaxis_id, double & ymin, double & ymax)
+        {
+          ymin =  std::numeric_limits<double>::max();
+          ymax = -std::numeric_limits<double>::max();
+          for (const auto & ls : ps.lines)
+          {
+            if (ls.yaxis != yaxis_id || ls.values.empty()) continue;
+            for (size_t k = 0; k < ls.values.size(); ++k)
+            {
+              if (!ps.all_scatter)
+              {
+                const double t = ls.times[k];
+                if (t < vis_x0 || t > vis_x1) continue;
+              }
+              ymin = std::min(ymin, ls.values[k]);
+              ymax = std::max(ymax, ls.values[k]);
+            }
+          }
+        };
+
+        // Y1 axis.
+        // Modes (in priority order):
+        //   pending_y_zoom    → apply one-shot zoom limits (Always), then ImPlot manages.
+        //   !has_y_override   → auto-fit to data in visible X window every frame.
+        //   has_y_override    → ImPlot manages freely (user can drag/pan Y).
+        ImPlot::SetupAxis(ImAxis_Y1, "");  // label shown in header bar instead
+        if (ui.pending_y_zoom)
+        {
+          ImPlot::SetupAxisLimits(ImAxis_Y1, ui.y_zoom_min, ui.y_zoom_max, ImGuiCond_Always);
+          ui.pending_y_zoom = false;
+        }
+        else if (!ui.has_y_override)
+        {
+          double ymin, ymax;
+          computeYFit(1, ymin, ymax);
+          if (ymin <= ymax)
+          {
+            const double margin = std::max((ymax - ymin) * 0.08, 0.05);
+            ImPlot::SetupAxisLimits(ImAxis_Y1, ymin - margin, ymax + margin, ImGuiCond_Always);
+          }
+          else if (!ps.auto_y)
+          {
+            ImPlot::SetupAxisLimits(ImAxis_Y1, ps.range_y[0], ps.range_y[1], ImGuiCond_Once);
+          }
+        }
+        // else (has_y_override && !pending_y_zoom): ImPlot manages Y freely.
+        ImPlot::SetupAxisFormat(ImAxis_Y1, "%.4g");
 
         if (ps.has_y2)
         {
-          ImPlot::SetupAxis(ImAxis_Y2, y2_lbl.c_str(), ImPlotAxisFlags_AuxDefault);
-          if (!ps.auto_y2)
-            ImPlot::SetupAxisLimits(ImAxis_Y2, ps.range_y2[0], ps.range_y2[1], ImGuiCond_Once);
-          ImPlot::SetupAxisFormat(ImAxis_Y2, "%.3f");  // fixed width
+          ImPlot::SetupAxis(ImAxis_Y2, "", ImPlotAxisFlags_AuxDefault);  // label shown in header bar
+          if (ui.pending_y2_zoom)
+          {
+            ImPlot::SetupAxisLimits(ImAxis_Y2, ui.y2_zoom_min, ui.y2_zoom_max, ImGuiCond_Always);
+            ui.pending_y2_zoom = false;
+          }
+          else if (!ui.has_y2_override)
+          {
+            double y2min, y2max;
+            computeYFit(2, y2min, y2max);
+            if (y2min <= y2max)
+            {
+              const double margin = std::max((y2max - y2min) * 0.08, 0.05);
+              ImPlot::SetupAxisLimits(ImAxis_Y2, y2min - margin, y2max + margin, ImGuiCond_Always);
+            }
+            else if (!ps.auto_y2)
+            {
+              ImPlot::SetupAxisLimits(ImAxis_Y2, ps.range_y2[0], ps.range_y2[1], ImGuiCond_Once);
+            }
+          }
+          ImPlot::SetupAxisFormat(ImAxis_Y2, "%.4g");
         }
 
         // ── Plot lines ───────────────────────────────────────────────────
@@ -1342,6 +1645,87 @@ void SimPlotter::renderLoop()
                              static_cast<int>(ls.times.size()));
         }
 
+        // ── Custom scroll zoom: decouple X and Y axes ────────────────────
+        // Normal scroll  → zoom X around cursor (disables auto_scroll).
+        // Shift+scroll   → zoom Y around cursor (sets Y override, keeps auto_scroll).
+        // Left-drag      → pan; ImPlot handles natively, we just flag auto_scroll off.
+        // All wheel events are consumed before ImPlot::EndPlot() so ImPlot's
+        // built-in coupled zoom never fires.
+        if (!ps.all_scatter && ImPlot::IsPlotHovered())
+        {
+          ImGuiIO & io = ImGui::GetIO();
+          const float wheel = io.MouseWheel;
+          if (wheel != 0.0f)
+          {
+            const double zoom = std::pow(0.85, static_cast<double>(wheel)); // <1 = zoom in
+            if (!io.KeyShift)
+            {
+              if (ui.auto_scroll)
+              {
+                // Following: resize the follow window width, keep tracking latest data.
+                const double cur_width = (ui.scroll_window > 0.0)
+                                           ? ui.scroll_window
+                                           : std::max(vis_x1 - vis_x0, 0.1);
+                ui.scroll_window = std::max(0.05, cur_width * zoom);
+              }
+              else
+              {
+                // Not following: one-shot X zoom around mouse cursor.
+                const ImPlotRect  lim = ImPlot::GetPlotLimits(ImAxis_X1, ImAxis_Y1);
+                const ImPlotPoint  mp = ImPlot::GetPlotMousePos(ImAxis_X1, ImAxis_Y1);
+                ui.pending_x_zoom = true;
+                ui.x_zoom_min     = mp.x - (mp.x - lim.X.Min) * zoom;
+                ui.x_zoom_max     = mp.x + (lim.X.Max - mp.x) * zoom;
+              }
+            }
+            else
+            {
+              // Zoom Y1 only, around mouse cursor.
+              const ImPlotRect  lim = ImPlot::GetPlotLimits(ImAxis_X1, ImAxis_Y1);
+              const ImPlotPoint  mp = ImPlot::GetPlotMousePos(ImAxis_X1, ImAxis_Y1);
+              ui.pending_y_zoom  = true;
+              ui.y_zoom_min      = mp.y - (mp.y - lim.Y.Min) * zoom;
+              ui.y_zoom_max      = mp.y + (lim.Y.Max - mp.y) * zoom;
+              ui.has_y_override  = true;
+
+              if (ps.has_y2)
+              {
+                const ImPlotRect  lim2 = ImPlot::GetPlotLimits(ImAxis_X1, ImAxis_Y2);
+                const ImPlotPoint  mp2 = ImPlot::GetPlotMousePos(ImAxis_X1, ImAxis_Y2);
+                ui.pending_y2_zoom  = true;
+                ui.y2_zoom_min      = mp2.y - (mp2.y - lim2.Y.Min) * zoom;
+                ui.y2_zoom_max      = mp2.y + (lim2.Y.Max - mp2.y) * zoom;
+                ui.has_y2_override  = true;
+              }
+            }
+            io.MouseWheel = 0.0f;   // consume → ImPlot's EndPlot won't zoom
+          }
+
+          if (ui.auto_scroll && !cursor_locks[ps.name].locked &&
+              ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+            ui.auto_scroll = false;
+        }
+
+        // Scatter plots: ImPlot handles zoom natively; detect user interaction to
+        // disable auto-fit so the next auto-fit frame doesn't fight the manual zoom.
+        if (ps.all_scatter && ImPlot::IsPlotHovered())
+        {
+          ImGuiIO & io = ImGui::GetIO();
+          if (io.MouseWheel != 0.0f || ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+          {
+            ui.has_x_override = true;
+            ui.has_y_override = true;
+          }
+        }
+
+        // Save visible X range for next frame's Y auto-fit computation.
+        {
+          const ImPlotRect cur = ImPlot::GetPlotLimits(ImAxis_X1, ImAxis_Y1);
+          ui.last_vis_x_min = cur.X.Min;
+          ui.last_vis_x_max = cur.X.Max;
+        }
+        ui.last_hovered = ImPlot::IsPlotHovered();
+
         // ── Cursor: hover + click-to-lock (line plots only) ──────────────
         CursorLock & cl = cursor_locks[ps.name];
         if (ps.all_scatter)
@@ -1357,9 +1741,22 @@ void SimPlotter::renderLoop()
             ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         {
           if (cl.locked)
-            cl.locked = false;                            // any click unlocks
+          {
+            // Unlock: restore pre-lock auto_scroll and pause state.
+            cl.locked       = false;
+            ui.paused       = cl.was_paused;
+            ui.auto_scroll  = cl.was_auto_scroll;
+          }
           else
-          { cl.locked = true; cl.t = ImPlot::GetPlotMousePos(ImAxis_X1).x; }
+          {
+            // Lock: save state, snap to clicked time, pause the plot.
+            cl.locked          = true;
+            cl.t               = ImPlot::GetPlotMousePos(ImAxis_X1).x;
+            cl.was_auto_scroll = ui.auto_scroll;
+            cl.was_paused      = ui.paused;
+            ui.paused          = true;
+            ui.auto_scroll     = false;
+          }
         }
 
         const bool   show_cursor = cl.locked || ImPlot::IsPlotHovered();
@@ -1468,13 +1865,17 @@ void SimPlotter::renderLoop()
         ImPlot::EndPlot();
       }
       ImGui::EndGroup();
-
-      if (col == cols - 1 && row < rows - 1)
-        ImGui::Spacing();
+      if (col == cols - 1 && row < rows - 1) ImGui::Spacing();
     }
+    ImPlot::PopStyleVar(2);  // PlotPadding, LabelPadding
 
     ImGui::End();
     ImGui::PopStyleVar(2);
+
+    // Skip the X11 present call if we are already shutting down — this avoids
+    // blocking on the X11 display lock while the main thread waits for us to
+    // exit (the classic reload deadlock).
+    if (!running_sp->load()) break;
 
     // ── Present ───────────────────────────────────────────────────────────
     ImGui::Render();
