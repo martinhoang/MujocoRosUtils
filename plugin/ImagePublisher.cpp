@@ -406,7 +406,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
   }
   print_debug("[ImagePublisher::Create] depth_near=%.3f, depth_far=%.3f\n", depth_near, depth_far);
 
-  ImagePublisher::ReadbackMode readback_mode = ImagePublisher::ReadbackMode::Legacy;
+  ImagePublisher::ReadbackMode readback_mode = ImagePublisher::ReadbackMode::Auto;
   const char *readback_mode_char             = mj_getPluginConfig(m, plugin_id, ATTR_READBACK_MODE);
   if (readback_mode_char && strlen(readback_mode_char) > 0)
   {
@@ -437,7 +437,7 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
       readback_mode = ImagePublisher::ReadbackMode::Cuda;
       print_debug("[ImagePublisher::Create] readback_mode=cuda\n");
 #else
-      print_debug("[ImagePublisher::Create] readback_mode=cuda requested but not compiled in — falling back to pbo\n");
+      print_warning("[ImagePublisher::Create] readback_mode=cuda requested but not compiled in — falling back to pbo\n");
       readback_mode = ImagePublisher::ReadbackMode::Pbo;
 #endif
     }
@@ -640,7 +640,12 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   }
   else // Auto
   {
-    use_pbo_readback_ = true; // Default to PBO for Auto mode
+#ifdef HAS_CUDA
+    readback_mode_    = ReadbackMode::Cuda;
+    use_pbo_readback_ = true;
+#else
+    use_pbo_readback_ = true; // fall back to PBO
+#endif
   }
 
 #ifdef HAS_CUDA
@@ -660,7 +665,10 @@ ImagePublisher::ImagePublisher(const mjModel *m,
       cuda_rot_preset_ = cuda_img_proc::rotationPresetToInt(point_cloud_rotation_preset_);
     }
   }
+#else
+  print_warning("[ImagePublisher] No CUDA support — falling back to PBO readback\n");
 #endif
+
 
   // Build the SimDataRegistry key from the topic namespace (strip trailing slash).
   registry_key_ = topic_namespace;

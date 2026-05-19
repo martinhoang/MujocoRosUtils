@@ -945,6 +945,24 @@ SysCaps probeSysCaps()
   c.on_x11     = (getenv("DISPLAY")          != nullptr);
   c.on_wayland = (getenv("WAYLAND_DISPLAY")  != nullptr);
 
+  // ── Override SDL_VIDEODRIVER=dummy when a real display is available ───────
+  // This is sometimes set system-wide (e.g. in /etc/environment for CI/headless
+  // setups) and silently prevents SDL2 from connecting to the display even when
+  // DISPLAY or WAYLAND_DISPLAY is set.  Unset it here so SDL2 auto-detects the
+  // correct driver (x11 / wayland).
+  {
+    const char * sdl_drv = getenv("SDL_VIDEODRIVER");
+    if (sdl_drv && strcmp(sdl_drv, "dummy") == 0 && (c.on_x11 || c.on_wayland))
+    {
+      fprintf(stderr,
+        "[SimPlotter]  NOTE: SDL_VIDEODRIVER=dummy overridden — "
+        "real display detected (%s).\n",
+        c.on_wayland ? "Wayland" : "X11");
+      fflush(stderr);
+      unsetenv("SDL_VIDEODRIVER");
+    }
+  }
+
   // ── Capability report ────────────────────────────────────────────────────
   fprintf(stderr,
     "[SimPlotter] ── Render capability probe ───────────────────────────────\n"
@@ -994,9 +1012,24 @@ SysCaps probeSysCaps()
 }
 
 // Returns the best backend this system supports, logging the decision.
-RenderBackend chooseBestBackend(const SysCaps & c)
+// On X11: always prefer GLX — it is the native, stable path and avoids
+// NVIDIA+Mesa GLVND EGL routing issues that can crash on context creation.
+// On Wayland / headless: use EGL (the only GPU path available).
+RenderBackend chooseBestBackend(const SysCaps & c, bool & out_use_egl)
 {
-  if (c.sdl_egl_hint && c.egl_present && (c.on_x11 || c.on_wayland)) {
+  out_use_egl = false;
+
+  if (c.on_x11) {
+    // GLX: SDL2 creates an OpenGL 3.x context through libGLX without any EGL
+    // env-var forcing.  Stable alongside GLFW's existing GLX context.
+    fprintf(stderr, "[SimPlotter]  Backend: GPU/OpenGL via GLX "
+                    "(hardware-accelerated)\n");
+    fflush(stderr);
+    return RenderBackend::EGL_OPENGL;  // same ImGui OpenGL3 path; no EGL env needed
+  }
+
+  if (c.sdl_egl_hint && c.egl_present && c.on_wayland) {
+    out_use_egl = true;
     const char * via = c.egl_nvidia ? "NVIDIA EGL (GLVND)" :
                        c.egl_mesa   ? "Mesa EGL" : "EGL";
     fprintf(stderr, "[SimPlotter]  Backend: GPU/OpenGL via %s "
@@ -1037,6 +1070,7 @@ void SimPlotter::renderLoop()
   // thread crashed or was detached without releasing the slot.
   RenderBackend backend;
   bool          use_nvidia_egl = false;   // captured for fallback cleanup
+  bool          use_egl        = false;   // true only for Wayland/headless EGL path
   {
     std::unique_lock<std::mutex> slot_lk(g_render_slot_mtx);
     bool got = g_render_slot_cv.wait_for(slot_lk, std::chrono::seconds(10),
@@ -1053,11 +1087,12 @@ void SimPlotter::renderLoop()
 
     // Probe system capabilities and choose backend (logged to stderr).
     const SysCaps caps = probeSysCaps();
-    backend = chooseBestBackend(caps);
+    backend = chooseBestBackend(caps, use_egl);
 
-    // EGL attributes must be set before SDL_Init so the video subsystem
-    // picks the right OpenGL platform layer.
-    if (backend == RenderBackend::EGL_OPENGL) {
+    // EGL env vars must be set before SDL_Init — only needed on Wayland/headless.
+    // On X11 SDL2 uses GLX naturally; forcing EGL causes NVIDIA+Mesa GLVND
+    // routing conflicts that crash on eglMakeCurrent / eglTerminate.
+    if (backend == RenderBackend::EGL_OPENGL && use_egl) {
       setenv("SDL_VIDEO_X11_FORCE_EGL", "1", 1);
 
       // On NVIDIA/GLVND systems, Mesa EGL gets loaded alongside NVIDIA EGL.
@@ -1087,6 +1122,43 @@ void SimPlotter::renderLoop()
       return;
     }
     ++g_sdl_refcount;
+
+    // ── Guard against SDL2 silently selecting the "dummy" video driver ────────
+    // Relevant only when EGL forcing is active (Wayland/headless path).
+    // When SDL_VIDEO_X11_FORCE_EGL=1 and EGL is unavailable, SDL_Init can
+    // succeed but silently pick the headless "dummy" driver.
+    if (backend == RenderBackend::EGL_OPENGL && use_egl)
+    {
+      const char * active_drv = SDL_GetCurrentVideoDriver();
+      if (active_drv && strcmp(active_drv, "dummy") == 0)
+      {
+        fprintf(stderr,
+          "[SimPlotter] SDL_Init selected 'dummy' video driver — "
+          "EGL not available on this display.\n"
+          "[SimPlotter] Reinitialising without EGL hint (software fallback).\n");
+        fflush(stderr);
+        SDL_Quit();
+        --g_sdl_refcount;
+        unsetenv("SDL_VIDEO_X11_FORCE_EGL");
+        if (use_nvidia_egl)
+        {
+          unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
+          use_nvidia_egl = false;
+        }
+        use_egl = false;
+        SDL_GL_ResetAttributes();
+        backend = RenderBackend::SOFTWARE;
+        if (SDL_Init(SDL_INIT_VIDEO) != 0)
+        {
+          fprintf(stderr, "[SimPlotter] SDL_Init (software fallback) failed: %s\n", SDL_GetError());
+          fflush(stderr);
+          g_render_slot_taken = false;
+          g_render_slot_cv.notify_all();
+          return;
+        }
+        ++g_sdl_refcount;
+      }
+    }
   }
 
   // ── SDL2 window + backend-specific context ────────────────────────────────
@@ -1105,15 +1177,11 @@ void SimPlotter::renderLoop()
       win_flags_base | (backend == RenderBackend::EGL_OPENGL ? SDL_WINDOW_OPENGL : 0));
   if (!window && backend == RenderBackend::EGL_OPENGL)
   {
-    // SDL_CreateWindow itself can fail with "Could not get EGL display" when
-    // SDL_VIDEO_X11_FORCE_EGL=1 is set but EGL is not available on the X11
-    // display (e.g. running inside a nested X server, VNC, or after a driver
-    // change).  Fall back to software renderer immediately.
     fprintf(stderr,
-            "[SimPlotter] SDL_CreateWindow (EGL) failed: %s\n"
+            "[SimPlotter] SDL_CreateWindow (OpenGL) failed: %s\n"
             "[SimPlotter] Falling back to software renderer.\n",
             SDL_GetError());
-    unsetenv("SDL_VIDEO_X11_FORCE_EGL");
+    if (use_egl) unsetenv("SDL_VIDEO_X11_FORCE_EGL");
     if (use_nvidia_egl) unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
     SDL_GL_ResetAttributes();
     backend = RenderBackend::SOFTWARE;
@@ -1138,28 +1206,39 @@ void SimPlotter::renderLoop()
   if (backend == RenderBackend::EGL_OPENGL) {
     gl_ctx = SDL_GL_CreateContext(window);
     if (!gl_ctx) {
+      // On X11 this means GLX context creation failed (rare).
+      // On Wayland/headless it may mean EGL GLVND routing is wrong.
+      // SDL_GL_CreateContext leaves the driver_loaded flag set even on failure,
+      // which makes SDL_GetWindowSurface() refuse to work (software rendering
+      // crashes on first present).  The safe recovery is: destroy the tainted
+      // window, reinitialise SDL without any GL state, and create a plain
+      // software-renderer window.
       fprintf(stderr,
-        "[SimPlotter] WARN: EGL context creation failed (%s).\n"
-        "[SimPlotter]       Falling back to software renderer.\n"
-        "[SimPlotter]       Tip: set __EGL_VENDOR_LIBRARY_FILENAMES to your vendor JSON\n"
-        "[SimPlotter]       to force a specific EGL vendor if GLVND routing is wrong.\n",
+        "[SimPlotter] WARN: OpenGL context creation failed (%s).\n"
+        "[SimPlotter]       Falling back to software renderer.\n",
         SDL_GetError());
+      fflush(stderr);
 
-      // SDL_GL_CreateContext leaves gl_config.driver_loaded = 1 even on failure.
-      // SDL_GetWindowSurface() refuses to work when a GL driver is loaded, which
-      // makes the software renderer's RenderPresent crash on the first frame.
-      // Fix: unload the GL library (resets driver_loaded → 0), then destroy the
-      // EGL-tainted window, and create a fresh non-OpenGL window for software rendering.
-      SDL_GL_UnloadLibrary();
       SDL_DestroyWindow(window);
       window = nullptr;
 
-      unsetenv("SDL_VIDEO_X11_FORCE_EGL");
+      // Fully reset SDL to clear any driver state left by the failed GL init.
+      SDL_Quit();
+      --g_sdl_refcount;
+      if (use_egl)        unsetenv("SDL_VIDEO_X11_FORCE_EGL");
       if (use_nvidia_egl) unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
       SDL_GL_ResetAttributes();
       backend = RenderBackend::SOFTWARE;
+      if (SDL_Init(SDL_INIT_VIDEO) != 0)
+      {
+        fprintf(stderr, "[SimPlotter] SDL_Init (software fallback) failed: %s\n",
+                SDL_GetError());
+        fflush(stderr);
+        release_slot();  // refcount already 0 here, just releases slot
+        return;
+      }
+      ++g_sdl_refcount;
 
-      // Fresh window with no OpenGL flag — software renderer works on this cleanly.
       window = SDL_CreateWindow(
           "SimPlotter",
           SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
