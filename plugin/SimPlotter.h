@@ -93,6 +93,16 @@ struct LineConfig
   bool        is_scatter = false; ///< true → PlotScatter; source_x drives the X axis
   bool        persist_on_reset = false; ///< true → ring buffer survives sim reset/reload
   RingBuffer  ring{500};
+  /// Accumulated data from all past resets (only populated when persist_on_reset=true).
+  /// On each reset the live ring is drained here and the ring is cleared for the new episode.
+  std::vector<double> persist_xs;
+  std::vector<double> persist_ys;
+  uint64_t persist_gen   = 0;     ///< incremented each time persist_xs/ys change
+  /// Cached axis bounds for the persist data (updated at reset, not every frame).
+  double persist_xmin =  std::numeric_limits<double>::max();
+  double persist_xmax = -std::numeric_limits<double>::max();
+  double persist_ymin =  std::numeric_limits<double>::max();
+  double persist_ymax = -std::numeric_limits<double>::max();
 };
 
 // ─── Per-plot configuration ───────────────────────────────────────────────────
@@ -118,6 +128,16 @@ struct PlotConfig
   bool paused  = false;
   bool has_y2  = false;
   bool persist_on_reset = false; ///< true → all lines inherit persist unless overridden
+  /** Max points passed to ImPlot per scatter series per frame.
+   *  Points outside the visible axis range are discarded first, then the
+   *  remainder is stride-sampled down to this limit.  Keeps cursor/tooltip
+   *  search fast regardless of how much history has accumulated. */
+  int scatter_render_cap = 3000;
+  /** Minimum pixel separation between rendered scatter points (grid deduplication).
+   *  A 2-D grid of (plot_w/res)×(plot_h/res) cells is built per render call;
+   *  only the first point that maps to each cell is drawn.  Larger values = fewer
+   *  points and faster cursor search.  0 = disabled (only stride cap applies). */
+  int scatter_pixel_res = 4;
 
   std::vector<LineConfig> lines;
 };

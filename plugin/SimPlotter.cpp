@@ -472,6 +472,10 @@ void SimPlotter::applyPlotFromArgs(PlotConfig & pc,
   if (kv.count("title")) pc.title = kv.at("title");
   if (kv.count("persist"))
     pc.persist_on_reset = (kv.at("persist") == "true" || kv.at("persist") == "1");
+  if (kv.count("scatter_cap"))
+    pc.scatter_render_cap = std::stoi(kv.at("scatter_cap"));
+  if (kv.count("scatter_res"))
+    pc.scatter_pixel_res = std::stoi(kv.at("scatter_res"));
 }
 
 void SimPlotter::applyLineFromArgs(LineConfig & lc,
@@ -643,9 +647,13 @@ SimPlotter * SimPlotter::Create(const mjModel * m, mjData *, int plugin_id)
     if (pmap.count("time_window"))
       pc.time_window = std::stod(pmap.at("time_window"));
 
-    // persist=true → all lines in this plot keep data across sim resets by default
     if (pmap.count("persist"))
       pc.persist_on_reset = (pmap.at("persist") == "true" || pmap.at("persist") == "1");
+
+    if (pmap.count("scatter_cap"))
+      pc.scatter_render_cap = std::stoi(pmap.at("scatter_cap"));
+    if (pmap.count("scatter_res"))
+      pc.scatter_pixel_res = std::stoi(pmap.at("scatter_res"));
 
     const int max_pts = pmap.count("max_pts") ? std::stoi(pmap.at("max_pts")) : 500;
 
@@ -741,13 +749,28 @@ SimPlotter::~SimPlotter()
 
 void SimPlotter::reset(const mjModel *, int)
 {
-  // Clear ring buffers on sim reset, unless the line has persist_on_reset=true.
   std::lock_guard<std::mutex> lk(mutex_);
   last_compute_time_ = -1.0;
   for (auto & pc : plots_)
     for (auto & lc : pc.lines)
-      if (!lc.persist_on_reset)
-        lc.ring = RingBuffer(lc.ring.capacity);
+    {
+      if (lc.persist_on_reset)
+      {
+        // Drain current ring into the persistent accumulator, then start fresh.
+        // This way old points are never overwritten by new-episode data.
+        std::vector<double> rx, ry;
+        lc.ring.copyOrdered(rx, ry);
+        lc.persist_xs.insert(lc.persist_xs.end(), rx.begin(), rx.end());
+        lc.persist_ys.insert(lc.persist_ys.end(), ry.begin(), ry.end());
+        // Update cached bounds so the render thread never has to loop over persist data.
+        for (double v : rx) { lc.persist_xmin = std::min(lc.persist_xmin, v);
+                              lc.persist_xmax = std::max(lc.persist_xmax, v); }
+        for (double v : ry) { lc.persist_ymin = std::min(lc.persist_ymin, v);
+                              lc.persist_ymax = std::max(lc.persist_ymax, v); }
+        ++lc.persist_gen;
+      }
+      lc.ring = RingBuffer(lc.ring.capacity);   // always start new episode with empty ring
+    }
 }
 
 void SimPlotter::compute(const mjModel *, mjData * d, int)
@@ -829,7 +852,11 @@ void SimPlotter::stopThreads()
 struct LineSnap
 {
   std::string         label;
-  std::vector<double> times, values;  // X and Y; for line plots times=sim_time
+  std::vector<double> times, values;  // X and Y for current episode ring data
+  // Persist data from previous episodes — only updated when persist_gen changes.
+  std::vector<double> persist_times, persist_values;
+  uint64_t            persist_gen = UINT64_MAX;  // sentinel: never matches LineConfig initial 0
+  double              persist_xmin, persist_xmax, persist_ymin, persist_ymax;
   float               color[3];
   int                 yaxis;
   bool                is_scatter = false;
@@ -843,7 +870,9 @@ struct PlotSnap
   double                 range_x[2], range_y[2], range_y2[2];
   double                 time_window;   ///< scrolling window width (seconds); 0 = show all
   bool                   has_y2;
-  bool                   all_scatter = false; ///< true when every line is scatter
+  bool                   all_scatter = false;
+  int                    scatter_render_cap = 3000;
+  int                    scatter_pixel_res  = 4;
   std::vector<LineSnap>  lines;
 };
 
@@ -1277,17 +1306,22 @@ void SimPlotter::renderLoop()
       std::unique_lock<std::mutex> lk(mutex_, std::try_to_lock);
       if (lk.owns_lock())
       {
-        // Resize to match current plots count; if size changed rebuild all.
+        // Resize to match current plots count.
         const bool size_changed = (snaps.size() != plots_.size());
         if (size_changed) snaps.resize(plots_.size());
 
         for (size_t pi = 0; pi < plots_.size(); ++pi)
         {
           const auto & pc = plots_[pi];
-          // Skip rebuilding paused plots — they keep their previous snapshot.
-          if (!size_changed && plot_ui[pc.name].paused) continue;
+          PlotSnap    & ps = snaps[pi];  // update in-place so LineSnap persist_gen survives
 
-          PlotSnap ps;
+          // Resize lines array if layout changed; reset persist_gen on new entries.
+          const bool lines_changed = (ps.lines.size() != pc.lines.size());
+          if (lines_changed) ps.lines.resize(pc.lines.size());
+
+          // Skip rebuilding paused plots UNLESS the structure changed.
+          if (!size_changed && !lines_changed && plot_ui[pc.name].paused) continue;
+
           ps.name   = pc.name;   ps.title  = pc.title;
           ps.x      = pc.init_x; ps.y      = pc.init_y;
           ps.w      = pc.init_w; ps.h      = pc.init_h;
@@ -1299,10 +1333,15 @@ void SimPlotter::renderLoop()
           std::memcpy(ps.range_y2, pc.range_y2, sizeof(ps.range_y2));
           ps.time_window = pc.time_window;
           ps.has_y2 = pc.has_y2;
+          ps.scatter_render_cap = pc.scatter_render_cap;
+          ps.scatter_pixel_res  = pc.scatter_pixel_res;
+
           bool all_scat = !pc.lines.empty();
-          for (const auto & lc : pc.lines)
+          for (size_t li = 0; li < pc.lines.size(); ++li)
           {
-            LineSnap ls;
+            const auto & lc = pc.lines[li];
+            LineSnap    & ls = ps.lines[li];  // in-place: persist_gen is preserved
+
             ls.label      = lc.label;
             ls.yaxis      = lc.yaxis;
             ls.color[0]   = lc.color[0];
@@ -1311,11 +1350,23 @@ void SimPlotter::renderLoop()
             ls.is_scatter = lc.is_scatter;
             ls.x_label    = lc.is_scatter ? lc.source_x.raw : "";
             lc.ring.copyOrdered(ls.times, ls.values);
-            ps.lines.push_back(std::move(ls));
+
+            // Copy persist data only when generation changed (reset or first init).
+            // This is O(N) but happens only once per sim reset, not every frame.
+            if (ls.persist_gen != lc.persist_gen)
+            {
+              ls.persist_times  = lc.persist_xs;
+              ls.persist_values = lc.persist_ys;
+              ls.persist_xmin   = lc.persist_xmin;
+              ls.persist_xmax   = lc.persist_xmax;
+              ls.persist_ymin   = lc.persist_ymin;
+              ls.persist_ymax   = lc.persist_ymax;
+              ls.persist_gen    = lc.persist_gen;
+            }
+
             if (!lc.is_scatter) all_scat = false;
           }
           ps.all_scatter = all_scat;
-          snaps[pi] = std::move(ps);
         }
       } // lock released here — physics thread can run freely
     } // try_lock scope
@@ -1522,7 +1573,13 @@ void SimPlotter::renderLoop()
             double xmin =  std::numeric_limits<double>::max();
             double xmax = -std::numeric_limits<double>::max();
             for (const auto & ls : ps.lines)
-              for (double v : ls.times) { xmin = std::min(xmin, v); xmax = std::max(xmax, v); }
+            {
+              for (double v : ls.times)
+              { xmin = std::min(xmin, v); xmax = std::max(xmax, v); }
+              // Use cached persist bounds — no per-point loop over history.
+              if (!ls.persist_times.empty())
+              { xmin = std::min(xmin, ls.persist_xmin); xmax = std::max(xmax, ls.persist_xmax); }
+            }
             if (xmin <= xmax)
             {
               const double margin = std::max((xmax - xmin) * 0.08, 0.05);
@@ -1562,7 +1619,7 @@ void SimPlotter::renderLoop()
           ymax = -std::numeric_limits<double>::max();
           for (const auto & ls : ps.lines)
           {
-            if (ls.yaxis != yaxis_id || ls.values.empty()) continue;
+            if (ls.yaxis != yaxis_id) continue;
             for (size_t k = 0; k < ls.values.size(); ++k)
             {
               if (!ps.all_scatter)
@@ -1572,6 +1629,12 @@ void SimPlotter::renderLoop()
               }
               ymin = std::min(ymin, ls.values[k]);
               ymax = std::max(ymax, ls.values[k]);
+            }
+            // Include cached persist Y bounds (O(1), no per-point loop).
+            if (!ls.persist_values.empty())
+            {
+              ymin = std::min(ymin, ls.persist_ymin);
+              ymax = std::max(ymax, ls.persist_ymax);
             }
           }
         };
@@ -1629,20 +1692,113 @@ void SimPlotter::renderLoop()
           ImPlot::SetupAxisFormat(ImAxis_Y2, "%.4g");
         }
 
+        // ── View-adaptive scatter decimation ─────────────────────────────
+        // After all Setup* calls the axis limits are settled — query them now.
+        const ImPlotRect plot_lims  = ImPlot::GetPlotLimits(ImAxis_X1, ImAxis_Y1);
+        const ImVec2     scatter_px = ImPlot::GetPlotSize();  // inner plot area in pixels
+        const double slim_x0 = plot_lims.X.Min, slim_x1 = plot_lims.X.Max;
+        const double slim_y0 = plot_lims.Y.Min, slim_y1 = plot_lims.Y.Max;
+        const int    scap    = ps.scatter_render_cap;
+        const int    spres   = ps.scatter_pixel_res;
+
+        // Stamp-based 256×256 grid: "clearing" costs O(1) (stamp increment only).
+        // A cell is vacant when tl_grid[cell] != current_stamp.
+        static thread_local std::vector<uint32_t> tl_grid(256 * 256, 0);
+        static thread_local uint32_t              tl_stamp = 0;
+        static thread_local std::vector<double>   tl_sx, tl_sy;
+
+        auto plot_scatter_adaptive =
+            [&](const char * label,
+                const std::vector<double> & xs, const std::vector<double> & ys)
+        {
+          const int n = static_cast<int>(xs.size());
+          if (n == 0) return;
+
+          const double xrng = slim_x1 - slim_x0;
+          const double yrng = slim_y1 - slim_y0;
+
+          // Fast path: already small and degenerate range — pass through directly.
+          if (n <= scap && spres <= 0)
+          {
+            ImPlot::PlotScatter(label, xs.data(), ys.data(), n);
+            return;
+          }
+
+          // Grid deduplication: each cell covers (spres × spres) screen pixels.
+          const bool do_grid = (spres > 0 && xrng > 0.0 && yrng > 0.0);
+          int gw = 1, gh = 1;
+          uint32_t stamp = 0;
+          if (do_grid)
+          {
+            gw    = std::max(1, std::min(256, static_cast<int>(scatter_px.x / spres)));
+            gh    = std::max(1, std::min(256, static_cast<int>(scatter_px.y / spres)));
+            stamp = ++tl_stamp;
+            if (tl_stamp == 0) { std::fill(tl_grid.begin(), tl_grid.end(), 0); stamp = ++tl_stamp; }
+          }
+
+          // Stride safety cap applied after grid dedup.
+          const int stride = std::max(1, n / scap);
+
+          tl_sx.clear(); tl_sy.clear();
+          tl_sx.reserve(std::min(n / stride + 1, scap + 1));
+          tl_sy.reserve(tl_sx.capacity());
+          int counter = 0;
+
+          for (int i = 0; i < n; ++i)
+          {
+            const double x = xs[i], y = ys[i];
+            // Discard points outside visible range (speeds up tooltip search too).
+            if (x < slim_x0 || x > slim_x1 || y < slim_y0 || y > slim_y1) continue;
+            // Grid dedup: skip if this pixel cell already has a representative point.
+            if (do_grid)
+            {
+              const int cx   = std::clamp(static_cast<int>((x - slim_x0) / xrng * gw), 0, gw - 1);
+              const int cy   = std::clamp(static_cast<int>((y - slim_y0) / yrng * gh), 0, gh - 1);
+              const int cell = cy * 256 + cx;
+              if (tl_grid[cell] == stamp) continue;
+              tl_grid[cell] = stamp;
+            }
+            // Stride safety cap.
+            if (counter++ % stride != 0) continue;
+            tl_sx.push_back(x); tl_sy.push_back(y);
+          }
+          ImPlot::PlotScatter(label, tl_sx.data(), tl_sy.data(),
+                              static_cast<int>(tl_sx.size()));
+        };
+
         // ── Plot lines ───────────────────────────────────────────────────
         for (const auto & ls : ps.lines)
         {
-          if (ls.times.empty()) continue;
+          const bool has_current = !ls.times.empty();
+          const bool has_persist = !ls.persist_times.empty();
+          if (!has_current && !has_persist) continue;
           ImPlot::SetAxes(ImAxis_X1, ls.yaxis == 2 ? ImAxis_Y2 : ImAxis_Y1);
-          ImPlot::SetNextLineStyle(ImVec4(ls.color[0], ls.color[1], ls.color[2], 1.0f));
           if (ls.is_scatter)
-            ImPlot::PlotScatter(ls.label.c_str(),
-                                ls.times.data(), ls.values.data(),
-                                static_cast<int>(ls.times.size()));
+          {
+            // Persisted data from past resets (dimmer, drawn first so current sits on top).
+            if (has_persist)
+            {
+              ImPlot::SetNextLineStyle(ImVec4(ls.color[0] * 0.5f,
+                                              ls.color[1] * 0.5f,
+                                              ls.color[2] * 0.5f, 0.55f));
+              plot_scatter_adaptive((ls.label + "##h").c_str(),
+                                    ls.persist_times, ls.persist_values);
+            }
+            // Current episode data (full brightness).
+            if (has_current)
+            {
+              ImPlot::SetNextLineStyle(ImVec4(ls.color[0], ls.color[1], ls.color[2], 1.0f));
+              plot_scatter_adaptive(ls.label.c_str(), ls.times, ls.values);
+            }
+          }
           else
+          {
+            if (!has_current) continue;
+            ImPlot::SetNextLineStyle(ImVec4(ls.color[0], ls.color[1], ls.color[2], 1.0f));
             ImPlot::PlotLine(ls.label.c_str(),
                              ls.times.data(), ls.values.data(),
                              static_cast<int>(ls.times.size()));
+          }
         }
 
         // ── Custom scroll zoom: decouple X and Y axes ────────────────────
@@ -2087,7 +2243,11 @@ void SimPlotter::handlePlotCommand(PlotCmdReq req, PlotCmdRes res)
     {
       if (!plot.empty() && pc.name != plot) continue;
       for (auto & lc : pc.lines)
+      {
         lc.ring = RingBuffer(lc.ring.capacity);
+        lc.persist_xs.clear();
+        lc.persist_ys.clear();
+      }
       ++count;
     }
     res->success = true;
@@ -2115,41 +2275,165 @@ void SimPlotter::handlePlotCommand(PlotCmdReq req, PlotCmdRes res)
   }
 
   // ── export ────────────────────────────────────────────────────────────────
+  // Usage:
+  //   operation: "export"
+  //   plot:      plot name (empty = all plots)
+  //   args:      path=/tmp/myfile   (optional; default /tmp/simplotter_<plot>.<ext>)
+  //              format=csv|json    (default csv)
+  //              all=true           (include persist + ring; default true)
+  //
+  // CSV — one row per sample, columns: x,<line1_y>,<line2_y>,...
+  //   For scatter plots "x" is the X source value, not sim time.
+  //   For line plots "x" is sim time.
+  //   Persist data rows are written first (labelled with episode index in a
+  //   comment-like column), followed by current-ring rows.
+  //
+  // JSON — Rerun / React-compatible structure:
+  //   { "plots": [ { "name":..., "title":..., "lines": [
+  //     { "label":..., "x_label":..., "is_scatter":..., "x":[...], "y":[...] } ] } ] }
+  //   Load in React with Recharts / Victory / uplot / Apache ECharts; or feed
+  //   directly to a Rerun blueprint as a TimeSeriesScalar stream.
   if (op == "export")
   {
-    auto * pc = findPlot(plot);
-    if (!pc) { res->message = "plot '" + plot + "' not found"; return; }
-
-    std::string path = kv.count("path") ? kv.at("path") : ("/tmp/simplotter_" + plot + ".csv");
-    std::ofstream f(path);
-    if (!f) { res->message = "cannot open '" + path + "'"; return; }
-
-    // Header
-    f << "time";
-    for (const auto & lc : pc->lines) f << "," << lc.label;
-    f << "\n";
-
-    // Data: align on time axis (use first line's times as reference)
-    if (!pc->lines.empty())
+    // Collect target plots.
+    std::vector<PlotConfig *> targets;
+    if (plot.empty())
+      for (auto & pc : plots_) targets.push_back(&pc);
+    else
     {
-      std::vector<std::vector<double>> all_t(pc->lines.size()), all_v(pc->lines.size());
-      for (size_t i = 0; i < pc->lines.size(); ++i)
-        pc->lines[i].ring.copyOrdered(all_t[i], all_v[i]);
+      auto * pc = findPlot(plot);
+      if (!pc) { res->message = "plot '" + plot + "' not found"; return; }
+      targets.push_back(pc);
+    }
 
-      const size_t rows = all_t[0].size();
-      for (size_t r = 0; r < rows; ++r)
+    const std::string fmt = kv.count("format") ? kv.at("format") : "csv";
+    const bool include_all = !kv.count("all") || kv.at("all") != "false";
+
+    // Helper: merge persist + ring into one ordered pair of vectors.
+    auto mergeData = [&](const LineConfig & lc,
+                         std::vector<double> & out_x,
+                         std::vector<double> & out_y)
+    {
+      if (include_all && !lc.persist_xs.empty())
       {
-        f << std::setprecision(6) << all_t[0][r];
-        for (size_t c = 0; c < pc->lines.size(); ++c)
-        {
-          f << ",";
-          if (r < all_v[c].size()) f << all_v[c][r];
-        }
+        out_x.insert(out_x.end(), lc.persist_xs.begin(), lc.persist_xs.end());
+        out_y.insert(out_y.end(), lc.persist_ys.begin(), lc.persist_ys.end());
+      }
+      std::vector<double> rx, ry;
+      lc.ring.copyOrdered(rx, ry);
+      out_x.insert(out_x.end(), rx.begin(), rx.end());
+      out_y.insert(out_y.end(), ry.begin(), ry.end());
+    };
+
+    std::ostringstream report;
+    int file_count = 0;
+
+    // ── CSV export ────────────────────────────────────────────────────────
+    if (fmt == "csv")
+    {
+      for (auto * pc : targets)
+      {
+        std::string path = kv.count("path")
+          ? kv.at("path")
+          : ("/tmp/simplotter_" + pc->name + ".csv");
+        // If exporting multiple plots and a single path was given, append plot name.
+        if (targets.size() > 1 && kv.count("path"))
+          path = kv.at("path") + "_" + pc->name + ".csv";
+
+        std::ofstream f(path);
+        if (!f) { res->message = "cannot open '" + path + "'"; return; }
+        f << std::setprecision(9);
+
+        // Gather data for all lines.
+        const int nl = static_cast<int>(pc->lines.size());
+        std::vector<std::vector<double>> xs(nl), ys(nl);
+        for (int i = 0; i < nl; ++i)
+          mergeData(pc->lines[i], xs[i], ys[i]);
+
+        // Header: for scatter, X column = src_x label; for line plots, "time_s".
+        const bool is_scat = pc->lines.empty() ? false : pc->lines[0].is_scatter;
+        const std::string x_col = is_scat
+          ? (pc->lines[0].source_x.raw.empty() ? "x" : pc->lines[0].source_x.raw)
+          : "time_s";
+        f << x_col;
+        for (const auto & lc : pc->lines)
+          f << "," << lc.label;
         f << "\n";
+
+        // Rows: use first line's X as the row index.
+        if (!xs.empty())
+        {
+          const size_t rows = xs[0].size();
+          for (size_t r = 0; r < rows; ++r)
+          {
+            f << xs[0][r];
+            for (int c = 0; c < nl; ++c)
+            {
+              f << ",";
+              if (r < ys[c].size()) f << ys[c][r];
+            }
+            f << "\n";
+          }
+        }
+        report << path << " (" << (xs.empty() ? 0 : xs[0].size()) << " rows) ";
+        ++file_count;
       }
     }
+    // ── JSON export ───────────────────────────────────────────────────────
+    else if (fmt == "json")
+    {
+      // Single JSON file covering all target plots.
+      std::string path = kv.count("path")
+        ? kv.at("path")
+        : "/tmp/simplotter_export.json";
+      if (targets.size() == 1 && !kv.count("path"))
+        path = "/tmp/simplotter_" + targets[0]->name + ".json";
+
+      std::ofstream f(path);
+      if (!f) { res->message = "cannot open '" + path + "'"; return; }
+      f << std::setprecision(9);
+
+      f << "{\"plots\":[\n";
+      for (size_t pi = 0; pi < targets.size(); ++pi)
+      {
+        auto * pc = targets[pi];
+        f << "  {\"name\":\"" << pc->name << "\",\"title\":\"" << pc->title
+          << "\",\"lines\":[\n";
+        for (size_t li = 0; li < pc->lines.size(); ++li)
+        {
+          const auto & lc = pc->lines[li];
+          std::vector<double> mx, my;
+          mergeData(lc, mx, my);
+          const std::string x_lbl = lc.is_scatter ? lc.source_x.raw : "time_s";
+          f << "    {\"label\":\"" << lc.label << "\","
+            << "\"x_label\":\"" << x_lbl << "\","
+            << "\"is_scatter\":" << (lc.is_scatter ? "true" : "false") << ","
+            << "\"x\":[";
+          for (size_t k = 0; k < mx.size(); ++k)
+            f << mx[k] << (k + 1 < mx.size() ? "," : "");
+          f << "],\"y\":[";
+          for (size_t k = 0; k < my.size(); ++k)
+            f << my[k] << (k + 1 < my.size() ? "," : "");
+          f << "]}";
+          if (li + 1 < pc->lines.size()) f << ",";
+          f << "\n";
+        }
+        f << "  ]}";
+        if (pi + 1 < targets.size()) f << ",";
+        f << "\n";
+      }
+      f << "]}\n";
+      report << path;
+      ++file_count;
+    }
+    else
+    {
+      res->message = "unknown format '" + fmt + "' (csv|json)";
+      return;
+    }
+
     res->success = true;
-    res->message = "exported to " + path;
+    res->message = "exported " + std::to_string(file_count) + " file(s): " + report.str();
     return;
   }
 
