@@ -100,10 +100,34 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   }
   else
   {
-    std::string umanoid_simulation_mujoco = "umanoid_simulation_mujoco";
-    auto        umanoid_simulation_mujoco_share_directory
-      = ament_index_cpp::get_package_share_directory(umanoid_simulation_mujoco);
-    config_file_path = umanoid_simulation_mujoco_share_directory + "/config/ros2_controllers.yaml";
+    // No config_file or parameters attribute set — try the default fallback package.
+    // get_package_share_directory throws PackageNotFoundError if the package is not
+    // installed/sourced.  We must catch it here because this code runs inside a C-style
+    // plugin.init function pointer: an uncaught C++ exception through a plain function
+    // pointer is undefined behaviour and causes a segfault inside MuJoCo.
+    try
+    {
+      auto share = ament_index_cpp::get_package_share_directory("umanoid_simulation_mujoco");
+      config_file_path = share + "/config/ros2_controllers.yaml";
+      RCLCPP_WARN(rclcpp::get_logger("Ros2Control"),
+                  "No 'config_file' attribute set on the Ros2Control plugin <instance>. "
+                  "Falling back to default: %s",
+                  config_file_path.c_str());
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("Ros2Control"),
+                   "Ros2Control plugin has no 'config_file' attribute AND the fallback package "
+                   "'umanoid_simulation_mujoco' was not found (%s).\n"
+                   "Add a config element inside the <instance> in your MJCF, e.g.:\n"
+                   "  <instance name=\"ros2_control\">\n"
+                   "    <config key=\"config_file\" "
+                   "value=\"/path/to/ros2_controllers.yaml\"/>\n"
+                   "  </instance>\n"
+                   "Aborting Ros2Control plugin initialisation.",
+                   e.what());
+      return nullptr; // plugin.init returns -1 → MuJoCo reports failure gracefully
+    }
   }
 
   std::unique_ptr<Ros2Control> ret;
@@ -265,10 +289,7 @@ bool Ros2Control::initialize()
       arguments.push_back(RCL_PARAM_FILE_FLAG);
       arguments.push_back(config_file_path_);
     }
-    else
-    {
-      arguments.push_back(RCL_PARAM_FILE_FLAG);
-    }
+    // else: no config file → pass no arguments; rcl_parse_arguments on empty argv is valid.
 
     std::vector<const char *> argv;
 

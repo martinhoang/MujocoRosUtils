@@ -11,6 +11,7 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -109,6 +110,10 @@ protected:
 
   // Per-camera last-seen seq: avoids redundant 900KB BGR copies in compute()
   std::unordered_map<std::string, uint64_t> last_camera_snap_seq_;
+
+  // Per-key throttle for repeated warnings (keys are joint names or warning tags)
+  static constexpr double WARN_THROTTLE_S = 10.0;
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> warn_throttle_;
 };
 
 }  // namespace MujocoRosUtils

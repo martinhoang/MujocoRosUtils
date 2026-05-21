@@ -286,13 +286,19 @@ void SimDataAggregator::compute(const mjModel * m, mjData * d, int)
   }
 
   // ── Joint data ────────────────────────────────────────────────────────────
+  const auto now = std::chrono::steady_clock::now();
   for (const auto & jname : joint_names_)
   {
     int jid = mj_name2id(m, mjOBJ_JOINT, jname.c_str());
     if (jid < 0)
     {
-      print_warning("[SimDataAggregator] Joint '%s' not found in model, skipping.\n",
-                    jname.c_str());
+      auto & last = warn_throttle_[jname];
+      if (std::chrono::duration<double>(now - last).count() >= WARN_THROTTLE_S)
+      {
+        print_warning("[SimDataAggregator] Joint '%s' not found in model, skipping.\n",
+                      jname.c_str());
+        last = now;
+      }
       continue;
     }
 
@@ -300,9 +306,15 @@ void SimDataAggregator::compute(const mjModel * m, mjData * d, int)
     const int jtype = m->jnt_type[jid];
     if (jtype != mjJNT_HINGE && jtype != mjJNT_SLIDE)
     {
-      print_warning("[SimDataAggregator] Joint '%s' is not a hinge or slide joint — "
-                    "multi-DOF joints are not supported, skipping.\n",
-                    jname.c_str());
+      const std::string wkey = jname + ":multidof";
+      auto & last = warn_throttle_[wkey];
+      if (std::chrono::duration<double>(now - last).count() >= WARN_THROTTLE_S)
+      {
+        print_warning("[SimDataAggregator] Joint '%s' is not a hinge or slide joint — "
+                      "multi-DOF joints are not supported, skipping.\n",
+                      jname.c_str());
+        last = now;
+      }
       continue;
     }
 
