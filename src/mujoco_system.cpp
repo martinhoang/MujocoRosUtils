@@ -333,11 +333,10 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         }
         catch (std::invalid_argument &e)
         {
-          RCLCPP_ERROR(node_->get_logger(), "Invalid min value '%s': %s",
-                       info.min.c_str(), e.what());
+          throw std::runtime_error("Invalid min value '" + info.min + "': " + e.what());
         }
       }
-      return -std::numeric_limits<double>::max();
+      return std::numeric_limits<double>::lowest();
     };
 
     auto get_max_value = [this](const hardware_interface::InterfaceInfo &info) {
@@ -349,8 +348,7 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         }
         catch (std::invalid_argument &e)
         {
-          RCLCPP_ERROR(node_->get_logger(), "Invalid max value '%s': %s",
-                       info.max.c_str(), e.what());
+          throw std::runtime_error("Invalid max value '" + info.max + "': " + e.what());
         }
       }
       return std::numeric_limits<double>::max();
@@ -361,44 +359,50 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
     {
       RCLCPP_INFO(node_->get_logger(), "Registering Command Interface '%s' for joint '%s'",
                   cmd_if.name.c_str(), joint_info.name.c_str());
-
-      if (cmd_if.name.find(hardware_interface::HW_IF_POSITION) != std::string::npos)
-      {
-        impl_->command_interfaces_.emplace_back(joint_info.name, cmd_if.name,
-                                                &last_joint.position_cmd);
-        last_joint.has_position_cmd = true;
-        if (!std::isnan(initial_position))
+      try {
+        if (cmd_if.name.find(hardware_interface::HW_IF_POSITION) != std::string::npos)
         {
-          last_joint.position_cmd = initial_position;
+          impl_->command_interfaces_.emplace_back(joint_info.name, cmd_if.name,
+                                                  &last_joint.position_cmd);
+          last_joint.has_position_cmd = true;
+          if (!std::isnan(initial_position))
+          {
+            last_joint.position_cmd = initial_position;
+          }
+          last_joint.min_position_cmd = get_min_value(cmd_if);
+          last_joint.max_position_cmd = get_max_value(cmd_if);
         }
-        last_joint.min_position_cmd = get_min_value(cmd_if);
-        last_joint.max_position_cmd = get_max_value(cmd_if);
+
+        if (cmd_if.name.find(hardware_interface::HW_IF_VELOCITY) != std::string::npos)
+        {
+          impl_->command_interfaces_.emplace_back(joint_info.name, cmd_if.name,
+                                                  &last_joint.velocity_cmd);
+          last_joint.has_velocity_cmd = true;
+          if (!std::isnan(initial_velocity))
+          {
+            last_joint.velocity_cmd = initial_velocity;
+          }
+          last_joint.min_velocity_cmd = get_min_value(cmd_if);
+          last_joint.max_velocity_cmd = get_max_value(cmd_if);
+        }
+
+        if (cmd_if.name.find(hardware_interface::HW_IF_EFFORT) != std::string::npos)
+        {
+          impl_->command_interfaces_.emplace_back(joint_info.name, cmd_if.name,
+                                                  &last_joint.effort_cmd);
+          last_joint.has_effort_cmd = true;
+          if (!std::isnan(initial_effort))
+          {
+            last_joint.effort_cmd = initial_effort;
+          }
+          last_joint.min_effort_cmd = get_min_value(cmd_if);
+          last_joint.max_effort_cmd = get_max_value(cmd_if);
+        }
       }
-
-      if (cmd_if.name.find(hardware_interface::HW_IF_VELOCITY) != std::string::npos)
+      catch (const std::exception &e)
       {
-        impl_->command_interfaces_.emplace_back(joint_info.name, cmd_if.name,
-                                                &last_joint.velocity_cmd);
-        last_joint.has_velocity_cmd = true;
-        if (!std::isnan(initial_velocity))
-        {
-          last_joint.velocity_cmd = initial_velocity;
-        }
-        last_joint.min_velocity_cmd = get_min_value(cmd_if);
-        last_joint.max_velocity_cmd = get_max_value(cmd_if);
-      }
-
-      if (cmd_if.name.find(hardware_interface::HW_IF_EFFORT) != std::string::npos)
-      {
-        impl_->command_interfaces_.emplace_back(joint_info.name, cmd_if.name,
-                                                &last_joint.effort_cmd);
-        last_joint.has_effort_cmd = true;
-        if (!std::isnan(initial_effort))
-        {
-          last_joint.effort_cmd = initial_effort;
-        }
-        last_joint.min_effort_cmd = get_min_value(cmd_if);
-        last_joint.max_effort_cmd = get_max_value(cmd_if);
+        RCLCPP_ERROR(node_->get_logger(), "Error parsing command interface limits for joint '%s': %s",
+                     joint_info.name.c_str(), e.what());
       }
 
       // Check if PID control is enabled
