@@ -1,0 +1,184 @@
+<!--
+  sim_plotter_example.xml — SimPlotter demo: 1-DOF pendulum arm
+
+  A single revolute joint driven by a velocity actuator.  The SimPlotter
+  plugin opens a floating ImPlot window with two live graphs:
+
+    Plot 0 — Kinematics : joint position, velocity (left Y), acceleration (right Y)
+    Plot 1 — Dynamics   : actuator torque output, ctrl command (left Y), joint effort (right Y)
+
+  How to run:
+    1. Load this file in the MuJoCo simulate binary, e.g.:
+         $MUJOCO_PATH/bin/simulate sim_plotter_example.xml
+       (make sure the MujocoRosUtils plugin library is on MUJOCO_PLUGIN_PATH)
+
+    2. In the simulate window → Control panel, drag the "arm_velocity" slider
+       to 1.0 to command 1 rad/s, or press Ctrl+R to load the "spinning" keyframe
+       (which sets ctrl=1 automatically).
+
+    3. The SimPlotter window will appear showing both graphs updating in real time.
+
+    4. Use ROS 2 to add/remove lines at runtime:
+         ros2 service call /sim_plotter_arm_plotter/plot_command \
+           mujoco_ros_utils/srv/PlotCommand \
+           "{operation: add_line, plot: plot1, line: gravity_comp,
+             args: ['src=joint.arm_joint.effort', 'color=0.09 0.75 0.81']}"
+-->
+<mujoco model="sim_plotter_example">
+  <compiler autolimits="true"/>
+
+  <!-- Gravity ON — so the torque required to maintain 1 rad/s varies with arm angle -->
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="implicitfast"/>
+
+  <statistic center="0.25 0 0.5" extent="1.2" meansize="0.05"/>
+
+  <visual>
+    <headlight ambient="0.6 0.6 0.6" diffuse="0.3 0.3 0.3" specular="0.1 0.1 0.1"/>
+    <map znear="0.005"/>
+  </visual>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker"
+             rgb1="0.15 0.15 0.15" rgb2="0.25 0.25 0.25" width="512" height="512"/>
+    <material name="grid" texture="grid" texrepeat="4 4" texuniform="true" reflectance="0.1"/>
+    <material name="arm"  rgba="0.25 0.55 1.0 1.0"/>
+    <material name="tip"  rgba="0.1 0.9 0.1 1.0"/>
+    <material name="hub"  rgba="0.70 0.70 0.70 1.0"/>
+  </asset>
+
+  <!-- ── Declare plugins used in this model ─────────────────────────────────── -->
+  <extension>
+    <plugin plugin="MujocoRosUtils::ClockPublisher"/>
+
+    <!--
+      SimPlotter — two floating plots side by side.
+
+      window_w / window_h  : total SDL2 window size (pixels)
+      update_every         : append one data point every N simulation steps
+                             (timestep=0.002 s, update_every=5 → 10 ms / sample → 100 Hz)
+      num_plots            : total number of plots declared below
+
+      pos format  : "anchor  offset_x  offset_y  width  height"
+        anchor    : tl (top-left) | tr (top-right) | bl | br
+        offsets   : pixels from the chosen corner, inside the SDL2 window
+        width/height : plot sub-window size in pixels
+
+      Data source syntax summary
+        joint.<name>.position | velocity | effort | ctrl
+        actuator.<name>.ctrl  | force
+        sensor.<name>                  (scalar or first component)
+        sensor.<name>.<N>              (Nth component of a multi-dim sensor)
+        qpos.<idx> | qvel.<idx> | qacc.<idx> | ctrl.<idx>
+        body.<name>.pos.x/y/z
+        body.<name>.vel_lin.x/y/z | vel_ang.x/y/z
+    -->
+    <plugin plugin="MujocoRosUtils::SimPlotter">
+      <instance name="arm_plotter">
+        <config key="window_w"     value="1700"/>
+        <config key="window_h"     value="700"/>
+        <config key="update_every" value="5"/>
+        <config key="num_plots"    value="3"/>
+
+        <!--
+          Compact format: each plot uses two declared attribute slots.
+
+            plot{N}        = "key=value;key=value;..."
+              Supported keys: title, pos, range_x, range_y, range_y2, max_pts
+              pos format:     "anchor offset_x offset_y width height"
+                              anchor = tl | tr | bl | br
+
+            plot{N}_line{L} = "key=value;key=value;..."
+              Supported keys: src, label, color (r g b), y (1 or 2)
+              Iterate L = 0, 1, … until the value is empty (no num_lines needed)
+
+          Data source syntax:
+            joint.<name>.position|velocity|effort|ctrl
+            actuator.<name>.ctrl|force
+            qpos.<idx>  qvel.<idx>  qacc.<idx>  ctrl.<idx>
+            body.<name>.pos.x/y/z  vel_lin.x/y/z  vel_ang.x/y/z
+            sensor.<name>  or  sensor.<name>.<component>
+        -->
+
+        <!-- Plot 0 — Kinematics: position + velocity (Y1), acceleration (Y2) -->
+        <config key="plot0" value="title=Kinematics — position / velocity / acceleration;pos=tl 0 0 560 700;max_pts=1500"/>
+        <config key="plot0_line0" value="label=position (rad);src=joint.arm_joint.position;color=0.12 0.47 0.71;y=1"/>
+        <config key="plot0_line1" value="label=velocity (rad/s);src=joint.arm_joint.velocity;color=1.00 0.50 0.05;y=1"/>
+        <config key="plot0_line2" value="label=acceleration (rad/s²);src=qacc.0;color=0.17 0.63 0.17;y=2"/>
+
+        <!-- Plot 1 — Dynamics: torque + effort (Y1), ctrl command (Y2) -->
+        <config key="plot1" value="title=Dynamics — torque / effort / ctrl command;pos=tc 0 0 560 700;max_pts=1500"/>
+        <config key="plot1_line0" value="label=actuator force (Nm);src=actuator.arm_velocity.force;color=0.84 0.15 0.16;y=1"/>
+        <config key="plot1_line1" value="label=joint effort (Nm);src=joint.arm_joint.effort;color=0.55 0.34 0.29;y=1"/>
+        <config key="plot1_line2" value="label=ctrl command (rad/s);src=actuator.arm_velocity.ctrl;color=0.58 0.40 0.74;y=2"/>
+
+        <!-- Plot 2 — Phase portrait: actuator force vs joint velocity (scatter) -->
+        <config key="plot2" value="title=Phase Portrait — force vs velocity;pos=tr 0 0 560 700;max_pts=10000"/>
+        <config key="plot2_line0" value="label=force vs velocity;type=scatter;src_x=joint.arm_joint.velocity;src=actuator.arm_velocity.force;color=1.0 0.6 0.1"/>
+      </instance>
+    </plugin>
+  </extension>
+
+  <!-- ── World ────────────────────────────────────────────────────────────── -->
+  <worldbody>
+    <plugin plugin="MujocoRosUtils::ClockPublisher">
+      <config key="topic_name"   value="/clock"/>
+      <config key="publish_rate" value="100"/>
+      <config key="use_sim_time" value="true"/>
+    </plugin>
+
+    <light pos="0.5 -1 2" dir="-0.2 0.5 -1" directional="false"/>
+    <light pos="-0.5 1 2" dir="0.2 -0.5 -1" directional="false"/>
+
+    <geom name="floor" type="plane" material="grid" size="5 5 0.01" pos="0 0 0"/>
+
+    <!-- Fixed shoulder hub at z=1.0; arm is 0.5 m long so the lowest tip
+         position is z=0.5 m — well above the floor -->
+    <body name="shoulder" pos="0 0 1.0">
+      <geom name="hub" type="cylinder" size="0.06 0.04"
+            material="hub" mass="0" euler="90 0 0"/>
+
+      <!--
+        Arm body: 1 kg, 0.5 m long.
+        - Joint axis = Y (rotation in XZ plane, gravity in -Z)
+        - range = unlimited so it spins freely at 1 rad/s
+        - damping = 0.2 Nm·s/rad (light friction, so torque is non-trivial)
+        - armature = 0.01 kg·m²  (small rotor inertia for realism)
+      -->
+      <body name="arm">
+        <joint name="arm_joint" type="hinge" axis="0 1 0"
+               damping="0.2" armature="0.01"/>
+
+        <!-- Arm link: capsule from shoulder (0,0,0) to tip (0.5,0,0) -->
+        <geom name="arm_link" type="capsule" fromto="0 0 0  0.5 0 0"
+              size="0.035" material="arm" mass="1.0"/>
+
+        <!-- Red tip sphere (visual only, mass=0) -->
+        <geom name="arm_tip" type="sphere" size="0.05" pos="0.5 0 0"
+              material="tip" mass="0"/>
+
+        <!-- Site at tip for sensor / FK reference -->
+        <site name="tip_site" pos="0.5 0 0" size="0.01"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- ── Actuator ──────────────────────────────────────────────────────────── -->
+  <!--
+    Velocity actuator:  applies torque = kv * (ctrl - current_vel)
+    kv = 50 Nm·s/rad gives a snappy velocity response.
+    Set ctrl = 1.0 to drive at 1 rad/s.
+  -->
+  <actuator>
+    <velocity name="arm_velocity" joint="arm_joint" kv="50" ctrlrange="-10 10"/>
+  </actuator>
+
+  <!-- ── Keyframes ─────────────────────────────────────────────────────────── -->
+  <!--
+    Press Ctrl+R in simulate (or File → Reset) to load "spinning".
+    This sets arm_velocity ctrl = 2.0 rad/s so the arm spins immediately.
+  -->
+  <keyframe>
+    <key name="spinning" qpos="0" ctrl="20.0" qvel="20.0" time="0"/>
+  </keyframe>
+
+</mujoco>

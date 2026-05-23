@@ -11,6 +11,7 @@ constexpr char ATTR_PUBLISH_RATE[]     = "publish_rate";
 constexpr char ATTR_ROBOT_PARAM_NODE[] = "robot_param_node";
 constexpr char ATTR_CONFIG_FILE[]      = "config_file";
 constexpr char ATTR_PARAMETERS[]       = "parameters";
+constexpr char ATTR_NAMESPACE[]        = "namespace";
 
 using namespace std::chrono_literals;
 
@@ -29,7 +30,8 @@ void Ros2Control::RegisterPlugin()
   plugin.capabilityflags |= mjPLUGIN_PASSIVE;
 
   std::vector<const char *> attributes
-    = {ATTR_NODE_NAME, ATTR_PUBLISH_RATE, ATTR_ROBOT_PARAM_NODE, ATTR_CONFIG_FILE, ATTR_PARAMETERS};
+    = {ATTR_NODE_NAME,   ATTR_PUBLISH_RATE, ATTR_ROBOT_PARAM_NODE,
+       ATTR_CONFIG_FILE, ATTR_PARAMETERS,   ATTR_NAMESPACE};
 
   plugin.nattribute = attributes.size();
   plugin.attributes = attributes.data();
@@ -71,18 +73,23 @@ void Ros2Control::RegisterPlugin()
 
 std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, int plugin_id)
 {
-  if (!mujoco_system_loader_)
+  // Protect the check-and-init of the static ClassLoader: two concurrent Create() calls
+  // must not both see mujoco_system_loader_ == nullptr and both try to reset() it.
   {
-    try
+    std::lock_guard<std::mutex> lock(rcl_global_args_mutex_);
+    if (!mujoco_system_loader_)
     {
-      mujoco_system_loader_.reset(
-        new pluginlib::ClassLoader<mujoco_ros2_control::MujocoSystemInterface>(
-          "mujoco_ros_utils", /* Package where this plugin is located */
-          "mujoco_ros2_control::MujocoSystemInterface"));
-    }
-    catch (pluginlib::PluginlibException &ex)
-    {
-      mju_error("Failed to create hardware interface plugin loader. Error: %s", ex.what());
+      try
+      {
+        mujoco_system_loader_.reset(
+          new pluginlib::ClassLoader<mujoco_ros2_control::MujocoSystemInterface>(
+            "mujoco_ros_utils", /* Package where this plugin is located */
+            "mujoco_ros2_control::MujocoSystemInterface"));
+      }
+      catch (pluginlib::PluginlibException &ex)
+      {
+        mju_error("Failed to create hardware interface plugin loader. Error: %s", ex.what());
+      }
     }
   }
 
@@ -100,17 +107,51 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   }
   else
   {
-    std::string umanoid_simulation_mujoco = "umanoid_simulation_mujoco";
-    auto        umanoid_simulation_mujoco_share_directory
-      = ament_index_cpp::get_package_share_directory(umanoid_simulation_mujoco);
-    config_file_path = umanoid_simulation_mujoco_share_directory + "/config/ros2_controllers.yaml";
+    // No config_file or parameters attribute set — try the default fallback package.
+    // get_package_share_directory throws PackageNotFoundError if the package is not
+    // installed/sourced.  We must catch it here because this code runs inside a C-style
+    // plugin.init function pointer: an uncaught C++ exception through a plain function
+    // pointer is undefined behaviour and causes a segfault inside MuJoCo.
+    try
+    {
+      auto share       = ament_index_cpp::get_package_share_directory("umanoid_simulation_mujoco");
+      config_file_path = share + "/config/ros2_controllers.yaml";
+      RCLCPP_WARN(rclcpp::get_logger("Ros2Control"),
+                  "No 'config_file' attribute set on the Ros2Control plugin <instance>. "
+                  "Falling back to default: %s",
+                  config_file_path.c_str());
+    }
+    catch (const std::exception &e)
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("Ros2Control"),
+                   "Ros2Control plugin has no 'config_file' attribute AND the fallback package "
+                   "'umanoid_simulation_mujoco' was not found (%s).\n"
+                   "Add a config element inside the <instance> in your MJCF, e.g.:\n"
+                   "  <instance name=\"ros2_control\">\n"
+                   "    <config key=\"config_file\" "
+                   "value=\"/path/to/ros2_controllers.yaml\"/>\n"
+                   "  </instance>\n"
+                   "Aborting Ros2Control plugin initialisation.",
+                   e.what());
+      return nullptr; // plugin.init returns -1 → MuJoCo reports failure gracefully
+    }
   }
 
   std::unique_ptr<Ros2Control> ret;
   // Catch any error in the constructor
   try
   {
-    ret.reset(new Ros2Control(m, d, config_file_path));
+    // Read per-instance config using the correct plugin_id (avoids hardcoded index 0)
+    const char *robot_param_node_char = mj_getPluginConfig(m, plugin_id, ATTR_ROBOT_PARAM_NODE);
+    std::string robot_param_node      = robot_param_node_char && strlen(robot_param_node_char) > 0
+                                          ? robot_param_node_char
+                                          : "robot_state_publisher";
+
+    const char *namespace_char = mj_getPluginConfig(m, plugin_id, ATTR_NAMESPACE);
+    std::string node_namespace
+      = namespace_char && strlen(namespace_char) > 0 ? std::string("/") + namespace_char : "";
+
+    ret.reset(new Ros2Control(m, d, config_file_path, node_namespace, robot_param_node));
   }
   catch (const std::exception &e)
   {
@@ -120,10 +161,13 @@ std::unique_ptr<Ros2Control> Ros2Control::Create(const mjModel *m, mjData *d, in
   return ret;
 }
 
-Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config_file_path)
+Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config_file_path,
+                         std::string node_namespace, std::string robot_param_node)
     : model_(model)
     , data_(data)
     , config_file_path_(config_file_path)
+    , node_namespace_(node_namespace)
+    , robot_param_node_(robot_param_node)
 {
   ros_control_instances_++;
 
@@ -141,21 +185,32 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
 
 bool Ros2Control::initialize()
 {
-  if (initialized_ || node_)
+  if (initialized_)
   {
-    return initialized_;
+    return true;
   }
 
+  // --- Phase 1: create node and executor (idempotent, done only once) ---
   if (!node_)
   {
-    if (!rclcpp::ok())
+    // Serialise rclcpp::init() across all plugin instances in this process.
+    // After the first-pass CMs are destroyed ros_control_instances_ hits 0 and
+    // rclcpp::shutdown() is called.  Both second-pass plugins then concurrently
+    // enter here and check !rclcpp::ok().  Without a lock BOTH call rclcpp::init()
+    // simultaneously — rclcpp::init()/rcl_init() is NOT thread-safe, which corrupts
+    // the RCL global context and can cause pluginlib factory lookups to fail
+    // ("no factory exists") or trigger other non-deterministic errors.
     {
-      RCLCPP_INFO(rclcpp::get_logger("Ros2Control"), "Passing ros2 config file: %s",
-                  config_file_path_.c_str());
-      const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, config_file_path_.c_str()};
-      int         argc   = sizeof(argv) / sizeof(argv[0]);
-      rclcpp::init(argc, argv);
-    }
+      std::lock_guard<std::mutex> lock(rcl_global_args_mutex_);
+      if (!rclcpp::ok())
+      {
+        const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, config_file_path_.c_str()};
+        int         argc   = sizeof(argv) / sizeof(argv[0]);
+        rclcpp::init(argc, argv);
+        RCLCPP_INFO(rclcpp::get_logger("Ros2Control"), "RCL re-initialized with config: %s",
+                    config_file_path_.c_str());
+      }
+    } // lock released — safe to create executor/node without holding mutex
 
     executor_.reset(new rclcpp::executors::MultiThreadedExecutor());
     rclcpp::NodeOptions options;
@@ -163,22 +218,15 @@ bool Ros2Control::initialize()
     options.parameter_overrides({
       rclcpp::Parameter("use_sim_time", rclcpp::ParameterValue(true)),
     });
-    node_ = rclcpp::Node::make_shared("mujoco_ros2_control_node", options);
+    node_ = rclcpp::Node::make_shared("mujoco_ros2_control_node", node_namespace_, options);
     executor_->add_node(node_);
+  }
 
+  // --- Phase 2: fetch URDF and create controller_manager (retryable) ---
+  {
     //* Getting URDF string
     std::string urdf_string;
-
-    // Identify which node to get the robot description from
-    const char *robot_param_node_char = mj_getPluginConfig(model_, 0, ATTR_ROBOT_PARAM_NODE);
-    std::string robot_param_node
-      = robot_param_node_char && strlen(robot_param_node_char) > 0 ? robot_param_node_char : "";
-    if (robot_param_node.empty())
-    {
-      robot_param_node = "robot_state_publisher";
-      RCLCPP_INFO_STREAM(node_->get_logger(),
-                         "Using default robot state publisher: " << robot_param_node << std::endl);
-    }
+    std::string robot_param_node = robot_param_node_;
 
     // Create a parameter client to try to get param from the target node
     auto parameters_client
@@ -255,47 +303,87 @@ bool Ros2Control::initialize()
 
     RCLCPP_INFO(node_->get_logger(), "Got the URDF from paramter service");
 
-    // Get parameters for controller_manager
-    auto rcl_context = node_->get_node_base_interface()->get_context()->get_rcl_context();
-    std::vector<std::string> arguments;
-
-    if (!config_file_path_.empty())
+    // Get parameters for controller_manager.
+    // IMPORTANT: rcl_context->global_arguments must be APPENDED to, not replaced.
+    // When multiple Ros2Control plugins share the same process each plugin initialises
+    // in sequence and writes its own param file.  A plain assignment destroys every
+    // previous robot's parameters so only the last plugin's controllers can read their
+    // 'joints' configuration.
+    // Fix: hold a process-wide mutex for the entire read-modify-write so two plugins
+    // initialising concurrently cannot both read an empty (or stale) list and then
+    // each overwrite the other's entry.
+    //
+    // NOTE: we intentionally do NOT call rcl_arguments_fini on the old global_arguments
+    // before overwriting it.  The rcl_arguments_t struct is a shallow copy of an impl
+    // pointer; the first plugin's executor thread may still hold indirect references to
+    // that impl (e.g., while servicing parameter callbacks).  Freeing it here would be
+    // a race condition.  The accepted trade-off is a small one-time "leak" of the old
+    // impl allocation — identical to what the original single-robot code did.
     {
+      std::lock_guard<std::mutex> lock(rcl_global_args_mutex_);
+
+      auto rcl_context = node_->get_node_base_interface()->get_context()->get_rcl_context();
+      std::vector<std::string> arguments;
       arguments.push_back(RCL_ROS_ARGS_FLAG);
-      arguments.push_back(RCL_PARAM_FILE_FLAG);
-      arguments.push_back(config_file_path_);
-    }
-    else
-    {
-      arguments.push_back(RCL_PARAM_FILE_FLAG);
-    }
 
-    std::vector<const char *> argv;
+      // Preserve param files from any earlier Ros2Control instance in this process.
+      auto allocator   = rcl_get_default_allocator();
+      int  exist_count = rcl_arguments_get_param_files_count(&rcl_context->global_arguments);
+      if (exist_count > 0)
+      {
+        char **exist_files = nullptr;
+        if (rcl_arguments_get_param_files(&rcl_context->global_arguments, allocator, &exist_files)
+            == RCL_RET_OK && exist_files)
+        {
+          for (int i = 0; i < exist_count; ++i)
+          {
+            // Deduplicate: if both plugins use the same merged YAML we only need it once.
+            std::string path(exist_files[i]);
+            if (path != config_file_path_)
+            {
+              arguments.push_back(RCL_PARAM_FILE_FLAG);
+              arguments.push_back(path);
+            }
+            allocator.deallocate(exist_files[i], allocator.state);
+          }
+          allocator.deallocate(exist_files, allocator.state);
+        }
+      }
 
-    for (const auto &arg : arguments)
-    {
-      argv.push_back(reinterpret_cast<const char *>(arg.data()));
-    }
+      if (!config_file_path_.empty())
+      {
+        arguments.push_back(RCL_PARAM_FILE_FLAG);
+        arguments.push_back(config_file_path_);
+      }
+      // else: no config file → pass no arguments; rcl_parse_arguments on empty argv is valid.
 
-    rcl_arguments_t rcl_arguments = rcl_get_zero_initialized_arguments();
+      std::vector<const char *> argv;
 
-    rcl_ret_t rcl_return = rcl_parse_arguments(static_cast<int>(argv.size()), argv.data(),
-                                               rcl_get_default_allocator(), &rcl_arguments);
+      for (const auto &arg : arguments)
+      {
+        argv.push_back(reinterpret_cast<const char *>(arg.data()));
+      }
 
-    rcl_context->global_arguments = rcl_arguments;
+      rcl_arguments_t rcl_arguments = rcl_get_zero_initialized_arguments();
 
-    if (rcl_return != RCL_RET_OK)
-    {
-      RCLCPP_ERROR(node_->get_logger(), "Error parsing config file at %s:\n%s",
-                   config_file_path_.c_str(), rcl_get_error_string().str);
-      return false;
-    }
-    if (rcl_arguments_get_param_files_count(&rcl_arguments) < 1)
-    {
-      RCLCPP_ERROR(node_->get_logger(), "Failed to parse input yaml config file at %s",
-                   config_file_path_.c_str());
-      return false;
-    }
+      rcl_ret_t rcl_return = rcl_parse_arguments(static_cast<int>(argv.size()), argv.data(),
+                                                 rcl_get_default_allocator(), &rcl_arguments);
+
+      rcl_context->global_arguments = rcl_arguments;
+
+      if (rcl_return != RCL_RET_OK)
+      {
+        RCLCPP_ERROR(node_->get_logger(), "Error parsing config file at %s:\n%s",
+                     config_file_path_.c_str(), rcl_get_error_string().str);
+        return false;
+      }
+      if (rcl_arguments_get_param_files_count(&rcl_arguments) < 1)
+      {
+        RCLCPP_ERROR(node_->get_logger(), "Failed to parse input yaml config file at %s",
+                     config_file_path_.c_str());
+        return false;
+      }
+    } // rcl_global_args_mutex_ released here
 
     std::vector<hardware_interface::HardwareInfo> control_hardware_info;
     try
@@ -365,8 +453,17 @@ bool Ros2Control::initialize()
 
     // Loading controller manager
     RCLCPP_INFO(node_->get_logger(), "Loading controller manager\n");
+    // The YAML is namespaced under the robot name (e.g. "nest:"), so --params-file
+    // matches /nest/controller_manager natively — no manual YAML parsing needed.
+    rclcpp::NodeOptions cm_options;
+    cm_options.automatically_declare_parameters_from_overrides(true);
+    if (!config_file_path_.empty())
+    {
+      cm_options.arguments({"--ros-args", "--params-file", config_file_path_});
+    }
     controller_manager_.reset(new controller_manager::ControllerManager(
-      std::move(resource_manager), executor_, "controller_manager", node_->get_namespace()));
+      std::move(resource_manager), executor_, "controller_manager", node_->get_namespace(),
+      cm_options));
 
     executor_->add_node(controller_manager_);
 
@@ -403,12 +500,11 @@ bool Ros2Control::initialize()
     // Sets an atomic flag; the actual mj_resetData is applied inside compute()
     // so it runs in the simulation thread rather than mid-step from a service callback.
     reset_service_ = node_->create_service<std_srvs::srv::Trigger>(
-      "/reset_simulation",
-      [this](const std_srvs::srv::Trigger::Request::SharedPtr,
-             std_srvs::srv::Trigger::Response::SharedPtr res) {
+      "/reset_simulation", [this](const std_srvs::srv::Trigger::Request::SharedPtr,
+                                  std_srvs::srv::Trigger::Response::SharedPtr res) {
         reset_requested_ = true;
-        res->success      = true;
-        res->message      = "Simulation reset scheduled — will apply on next compute tick";
+        res->success     = true;
+        res->message     = "Simulation reset scheduled — will apply on next compute tick";
         RCLCPP_INFO(node_->get_logger(), "[RosControl] Simulation reset requested");
       });
   }
@@ -536,14 +632,14 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
       RCLCPP_INFO(node_->get_logger(), "[RosControl] Applying simulation reset");
       mj_resetData(m, d);
       // Restore kinematic consistency so remaining mj_step() stages don't see qM=0.
-      mj_kinematics(m, d);       // xpos, xmat, xquat from new qpos
-      mj_comPos(m, d);           // qM (joint-space inertia matrix) — CRITICAL
-      mj_collision(m, d);        // contact detection at initial pose
-      mj_makeConstraint(m, d);   // constraint equations
+      mj_kinematics(m, d);        // xpos, xmat, xquat from new qpos
+      mj_comPos(m, d);            // qM (joint-space inertia matrix) — CRITICAL
+      mj_collision(m, d);         // contact detection at initial pose
+      mj_makeConstraint(m, d);    // constraint equations
       mj_projectConstraint(m, d); // constraint projection
-      mj_fwdVelocity(m, d);      // velocity-dependent terms (qfrc_bias, cacc)
-      last_update_             = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
-      hardware_reset_pending_  = true;
+      mj_fwdVelocity(m, d);       // velocity-dependent terms (qfrc_bias, cacc)
+      last_update_            = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
+      hardware_reset_pending_ = true;
       // Set sim_time_now to post-reset value (d->time = 0) so duration=0 below,
       // causing read/update to be skipped while write(period=0) still fires on this
       // same tick to sync ctrl[] to initial positions.
@@ -551,16 +647,17 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
       sim_time_now.nanosec = 0;
     }
 
-    rclcpp::Time     now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
+    rclcpp::Time now{sim_time_now.sec, sim_time_now.nanosec, RCL_ROS_TIME};
 
     // Also handle external resets (e.g. viewer Backspace): sim time jumped backwards.
     if (now < last_update_)
     {
-      RCLCPP_INFO(node_->get_logger(),
-                  "[RosControl] Simulation reset detected (%.3f → %.3f s), resetting controller timing",
-                  last_update_.seconds(), now.seconds());
-      last_update_             = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
-      hardware_reset_pending_  = true;
+      RCLCPP_INFO(
+        node_->get_logger(),
+        "[RosControl] Simulation reset detected (%.3f → %.3f s), resetting controller timing",
+        last_update_.seconds(), now.seconds());
+      last_update_            = rclcpp::Time{(int64_t)0, RCL_ROS_TIME};
+      hardware_reset_pending_ = true;
     }
 
     rclcpp::Duration duration = now - last_update_;
@@ -575,9 +672,8 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
     // If a reset just happened, force period=0 into write() so MujocoSystem::write()
     // syncs all command state back to the post-reset physics state instead of
     // overwriting qpos/qvel with stale pre-reset commanded values.
-    rclcpp::Duration write_period = hardware_reset_pending_.exchange(false)
-                                      ? rclcpp::Duration{0, 0}
-                                      : duration;
+    rclcpp::Duration write_period
+      = hardware_reset_pending_.exchange(false) ? rclcpp::Duration{0, 0} : duration;
     controller_manager_->write(now, write_period);
   }
 }

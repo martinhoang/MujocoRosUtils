@@ -95,12 +95,16 @@ rosidl_generate_interfaces(
   ${PROJECT_NAME}
   "msg/ExternalForce.msg"
   "msg/ScalarStamped.msg"
+  "srv/StartRecording.srv"
+  "srv/StopRecording.srv"
+  "srv/PlotCommand.srv"
   DEPENDENCIES
   std_msgs
   geometry_msgs
   builtin_interfaces)
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY scripts DESTINATION share/${PROJECT_NAME})
 
 # Do this to allow for loading xml according to the instructions in the README
 # However, it is normally not done that way.
@@ -111,6 +115,9 @@ ament_export_dependencies(rosidl_default_runtime)
 # Adding new pluginlib for MujocoSystem hardware interface
 find_package(pluginlib REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(rosbag2_storage REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 
 add_library(mujoco_hardware_plugin SHARED src/mujoco_system.cpp)
 

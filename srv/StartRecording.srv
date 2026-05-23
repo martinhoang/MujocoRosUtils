@@ -1,0 +1,15 @@
+# StartRecording.srv — begin a MCAP or LeRobot episode recording
+#
+# Request
+string output_dir        # Parent directory.  A sub-directory is created here.
+string format            # "mcap" | "lerobot" | "both"
+int32  episode_index     # Hint for the episode index.  The recorder will use
+                         # max(episode_index, total_committed_episodes) so that
+                         # data is never overwritten across sessions.
+string task_description  # Human-readable task label stored in LeRobot metadata.
+---
+# Response
+bool   success
+string message
+string actual_path        # Full path of the bag / episode directory being written
+int32  actual_episode_index  # Actual episode index used (may be > episode_index)

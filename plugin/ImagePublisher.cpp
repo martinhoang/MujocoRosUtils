@@ -10,10 +10,20 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <cv_bridge/cv_bridge.h>
 #include <iostream>
 #include <mujoco/mujoco.h>
 #include <sensor_msgs/image_encodings.hpp>
+
+#ifdef HAS_CUDA
+#include "depth_processing_cuda.cuh"
+#include <cuda_runtime.h>
+#endif
+
+#if RCLCPP_VERSION_MAJOR >= 28
+#include <cv_bridge/cv_bridge.hpp>
+#else
+#include <cv_bridge/cv_bridge.h>
+#endif
 
 namespace MujocoRosUtils
 {
@@ -35,6 +45,29 @@ constexpr char ATTR_MAX_RANGE[]                   = "max_range";
 constexpr char ATTR_READBACK_MODE[]               = "readback_mode";
 constexpr char ATTR_PARALLEL_PROCESSING[]         = "parallel_processing";
 constexpr char ATTR_POINT_CLOUD_DOWNSAMPLE[]      = "point_cloud_downsample";
+// Names of the MuJoCo cameras to use for color and depth rendering.
+// When the plugin is attached to xbody (recommended), both keys are required.
+// When attached to a camera (legacy), depth_camera_name defaults to that camera and
+// color_camera_name is optional (defaults to depth camera).
+constexpr char ATTR_DEPTH_CAMERA_NAME[] = "depth_camera_name";
+constexpr char ATTR_COLOR_CAMERA_NAME[] = "color_camera_name";
+
+// Optional: separate render resolution for the depth camera in dual-camera mode.
+// If omitted, defaults to the color camera resolution (height/width).
+// In single-camera mode these are ignored (depth and color share one render).
+constexpr char ATTR_DEPTH_HEIGHT[] = "depth_height";
+constexpr char ATTR_DEPTH_WIDTH[]  = "depth_width";
+
+// Per-camera depth clip planes (metres).  0 = use model global (vis.map.znear/zfar * stat.extent).
+constexpr char ATTR_DEPTH_NEAR[] = "depth_near";
+constexpr char ATTR_DEPTH_FAR[]  = "depth_far";
+
+// Optional: override the SimDataRegistry key used for in-process data sharing.
+// When set, this value is used instead of the ROS namespace as the registry key,
+// allowing each camera to have a unique registry key even when multiple cameras
+// share the same ROS namespace.
+// Example: <config key="registry_key" value="camera_front"/>
+constexpr char ATTR_REGISTRY_KEY[] = "registry_key";
 
 void ImagePublisher::RegisterPlugin()
 {
@@ -60,7 +93,14 @@ void ImagePublisher::RegisterPlugin()
                               ATTR_MAX_RANGE,
                               ATTR_READBACK_MODE,
                               ATTR_PARALLEL_PROCESSING,
-                              ATTR_POINT_CLOUD_DOWNSAMPLE};
+                              ATTR_POINT_CLOUD_DOWNSAMPLE,
+                              ATTR_DEPTH_CAMERA_NAME,
+                              ATTR_COLOR_CAMERA_NAME,
+                              ATTR_DEPTH_HEIGHT,
+                              ATTR_DEPTH_WIDTH,
+                              ATTR_DEPTH_NEAR,
+                              ATTR_DEPTH_FAR,
+                              ATTR_REGISTRY_KEY};
 
   plugin.nattribute = sizeof(attributes) / sizeof(attributes[0]);
   plugin.attributes = attributes;
@@ -348,7 +388,25 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     print_debug("[ImagePublisher::Create] max_range not specified, using default=%f\n", max_range);
   }
 
-  ImagePublisher::ReadbackMode readback_mode = ImagePublisher::ReadbackMode::Legacy;
+  // depth_near / depth_far — per-camera clip planes for depth rendering and linearisation.
+  // 0 (default) = use MuJoCo model globals (vis.map.znear * stat.extent, zfar * stat.extent).
+  // Setting sensible camera-specific values (e.g. depth_near="0.1" depth_far="5.0") avoids
+  // the typical "mostly black/white" depth display caused by the very large global far plane.
+  float depth_near = 0.0f;
+  float depth_far  = 0.0f;
+  {
+    const char *c = mj_getPluginConfig(m, plugin_id, ATTR_DEPTH_NEAR);
+    if (c && strlen(c) > 0)
+      depth_near = static_cast<float>(strtod(c, nullptr));
+  }
+  {
+    const char *c = mj_getPluginConfig(m, plugin_id, ATTR_DEPTH_FAR);
+    if (c && strlen(c) > 0)
+      depth_far = static_cast<float>(strtod(c, nullptr));
+  }
+  print_debug("[ImagePublisher::Create] depth_near=%.3f, depth_far=%.3f\n", depth_near, depth_far);
+
+  ImagePublisher::ReadbackMode readback_mode = ImagePublisher::ReadbackMode::Auto;
   const char *readback_mode_char             = mj_getPluginConfig(m, plugin_id, ATTR_READBACK_MODE);
   if (readback_mode_char && strlen(readback_mode_char) > 0)
   {
@@ -372,6 +430,16 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     {
       readback_mode = ImagePublisher::ReadbackMode::Pbo;
       print_debug("[ImagePublisher::Create] readback_mode=pbo\n");
+    }
+    else if (readback_mode_str == "cuda")
+    {
+#ifdef HAS_CUDA
+      readback_mode = ImagePublisher::ReadbackMode::Cuda;
+      print_debug("[ImagePublisher::Create] readback_mode=cuda\n");
+#else
+      print_warning("[ImagePublisher::Create] readback_mode=cuda requested but not compiled in — falling back to pbo\n");
+      readback_mode = ImagePublisher::ReadbackMode::Pbo;
+#endif
     }
   }
   else
@@ -442,10 +510,63 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     mju_error("[ImagePublisher::Create] Plugin not found in sensors!");
     return nullptr;
   }
-  if (m->sensor_objtype[sensor_id] != mjOBJ_CAMERA)
+
+  // Resolve depth camera ID.
+  // Priority: depth_camera_name config key > sensor objname camera (legacy, objtype="camera").
+  // When attached to xbody (recommended), depth_camera_name must be set explicitly.
+  int depth_camera_id = -1;
   {
-    mju_error("[ImagePublisher::Create] Plugin must be attached to a camera!");
-    return nullptr;
+    const char *depth_camera_name_char = mj_getPluginConfig(m, plugin_id, ATTR_DEPTH_CAMERA_NAME);
+    if (depth_camera_name_char && strlen(depth_camera_name_char) > 0)
+    {
+      depth_camera_id = mj_name2id(m, mjOBJ_CAMERA, depth_camera_name_char);
+      if (depth_camera_id < 0)
+      {
+        mju_error("[ImagePublisher] depth_camera_name '%s' not found in model!",
+                  depth_camera_name_char);
+        return nullptr;
+      }
+      print_debug("[ImagePublisher::Create] depth_camera_name=%s (id=%d)\n", depth_camera_name_char,
+                  depth_camera_id);
+    }
+    else if (m->sensor_objtype[sensor_id] == mjOBJ_CAMERA)
+    {
+      // Legacy: plugin attached directly to a camera element; use it as the depth camera.
+      depth_camera_id = m->sensor_objid[sensor_id];
+      print_debug("[ImagePublisher::Create] depth_camera from sensor objname (id=%d)\n",
+                  depth_camera_id);
+    }
+    else
+    {
+      mju_error("[ImagePublisher] depth_camera_name config key is required when plugin is "
+                "attached to an xbody (objtype='xbody').");
+      return nullptr;
+    }
+  }
+
+  // Resolve color camera ID.
+  // Priority: color_camera_name config key > same as depth camera.
+  int color_camera_id = depth_camera_id;
+  {
+    const char *color_camera_name_char = mj_getPluginConfig(m, plugin_id, ATTR_COLOR_CAMERA_NAME);
+    if (color_camera_name_char && strlen(color_camera_name_char) > 0)
+    {
+      int id = mj_name2id(m, mjOBJ_CAMERA, color_camera_name_char);
+      if (id < 0)
+      {
+        mju_error("[ImagePublisher] color_camera_name '%s' not found in model!",
+                  color_camera_name_char);
+        return nullptr;
+      }
+      color_camera_id = id;
+      print_debug("[ImagePublisher::Create] color_camera_name=%s (id=%d)\n", color_camera_name_char,
+                  id);
+    }
+    else
+    {
+      print_debug("[ImagePublisher::Create] color_camera same as depth camera (id=%d)\n",
+                  color_camera_id);
+    }
   }
 
   print_debug("[ImagePublisher::Create] Creating ImagePublisher instance...\n");
@@ -454,10 +575,21 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
     sensor_id, width, height, publish_rate);
 
   ImagePublisher *instance = new ImagePublisher(
-    m, d, sensor_id, color_frame_id, depth_frame_id, topic_namespace, color_topic_name,
-    depth_topic_name, info_topic_name, point_cloud_topic_name, rotate_point_cloud,
-    point_cloud_rotation_preset, height, width, publish_rate, min_range, max_range, readback_mode,
-    enable_parallel, point_cloud_downsample);
+    m, d, sensor_id, depth_camera_id, color_camera_id, color_frame_id, depth_frame_id,
+    topic_namespace, color_topic_name, depth_topic_name, info_topic_name, point_cloud_topic_name,
+    rotate_point_cloud, point_cloud_rotation_preset, height, width, publish_rate, min_range,
+    max_range, readback_mode, enable_parallel, point_cloud_downsample, depth_near, depth_far);
+
+  // Optional registry_key override: lets a camera use a unique in-process
+  // registry key independently of its ROS topic namespace.  Important when
+  // several cameras share the same namespace (they would otherwise overwrite
+  // each other in SimDataRegistry).
+  const char * rk_char = mj_getPluginConfig(m, plugin_id, ATTR_REGISTRY_KEY);
+  if (rk_char && strlen(rk_char) > 0)
+  {
+    instance->registry_key_ = std::string(rk_char);
+    print_debug("[ImagePublisher::Create] registry_key override=%s\n", rk_char);
+  }
 
   print_confirm("[ImagePublisher::Create] Instance created successfully at %p\n", (void *)instance);
   return instance;
@@ -465,18 +597,19 @@ ImagePublisher *ImagePublisher::Create(const mjModel *m, mjData *d, int plugin_i
 
 ImagePublisher::ImagePublisher(const mjModel *m,
                                mjData *, // d
-                               int sensor_id, const std::string &color_frame_id,
-                               const std::string &depth_frame_id,
+                               int sensor_id, int depth_camera_id, int color_camera_id,
+                               const std::string &color_frame_id, const std::string &depth_frame_id,
                                const std::string &topic_namespace, std::string color_topic_name,
                                std::string depth_topic_name, std::string info_topic_name,
                                std::string point_cloud_topic_name, bool rotate_point_cloud,
                                const std::string &point_cloud_rotation_preset, int height,
                                int width, mjtNum publish_rate, double min_range, double max_range,
                                ReadbackMode readback_mode, bool enable_parallel,
-                               int point_cloud_downsample)
+                               int point_cloud_downsample, float depth_near, float depth_far)
     : m_(m)
     , sensor_id_(sensor_id)
-    , camera_id_(m->sensor_objid[sensor_id])
+    , camera_id_(depth_camera_id)
+    , color_camera_id_(color_camera_id)
     , color_frame_id_(color_frame_id)
     , depth_frame_id_(depth_frame_id)
     , readback_mode_(readback_mode)
@@ -486,6 +619,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     , viewport_({0, 0, width, height})
     , enable_parallel_processing_(enable_parallel)
     , point_cloud_downsample_(std::max(point_cloud_downsample, 1))
+    , depth_near_(depth_near)
+    , depth_far_(depth_far)
     , last_fps_log_time_(std::chrono::steady_clock::now())
     , last_frame_time_(std::chrono::steady_clock::now())
     , last_color_log_(std::chrono::steady_clock::now())
@@ -499,10 +634,46 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   {
     use_pbo_readback_ = true;
   }
+  else if (readback_mode_ == ReadbackMode::Cuda)
+  {
+    use_pbo_readback_ = true; // CUDA path still uses PBO for GL→CPU transfer
+  }
   else // Auto
   {
-    use_pbo_readback_ = true; // Default to PBO for Auto mode
+#ifdef HAS_CUDA
+    readback_mode_    = ReadbackMode::Cuda;
+    use_pbo_readback_ = true;
+#else
+    use_pbo_readback_ = true; // fall back to PBO
+#endif
   }
+
+#ifdef HAS_CUDA
+  if (readback_mode_ == ReadbackMode::Cuda)
+  {
+    cudaError_t err = cudaSetDevice(0);
+    if (err != cudaSuccess)
+    {
+      RCLCPP_WARN(rclcpp::get_logger("ImagePublisher"),
+                  "CUDA init failed (%s) — falling back to PBO readback",
+                  cudaGetErrorString(err));
+      readback_mode_ = ReadbackMode::Pbo;
+    }
+    else
+    {
+      cudaStreamCreate(reinterpret_cast<cudaStream_t*>(&cuda_stream_));
+      cuda_rot_preset_ = cuda_img_proc::rotationPresetToInt(point_cloud_rotation_preset_);
+    }
+  }
+#else
+  print_warning("[ImagePublisher] No CUDA support — falling back to PBO readback\n");
+#endif
+
+
+  // Build the SimDataRegistry key from the topic namespace (strip trailing slash).
+  registry_key_ = topic_namespace;
+  if (!registry_key_.empty() && registry_key_.back() == '/')
+    registry_key_.pop_back();
 
   std::string camera_name = std::string(mj_id2name(m, mjOBJ_CAMERA, camera_id_));
   if (frame_id_.empty())
@@ -519,19 +690,31 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   std::string depth_info_topic_name
     = topic_namespace
       + (info_topic_name.empty() ? camera_name + "/depth/camera_info" : info_topic_name);
-  std::string color_info_topic_name = color_topic_name + "/camera_info";
+  // color_info always derived from the color topic path (replace last segment with "camera_info")
+  std::string color_info_topic_name;
+  {
+    const auto pos        = color_topic_name.rfind('/');
+    color_info_topic_name = (pos != std::string::npos)
+                              ? color_topic_name.substr(0, pos + 1) + "camera_info"
+                              : color_topic_name + "/camera_info";
+  }
   point_cloud_topic_name
     = topic_namespace
       + (point_cloud_topic_name.empty() ? camera_name + "/point_cloud" : point_cloud_topic_name);
 
-  // Derive color frame_id by replacing depth_optical_frame suffix with color_optical_frame
-  color_frame_id_ = frame_id_;
+  // Derive color/depth frame_ids as fallbacks when not explicitly configured
+  if (color_frame_id_.empty())
   {
+    color_frame_id_        = frame_id_;
     const std::string from = "depth_optical_frame";
     const std::string to   = "color_optical_frame";
     auto              pos  = color_frame_id_.rfind(from);
     if (pos != std::string::npos)
       color_frame_id_.replace(pos, from.size(), to);
+  }
+  if (depth_frame_id_.empty())
+  {
+    depth_frame_id_ = frame_id_;
   }
 
   print_debug("[ImagePublisher] Constructor: Starting OpenGL initialization\n");
@@ -580,6 +763,10 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   print_debug("[ImagePublisher] Constructor: Initializing MuJoCo visualization structures\n");
   mjv_defaultCamera(&camera_);
   mjv_defaultOption(&option_);
+  // Sentinel: negative label is never a valid mjtLabel value.
+  // LidarPublisher::visualize() checks for this and skips adding debug geoms (e.g. ray lines)
+  // so they do not appear in the offscreen camera images.
+  option_.label = -1;
   mjv_defaultScene(&scene_);
   mjr_defaultContext(&context_);
   print_debug("[ImagePublisher] Constructor: MuJoCo defaults initialized\n");
@@ -597,10 +784,20 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   mjr_resizeOffscreen(viewport_.width, viewport_.height, &context_);
   print_debug("[ImagePublisher] Constructor: Offscreen buffers resized\n");
 
-  // Init camera
+  // Init depth camera (used for depth rendering and as the sensor attachment point)
   camera_.type       = mjCAMERA_FIXED;
   camera_.fixedcamid = camera_id_;
   print_debug("[ImagePublisher] Constructor: Camera initialized (fixed cam id=%d)\n", camera_id_);
+
+  // Init color camera (may be the same as depth camera when color_camera_id_ == camera_id_)
+  color_camera_.type       = mjCAMERA_FIXED;
+  color_camera_.fixedcamid = color_camera_id_;
+  if (color_camera_id_ != camera_id_)
+  {
+    print_debug("[ImagePublisher] Constructor: Dual-camera mode enabled (color cam id=%d, "
+                "depth cam id=%d)\n",
+                color_camera_id_, camera_id_);
+  }
 
   print_debug("[ImagePublisher] Constructor: Setting framebuffer to offscreen\n");
   mjr_setBuffer(mjFB_OFFSCREEN, &context_);
@@ -735,7 +932,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   RCLCPP_INFO(nh_->get_logger(), "  Target publish rate: %.1f Hz (skip=%d, timestep=%.4f)",
               publish_rate, publish_skip_, m->opt.timestep);
   RCLCPP_INFO(nh_->get_logger(), "  Readback mode: %s",
-              use_pbo_readback_ ? "PBO (async GPU transfer)" : "Legacy (mjr_readPixels)");
+              readback_mode_ == ReadbackMode::Cuda ? "CUDA (async GPU kernels)"
+              : use_pbo_readback_ ? "PBO (async GPU transfer)" : "Legacy (mjr_readPixels)");
 #ifdef _OPENMP
   RCLCPP_INFO(nh_->get_logger(), "  Parallel processing: %s (OpenMP available)",
               enable_parallel_processing_ ? "ENABLED" : "DISABLED");
@@ -798,8 +996,13 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     static_cast<size_t>(depth_info_pub_->get_subscription_count()),
     static_cast<size_t>(point_cloud_pub_->get_subscription_count()));
 
-  // If no one is listening, do nothing
-  if (!publish_color_ && !publish_depth_ && !publish_info_ && !publish_cloud_)
+  // Only push to the registry if a SimDataAggregator has registered interest in this key.
+  // When no aggregator is present in the XML the consumer count is zero, so this is a
+  // single lock + map-lookup that returns false — no flip, no copy, no memory overhead.
+  const bool has_registry_consumers =
+      !registry_key_.empty() && SimDataRegistry::instance().hasCameraConsumer(registry_key_);
+  if (!publish_color_ && !publish_depth_ && !publish_info_ && !publish_cloud_
+      && !has_registry_consumers)
   {
     return;
   }
@@ -841,189 +1044,220 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
     // \todo Is it OK to override the current context of OpenGL?
     glfwMakeContextCurrent(window_);
 
-    // Update abstract scene
-    mjv_updateScene(m, d, &option_, nullptr, &camera_, mjCAT_STATIC | mjCAT_DYNAMIC, &scene_);
-
-    // Render scene in offscreen buffer.
-    // GL_DEPTH_CLAMP prevents near-plane clipping artifacts: without it, geometry inside the
-    // near plane leaves depth at the clear value (0 = far in reversed-Z), making close objects
-    // appear as see-through holes.  With clamping, those pixels receive depth = 1 (near),
-    // which linearises to the near-plane distance rather than the far-plane distance.
-    glEnable(GL_DEPTH_CLAMP);
-    mjr_render(viewport_, &scene_, &context_);
-    glDisable(GL_DEPTH_CLAMP);
-
-    if (use_pbo_readback_)
+    if (color_camera_id_ != camera_id_)
     {
-      auto wait_for_sync = [this](int sync_index) {
-        if (!pbo_sync_[sync_index])
-        {
-          return;
-        }
+      // Dual-camera mode: single render pass from the color camera for BOTH color and depth.
+      //
+      // Depth is rendered from the COLOR camera's perspective (same FOV and position), not from
+      // the physical depth sensor position.  This ensures depth(u,v) and color(u,v) land on the
+      // same ray, giving correct pixel-to-pixel correspondence for pointcloud coloring and object
+      // pose estimation.  Off-center objects are no longer skewed by FOV/baseline mismatch.
+      //
+      // This mirrors what the RealSense SDK's "aligned depth to color" stream does in firmware.
+      // In simulation we skip that intermediate step and render everything from one viewpoint.
+      //
+      // The depth camera element in the XML (depth_camera_name) is still used as the sensor
+      // scheduling anchor; it no longer drives the render perspective.
+      mjv_updateScene(m, d, &option_, nullptr, &color_camera_, mjCAT_STATIC | mjCAT_DYNAMIC,
+                      &scene_);
+      applyDepthClip(scene_);
+      glEnable(GL_DEPTH_CLAMP);
+      mjr_render(viewport_, &scene_, &context_);
+      glDisable(GL_DEPTH_CLAMP);
+      mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
+    }
+    else
+    {
+      // Single-camera mode (legacy / default): render once for both color and depth.
 
-        constexpr GLuint64 timeout_ns = 1000000ULL; // 1 ms per wait call
-        int                attempts   = 0;
-        GLenum             wait_state = GL_TIMEOUT_EXPIRED;
+      // Update abstract scene
+      mjv_updateScene(m, d, &option_, nullptr, &camera_, mjCAT_STATIC | mjCAT_DYNAMIC, &scene_);
+      applyDepthClip(scene_);
 
-        while (wait_state == GL_TIMEOUT_EXPIRED && attempts < 200)
-        {
-          wait_state
-            = glClientWaitSync(pbo_sync_[sync_index], GL_SYNC_FLUSH_COMMANDS_BIT, timeout_ns);
-          attempts++;
-        }
+      // Render scene in offscreen buffer.
+      // GL_DEPTH_CLAMP prevents near-plane clipping artifacts: without it, geometry inside the
+      // near plane leaves depth at the clear value (0 = far in reversed-Z), making close objects
+      // appear as see-through holes.  With clamping, those pixels receive depth = 1 (near),
+      // which linearises to the near-plane distance rather than the far-plane distance.
+      glEnable(GL_DEPTH_CLAMP);
+      mjr_render(viewport_, &scene_, &context_);
+      glDisable(GL_DEPTH_CLAMP);
 
-        if (wait_state == GL_WAIT_FAILED && compute_call_count_ <= 5)
-        {
-          RCLCPP_WARN(nh_->get_logger(),
-                      "glClientWaitSync failed for PBO index %d after %d attempts", sync_index,
-                      attempts);
-        }
-
-        glDeleteSync(pbo_sync_[sync_index]);
-        pbo_sync_[sync_index] = nullptr;
-      };
-
-      if (context_.currentBuffer != mjFB_WINDOW)
+      if (use_pbo_readback_)
       {
-        if (context_.offSamples)
-        {
-          glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO);
-          glReadBuffer(GL_COLOR_ATTACHMENT0);
-          glBindFramebuffer(GL_DRAW_FRAMEBUFFER, context_.offFBO_r);
-          glDrawBuffer(GL_COLOR_ATTACHMENT0);
-
-          glBlitFramebuffer(viewport_.left, viewport_.bottom, viewport_.left + viewport_.width,
-                            viewport_.bottom + viewport_.height, viewport_.left, viewport_.bottom,
-                            viewport_.left + viewport_.width, viewport_.bottom + viewport_.height,
-                            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-
-          glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO_r);
-          glReadBuffer(GL_COLOR_ATTACHMENT0);
-        }
-        else
-        {
-          glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO);
-          glReadBuffer(GL_COLOR_ATTACHMENT0);
-        }
-
-        GLenum fbo_status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
-        if (fbo_status != GL_FRAMEBUFFER_COMPLETE && compute_call_count_ <= 5)
-        {
-          RCLCPP_ERROR(nh_->get_logger(), "Framebuffer incomplete! Status: 0x%x", fbo_status);
-        }
-      }
-      else
-      {
-        glReadBuffer(GL_BACK);
-      }
-
-      pbo_index_      = pbo_frame_count_ % PBO_COUNT;
-      pbo_next_index_ = (pbo_frame_count_ + 1) % PBO_COUNT;
-
-      if (pbo_sync_[pbo_index_])
-      {
-        glDeleteSync(pbo_sync_[pbo_index_]);
-        pbo_sync_[pbo_index_] = nullptr;
-      }
-
-      // Color: read from offFBO_r (resolved, no MSAA artifacts).
-      // The READ_FRAMEBUFFER was set to offFBO_r (MSAA) or offFBO above.
-      glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_color_[pbo_index_]);
-      glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height, GL_RGB,
-                   GL_UNSIGNED_BYTE, 0);
-
-      GLenum color_error = glGetError();
-      if (color_error != GL_NO_ERROR && compute_call_count_ <= 5)
-      {
-        RCLCPP_ERROR(nh_->get_logger(),
-                     "glReadPixels color error: 0x%x (using GL_RGB=0x%x, context format was 0x%x)",
-                     color_error, GL_RGB, context_.readPixelFormat);
-      }
-
-      glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_depth_[pbo_index_]);
-      glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height,
-                   GL_DEPTH_COMPONENT, GL_FLOAT, 0);
-
-      GLenum depth_error = glGetError();
-      if (depth_error != GL_NO_ERROR && compute_call_count_ <= 5)
-      {
-        RCLCPP_ERROR(nh_->get_logger(), "glReadPixels depth error: 0x%x", depth_error);
-      }
-
-      glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-
-      pbo_sync_[pbo_index_] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-      if (!pbo_sync_[pbo_index_] && compute_call_count_ <= 5)
-      {
-        RCLCPP_WARN(nh_->get_logger(), "Failed to create GL fence for PBO index %d", pbo_index_);
-      }
-
-      if (pbo_frame_count_ >= PBO_COUNT)
-      {
-        wait_for_sync(pbo_next_index_);
-
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_color_[pbo_next_index_]);
-        unsigned char *color_ptr
-          = static_cast<unsigned char *>(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY));
-        if (color_ptr)
-        {
-          std::memcpy(color_buffer_.get(), color_ptr,
-                      sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
-          glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-        }
-        else
-        {
-          RCLCPP_ERROR(nh_->get_logger(), "Failed to map color PBO!");
-        }
-
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_depth_[pbo_next_index_]);
-        float *depth_ptr = static_cast<float *>(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY));
-        if (depth_ptr)
-        {
-          const size_t pixel_count
-            = static_cast<size_t>(viewport_.width) * static_cast<size_t>(viewport_.height);
-          std::memcpy(depth_buffer_.get(), depth_ptr, sizeof(float) * pixel_count);
-
-          // glReadPixels returns the raw GPU depth map (reversed Z in MuJoCo's pipeline).
-          // When readDepthMap requests ZERONEAR output, mirror mjr_readPixels behavior here.
-          if (context_.readDepthMap == mjDEPTH_ZERONEAR)
+        auto wait_for_sync = [this](int sync_index) {
+          if (!pbo_sync_[sync_index])
           {
-            for (size_t i = 0; i < pixel_count; i++)
-            {
-              depth_buffer_[i] = 1.0f - depth_buffer_[i];
-            }
+            return;
           }
 
-          glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+          constexpr GLuint64 timeout_ns = 1000000ULL; // 1 ms per wait call
+          int                attempts   = 0;
+          GLenum             wait_state = GL_TIMEOUT_EXPIRED;
+
+          while (wait_state == GL_TIMEOUT_EXPIRED && attempts < 200)
+          {
+            wait_state
+              = glClientWaitSync(pbo_sync_[sync_index], GL_SYNC_FLUSH_COMMANDS_BIT, timeout_ns);
+            attempts++;
+          }
+
+          if (wait_state == GL_WAIT_FAILED && compute_call_count_ <= 5)
+          {
+            RCLCPP_WARN(nh_->get_logger(),
+                        "glClientWaitSync failed for PBO index %d after %d attempts", sync_index,
+                        attempts);
+          }
+
+          glDeleteSync(pbo_sync_[sync_index]);
+          pbo_sync_[sync_index] = nullptr;
+        };
+
+        if (context_.currentBuffer != mjFB_WINDOW)
+        {
+          if (context_.offSamples)
+          {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, context_.offFBO_r);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
+
+            glBlitFramebuffer(viewport_.left, viewport_.bottom, viewport_.left + viewport_.width,
+                              viewport_.bottom + viewport_.height, viewport_.left, viewport_.bottom,
+                              viewport_.left + viewport_.width, viewport_.bottom + viewport_.height,
+                              GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO_r);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+          }
+          else
+          {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, context_.offFBO);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+          }
+
+          GLenum fbo_status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+          if (fbo_status != GL_FRAMEBUFFER_COMPLETE && compute_call_count_ <= 5)
+          {
+            RCLCPP_ERROR(nh_->get_logger(), "Framebuffer incomplete! Status: 0x%x", fbo_status);
+          }
         }
         else
         {
-          RCLCPP_ERROR(nh_->get_logger(), "Failed to map depth PBO!");
+          glReadBuffer(GL_BACK);
+        }
+
+        pbo_index_      = pbo_frame_count_ % PBO_COUNT;
+        pbo_next_index_ = (pbo_frame_count_ + 1) % PBO_COUNT;
+
+        if (pbo_sync_[pbo_index_])
+        {
+          glDeleteSync(pbo_sync_[pbo_index_]);
+          pbo_sync_[pbo_index_] = nullptr;
+        }
+
+        // Color: read from offFBO_r (resolved, no MSAA artifacts).
+        // The READ_FRAMEBUFFER was set to offFBO_r (MSAA) or offFBO above.
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_color_[pbo_index_]);
+        glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height, GL_RGB,
+                     GL_UNSIGNED_BYTE, 0);
+
+        GLenum color_error = glGetError();
+        if (color_error != GL_NO_ERROR && compute_call_count_ <= 5)
+        {
+          RCLCPP_ERROR(
+            nh_->get_logger(),
+            "glReadPixels color error: 0x%x (using GL_RGB=0x%x, context format was 0x%x)",
+            color_error, GL_RGB, context_.readPixelFormat);
+        }
+
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_depth_[pbo_index_]);
+        glReadPixels(viewport_.left, viewport_.bottom, viewport_.width, viewport_.height,
+                     GL_DEPTH_COMPONENT, GL_FLOAT, 0);
+
+        GLenum depth_error = glGetError();
+        if (depth_error != GL_NO_ERROR && compute_call_count_ <= 5)
+        {
+          RCLCPP_ERROR(nh_->get_logger(), "glReadPixels depth error: 0x%x", depth_error);
         }
 
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+        pbo_sync_[pbo_index_] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (!pbo_sync_[pbo_index_] && compute_call_count_ <= 5)
+        {
+          RCLCPP_WARN(nh_->get_logger(), "Failed to create GL fence for PBO index %d", pbo_index_);
+        }
+
+        if (pbo_frame_count_ >= PBO_COUNT)
+        {
+          wait_for_sync(pbo_next_index_);
+
+          glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_color_[pbo_next_index_]);
+          unsigned char *color_ptr
+            = static_cast<unsigned char *>(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY));
+          if (color_ptr)
+          {
+            std::memcpy(color_buffer_.get(), color_ptr,
+                        sizeof(unsigned char) * 3 * viewport_.width * viewport_.height);
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+          }
+          else
+          {
+            RCLCPP_ERROR(nh_->get_logger(), "Failed to map color PBO!");
+          }
+
+          glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_depth_[pbo_next_index_]);
+          float *depth_ptr = static_cast<float *>(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY));
+          if (depth_ptr)
+          {
+            const size_t pixel_count
+              = static_cast<size_t>(viewport_.width) * static_cast<size_t>(viewport_.height);
+            std::memcpy(depth_buffer_.get(), depth_ptr, sizeof(float) * pixel_count);
+
+            // glReadPixels returns the raw GPU depth map (reversed Z in MuJoCo's pipeline).
+            // When readDepthMap requests ZERONEAR output, mirror mjr_readPixels behavior here.
+            if (context_.readDepthMap == mjDEPTH_ZERONEAR)
+            {
+              for (size_t i = 0; i < pixel_count; i++)
+              {
+                depth_buffer_[i] = 1.0f - depth_buffer_[i];
+              }
+            }
+
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+          }
+          else
+          {
+            RCLCPP_ERROR(nh_->get_logger(), "Failed to map depth PBO!");
+          }
+
+          glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        }
+        else
+        {
+          mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
+        }
+
+        if (context_.currentBuffer != mjFB_WINDOW)
+        {
+          mjr_restoreBuffer(&context_);
+        }
+
+        pbo_frame_count_++;
+
+        if (compute_call_count_ <= 3)
+        {
+          RCLCPP_DEBUG(nh_->get_logger(), "GL operations complete (PBO frame %d)",
+                       pbo_frame_count_);
+        }
       }
       else
       {
         mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
       }
 
-      if (context_.currentBuffer != mjFB_WINDOW)
-      {
-        mjr_restoreBuffer(&context_);
-      }
-
-      pbo_frame_count_++;
-
-      if (compute_call_count_ <= 3)
-      {
-        RCLCPP_DEBUG(nh_->get_logger(), "GL operations complete (PBO frame %d)", pbo_frame_count_);
-      }
-    }
-    else
-    {
-      mjr_readPixels(color_buffer_.get(), depth_buffer_.get(), viewport_, &context_);
-    }
+    } // end single-camera else block
 
     // Release the plugin's GL context so the MuJoCo viewer can reclaim its
     // own context cleanly on the next frame.  Without this, the viewer must
@@ -1061,12 +1295,14 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
   // Publish camera info for both color and depth
   if (publish_info_)
   {
-    color_info_pub_->publish(buildCameraInfo(stamp_now, color_frame_id_));
-    depth_info_pub_->publish(buildCameraInfo(stamp_now, frame_id_));
+    color_info_pub_->publish(buildCameraInfo(stamp_now, color_frame_id_, color_camera_id_));
+    // In dual-camera mode depth is rendered from the color camera, so depth intrinsics = color intrinsics.
+    const int depth_cam_for_info = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
+    depth_info_pub_->publish(buildCameraInfo(stamp_now, depth_frame_id_, depth_cam_for_info));
   }
 
-  // Flip color buffer once if needed by any subscriber
-  bool need_color_flip = publish_color_ || publish_cloud_;
+  // Flip color buffer once if needed by any subscriber or the in-process registry
+  bool need_color_flip = publish_color_ || publish_cloud_ || has_registry_consumers;
   if (need_color_flip)
   {
     auto flip_start = std::chrono::steady_clock::now();
@@ -1123,6 +1359,20 @@ void ImagePublisher::compute(const mjModel *m, mjData *d, int // plugin_id
       }
       total_flip_time_   = 0.0;
       flip_sample_count_ = 0;
+    }
+
+    // Push to the in-process SimDataRegistry so SimDataAggregator (and any other
+    // code in the same process) can read the frame without going through DDS.
+    if (has_registry_consumers && color_buffer_flipped_)
+    {
+      CameraFrame frame;
+      frame.height   = viewport_.height;
+      frame.width    = viewport_.width;
+      frame.sim_time = d->time;
+      frame.valid    = true;
+      const size_t n = static_cast<size_t>(viewport_.height) * viewport_.width * 3;
+      frame.data.assign(color_buffer_flipped_.get(), color_buffer_flipped_.get() + n);
+      SimDataRegistry::instance().updateCameraFrame(registry_key_, std::move(frame));
     }
   }
 
@@ -1265,6 +1515,21 @@ void ImagePublisher::free()
   mjr_freeContext(&context_);
   mjv_freeScene(&scene_);
 
+#ifdef HAS_CUDA
+  if (cuda_bufs_.d_depth_raw)    cudaFree(cuda_bufs_.d_depth_raw);
+  if (cuda_bufs_.d_depth_linear) cudaFree(cuda_bufs_.d_depth_linear);
+  if (cuda_bufs_.d_color_raw)    cudaFree(cuda_bufs_.d_color_raw);
+  if (cuda_bufs_.d_cloud)        cudaFree(cuda_bufs_.d_cloud);
+  if (cuda_bufs_.h_depth_linear) cudaFreeHost(cuda_bufs_.h_depth_linear);
+  if (cuda_bufs_.h_cloud)        cudaFreeHost(cuda_bufs_.h_cloud);
+  cuda_bufs_ = {};
+  if (cuda_stream_)
+  {
+    cudaStreamDestroy(static_cast<cudaStream_t>(cuda_stream_));
+    cuda_stream_ = nullptr;
+  }
+#endif
+
   RCLCPP_DEBUG(nh_->get_logger(), "Destroying GLFW window");
   if (window_)
   {
@@ -1278,7 +1543,8 @@ void ImagePublisher::free()
 }
 
 sensor_msgs::msg::CameraInfo ImagePublisher::buildCameraInfo(const rclcpp::Time &stamp,
-                                                             const std::string  &frame_id) const
+                                                             const std::string  &frame_id,
+                                                             int                 cam_id) const
 {
   sensor_msgs::msg::CameraInfo info_msg;
   info_msg.header.stamp     = stamp;
@@ -1291,7 +1557,7 @@ sensor_msgs::msg::CameraInfo ImagePublisher::buildCameraInfo(const rclcpp::Time 
   info_msg.r.fill(0.0);
   info_msg.p.fill(0.0);
   double focal_scaling
-    = (1.0 / std::tan((m_->cam_fovy[camera_id_] * M_PI / 180.0) / 2.0)) * viewport_.height / 2.0;
+    = (1.0 / std::tan((m_->cam_fovy[cam_id] * M_PI / 180.0) / 2.0)) * viewport_.height / 2.0;
   info_msg.k[0] = info_msg.p[0] = focal_scaling;
   info_msg.k[2] = info_msg.p[2] = static_cast<double>(viewport_.width) / 2.0;
   info_msg.k[4] = info_msg.p[5] = focal_scaling;
@@ -1349,8 +1615,13 @@ void ImagePublisher::publishThread()
     auto depth_start = std::chrono::steady_clock::now();
 
     // --- Process Depth Data ---
-    float near = static_cast<float>(m_->vis.map.znear * m_->stat.extent);
-    float far  = static_cast<float>(m_->vis.map.zfar * m_->stat.extent);
+    // Use the scene's actual frustum values — these may have been overridden by applyDepthClip()
+    // to camera-specific clip planes (depth_near / depth_far config keys).  Falling back to the
+    // model global (vis.map.znear * stat.extent) produces a very large far range (e.g. 250 m for
+    // a room-scale scene) which makes depth images appear nearly binary (all-black near, all-white
+    // far) in RViz2 and other visualisers.
+    float near = scene_.camera[0].frustum_near;
+    float far  = scene_.camera[0].frustum_far;
 
     // Precompute constant for depth conversion
     const float depth_scale = 1.0f - near / far;
@@ -1358,9 +1629,8 @@ void ImagePublisher::publishThread()
     // Log near/far on the first frame so the operator can verify clip plane distances.
     if (depth_log_count_ == 0)
     {
-      RCLCPP_DEBUG(nh_->get_logger(),
-                  "[Depth] near=%.4f m, far=%.4f m (znear=%.4f * extent=%.4f)",
-                  near, far, m_->vis.map.znear, m_->stat.extent);
+      RCLCPP_DEBUG(nh_->get_logger(), "[Depth] near=%.4f m, far=%.4f m (znear=%.4f * extent=%.4f)",
+                   near, far, m_->vis.map.znear, m_->stat.extent);
     }
     depth_log_count_ = (depth_log_count_ + 1) % 100;
 
@@ -1384,21 +1654,121 @@ void ImagePublisher::publishThread()
       }
     };
 
-#ifdef _OPENMP
-    if (shouldParallelizeRows(viewport_.height))
+    // Pointer to the linearized, top-down depth buffer used for depth_msg and cloud.
+    // Normally this is local_depth_flipped (CPU path); CUDA path sets it to pinned host memory.
+    const float* depth_for_msg = local_depth_flipped;
+
+    // Pointer to the raw RGB (bottom-up) color buffer for the cloud.
+    // In CUDA mode the kernel handles the y-flip itself, so this points at the raw buffer.
+    bool cuda_cloud_ready = false;  // set true when CUDA has filled cuda_bufs_.h_cloud
+
+#ifdef HAS_CUDA
+    if (readback_mode_ == ReadbackMode::Cuda)
     {
-#pragma omp parallel for schedule(static)
-      for (int h = 0; h < viewport_.height; h++)
+      const int W    = viewport_.width;
+      const int H    = viewport_.height;
+      const int ps   = 16;  // point_step: xyz(12) + rgb(4) — matches setPointCloud2FieldsByString
+      const size_t n_px  = static_cast<size_t>(W) * H;
+      const size_t n_rgb = n_px * 3;
+
+      // (Re)allocate if dimensions changed
+      if (!cuda_bufs_.isAllocated() || cuda_bufs_.width != W
+          || cuda_bufs_.height != H || cuda_bufs_.point_step != ps)
       {
-        process_depth_row(h);
+        // Release old buffers
+        if (cuda_bufs_.d_depth_raw)    cudaFree(cuda_bufs_.d_depth_raw);
+        if (cuda_bufs_.d_depth_linear) cudaFree(cuda_bufs_.d_depth_linear);
+        if (cuda_bufs_.d_color_raw)    cudaFree(cuda_bufs_.d_color_raw);
+        if (cuda_bufs_.d_cloud)        cudaFree(cuda_bufs_.d_cloud);
+        if (cuda_bufs_.h_depth_linear) cudaFreeHost(cuda_bufs_.h_depth_linear);
+        if (cuda_bufs_.h_cloud)        cudaFreeHost(cuda_bufs_.h_cloud);
+        cuda_bufs_ = {};
+
+        cudaMalloc(&cuda_bufs_.d_depth_raw,    n_px * sizeof(float));
+        cudaMalloc(&cuda_bufs_.d_depth_linear, n_px * sizeof(float));
+        cudaMalloc(&cuda_bufs_.d_color_raw,    n_rgb);
+        cudaMalloc(&cuda_bufs_.d_cloud,        n_px * ps);
+        cudaMallocHost(&cuda_bufs_.h_depth_linear, n_px * sizeof(float));
+        cudaMallocHost(&cuda_bufs_.h_cloud,        n_px * ps);
+        cuda_bufs_.width      = W;
+        cuda_bufs_.height     = H;
+        cuda_bufs_.point_step = ps;
       }
+
+      cudaStream_t stream = static_cast<cudaStream_t>(cuda_stream_);
+
+      // --- Depth: H2D → linearise kernel → D2H ---
+      cudaMemcpyAsync(cuda_bufs_.d_depth_raw, local_depth_back,
+                      n_px * sizeof(float), cudaMemcpyHostToDevice, stream);
+
+      const int zerofar_conv = (context_.readDepthMap == mjDEPTH_ZEROFAR) ? 1 : 0;
+      cuda_img_proc::launchDepthLinearizeFlip(
+          static_cast<const float*>(cuda_bufs_.d_depth_raw),
+          static_cast<float*>(cuda_bufs_.d_depth_linear),
+          W, H, near, far, zerofar_conv, stream);
+
+      cudaMemcpyAsync(cuda_bufs_.h_depth_linear,
+                      cuda_bufs_.d_depth_linear,
+                      n_px * sizeof(float), cudaMemcpyDeviceToHost, stream);
+
+      // --- Cloud: H2D color → cloud kernel → D2H (full res only; downsample falls back to CPU) ---
+      if (publish_cloud_ && point_cloud_downsample_ <= 1)
+      {
+        cudaMemcpyAsync(cuda_bufs_.d_color_raw, local_color_back,
+                        n_rgb, cudaMemcpyHostToDevice, stream);
+
+        // Camera intrinsics (match buildCameraInfo formula)
+        const int cam_id = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
+        const float focal = (1.0f / std::tan((m_->cam_fovy[cam_id] * static_cast<float>(M_PI) / 180.0f) / 2.0f))
+                            * static_cast<float>(H) / 2.0f;
+        const float fx = focal;
+        const float fy = focal;
+        const float cx = static_cast<float>(W) / 2.0f;
+        const float cy = static_cast<float>(H) / 2.0f;
+
+        const float bad_point = std::numeric_limits<float>::quiet_NaN();
+        const int   rot_preset = rotate_point_cloud_ ? cuda_rot_preset_ : 0;
+
+        cuda_img_proc::launchDepthToCloud(
+            static_cast<const float*>(cuda_bufs_.d_depth_linear),
+            static_cast<const uint8_t*>(cuda_bufs_.d_color_raw),
+            1 /*color_y_flip: raw buffer is bottom-up from OpenGL*/,
+            static_cast<uint8_t*>(cuda_bufs_.d_cloud),
+            W, H, fx, fy, cx, cy,
+            static_cast<float>(range_min_), static_cast<float>(range_max_),
+            ps, 0u, 4u, 8u, 12u,
+            rot_preset, bad_point, stream);
+
+        cudaMemcpyAsync(cuda_bufs_.h_cloud, cuda_bufs_.d_cloud,
+                        n_px * ps, cudaMemcpyDeviceToHost, stream);
+        cuda_cloud_ready = true;
+      }
+
+      // Wait for all async operations to complete
+      cudaStreamSynchronize(stream);
+
+      // Use the pinned host depth buffer for depth_msg
+      depth_for_msg = cuda_bufs_.h_depth_linear;
     }
-    else
+    else  // CPU path
 #endif
     {
-      for (int h = 0; h < viewport_.height; h++)
+#ifdef _OPENMP
+      if (shouldParallelizeRows(viewport_.height))
       {
-        process_depth_row(h);
+#pragma omp parallel for schedule(static)
+        for (int h = 0; h < viewport_.height; h++)
+        {
+          process_depth_row(h);
+        }
+      }
+      else
+#endif
+      {
+        for (int h = 0; h < viewport_.height; h++)
+        {
+          process_depth_row(h);
+        }
       }
     }
 
@@ -1406,13 +1776,13 @@ void ImagePublisher::publishThread()
     if (depth_log_count_ == 1)
     {
       int   center_idx   = (viewport_.height / 2) * viewport_.width + (viewport_.width / 2);
-      float center_depth = local_depth_flipped[center_idx];
-      float min_depth    = local_depth_flipped[0];
-      float max_depth    = local_depth_flipped[0];
+      float center_depth = depth_for_msg[center_idx];
+      float min_depth    = depth_for_msg[0];
+      float max_depth    = depth_for_msg[0];
       for (int i = 0; i < viewport_.width * viewport_.height; i++)
       {
-        min_depth = std::min(min_depth, local_depth_flipped[i]);
-        max_depth = std::max(max_depth, local_depth_flipped[i]);
+        min_depth = std::min(min_depth, depth_for_msg[i]);
+        max_depth = std::max(max_depth, depth_for_msg[i]);
       }
       RCLCPP_DEBUG(nh_->get_logger(), "Depth values: min=%.4f, max=%.4f, center=%.4f", min_depth,
                    max_depth, center_depth);
@@ -1437,7 +1807,7 @@ void ImagePublisher::publishThread()
       depth_msg.is_bigendian    = 0;
       depth_msg.step            = static_cast<unsigned int>(sizeof(float) * viewport_.width);
       depth_msg.data.resize(sizeof(float) * viewport_.width * viewport_.height);
-      std::memcpy(&depth_msg.data[0], local_depth_flipped,
+      std::memcpy(&depth_msg.data[0], depth_for_msg,
                   sizeof(float) * viewport_.width * viewport_.height);
       if (publish_depth_)
       {
@@ -1449,12 +1819,52 @@ void ImagePublisher::publishThread()
     sensor_msgs::msg::CameraInfo info_msg;
     if (publish_cloud_)
     {
-      info_msg = buildCameraInfo(stamp_now, frame_id_);
+      const int depth_cam_for_info = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
+      info_msg = buildCameraInfo(stamp_now, depth_frame_id_, depth_cam_for_info);
     }
 
     // --- Publish Point Cloud ---
     if (publish_cloud_)
     {
+      sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
+        = std::make_shared<sensor_msgs::msg::PointCloud2>();
+      cloud_msg->header       = depth_msg.header;
+      cloud_msg->is_dense     = false;
+      cloud_msg->is_bigendian = false;
+
+#ifdef HAS_CUDA
+      // CUDA fast path: cloud data already computed in cuda_bufs_.h_cloud (full res only)
+      if (cuda_cloud_ready)
+      {
+        const int W = viewport_.width;
+        const int H = viewport_.height;
+        const int ps = cuda_bufs_.point_step;
+        cloud_msg->height    = H;
+        cloud_msg->width     = W;
+        cloud_msg->point_step = static_cast<uint32_t>(ps);
+        cloud_msg->row_step   = static_cast<uint32_t>(ps * W);
+        cloud_msg->fields.resize(4);
+        auto mkfield = [](const std::string& n, uint32_t off, uint8_t dtype, uint32_t count) {
+          sensor_msgs::msg::PointField f;
+          f.name     = n;
+          f.offset   = off;
+          f.datatype = dtype;
+          f.count    = count;
+          return f;
+        };
+        cloud_msg->fields[0] = mkfield("x",   0, sensor_msgs::msg::PointField::FLOAT32, 1);
+        cloud_msg->fields[1] = mkfield("y",   4, sensor_msgs::msg::PointField::FLOAT32, 1);
+        cloud_msg->fields[2] = mkfield("z",   8, sensor_msgs::msg::PointField::FLOAT32, 1);
+        cloud_msg->fields[3] = mkfield("rgb", 12, sensor_msgs::msg::PointField::FLOAT32, 1);
+        cloud_msg->data.resize(static_cast<size_t>(H) * W * ps);
+        std::memcpy(cloud_msg->data.data(), cuda_bufs_.h_cloud,
+                    static_cast<size_t>(H) * W * ps);
+        point_cloud_pub_->publish(*cloud_msg);
+        continue; // skip CPU cloud path below (jump to next iteration)
+      }
+#endif
+
+      // CPU cloud path (also used as CUDA fallback for downsampled clouds)
       // Flip the RGB color buffer vertically for point cloud (RGB, not BGR)
       // We need to flip because OpenGL reads bottom-to-top but ROS images are top-to-bottom
       const size_t pixel_count_rgb = static_cast<size_t>(viewport_.width) * viewport_.height * 3;
@@ -1471,7 +1881,7 @@ void ImagePublisher::publishThread()
       // Create a temporary color message for the conversion function
       sensor_msgs::msg::Image color_msg_for_cloud;
       color_msg_for_cloud.header.stamp    = stamp_now;
-      color_msg_for_cloud.header.frame_id = frame_id_;
+      color_msg_for_cloud.header.frame_id = color_frame_id_;
       color_msg_for_cloud.height          = viewport_.height;
       color_msg_for_cloud.width           = viewport_.width;
       color_msg_for_cloud.encoding        = "rgb8";
@@ -1493,12 +1903,6 @@ void ImagePublisher::publishThread()
                      model.fx(), model.fy(), model.cx(), model.cy());
       }
       pcl_log_count_ = (pcl_log_count_ + 1) % 100;
-
-      sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
-        = std::make_shared<sensor_msgs::msg::PointCloud2>();
-      cloud_msg->header       = depth_msg.header;
-      cloud_msg->is_dense     = false;
-      cloud_msg->is_bigendian = false;
 
       // --- Downsample depth and color for cloud if requested ---
       // This shrinks the images before cloud conversion: O(W*H / k²) instead of O(W*H).
@@ -1541,10 +1945,13 @@ void ImagePublisher::publishThread()
         cv_ptr_for_cloud = cv_small;
 
         // Scale camera intrinsics
-        const double                 scale       = 1.0 / point_cloud_downsample_;
-        sensor_msgs::msg::CameraInfo scaled_info = buildCameraInfo(stamp_now, frame_id_);
-        scaled_info.width                        = small_w;
-        scaled_info.height                       = small_h;
+        const double                 scale = 1.0 / point_cloud_downsample_;
+        const int                    depth_cam_for_info
+          = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
+        sensor_msgs::msg::CameraInfo scaled_info
+          = buildCameraInfo(stamp_now, depth_frame_id_, depth_cam_for_info);
+        scaled_info.width  = small_w;
+        scaled_info.height = small_h;
         scaled_info.k[0] *= scale; // fx
         scaled_info.k[2] *= scale; // cx
         scaled_info.k[4] *= scale; // fy
@@ -1576,13 +1983,21 @@ void ImagePublisher::publishThread()
       sensor_msgs::PointCloud2Modifier pcd_modifier(*cloud_msg);
       pcd_modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
 
+      const int pcl_threads = shouldParallelizeRows(static_cast<int>(cloud_msg->height))
+#ifdef _OPENMP
+                                ? omp_get_max_threads()
+#else
+                                ? 1
+#endif
+                                : 1;
+
       if (depth_msg_for_cloud->encoding == sensor_msgs::image_encodings::TYPE_16UC1)
       {
         depthimage_to_pointcloud2::convert<uint16_t>(
           depth_msg_for_cloud, cloud_msg, cloud_model, range_max_, use_quiet_nan_,
           rotate_point_cloud_ ? point_cloud_rotation_preset_
                               : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
-          cv_ptr_for_cloud, range_min_);
+          cv_ptr_for_cloud, range_min_, pcl_threads);
       }
       else if (depth_msg_for_cloud->encoding == sensor_msgs::image_encodings::TYPE_32FC1)
       {
@@ -1590,7 +2005,7 @@ void ImagePublisher::publishThread()
           depth_msg_for_cloud, cloud_msg, cloud_model, range_max_, use_quiet_nan_,
           rotate_point_cloud_ ? point_cloud_rotation_preset_
                               : depthimage_to_pointcloud2::PCL_ROT_NO_PRESET,
-          cv_ptr_for_cloud, range_min_);
+          cv_ptr_for_cloud, range_min_, pcl_threads);
       }
       else
       {

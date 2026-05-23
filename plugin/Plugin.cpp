@@ -11,6 +11,8 @@
 #include "MimicJoint.hpp"
 #include "PoseRandomizer.h"
 #include "RosControl.hpp"
+#include "SimDataAggregator.h"
+#include "SimPlotter.h"
 
 namespace MujocoRosUtils
 {
@@ -33,6 +35,8 @@ mjPLUGIN_LIB_INIT
   MimicJoint::RegisterPlugin();
   PoseRandomizer::RegisterPlugin();
   Ros2Control::RegisterPlugin();
+  SimDataAggregator::RegisterPlugin();
+  SimPlotter::RegisterPlugin();
 }
 
 } // namespace MujocoRosUtils

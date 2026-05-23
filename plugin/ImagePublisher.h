@@ -1,6 +1,11 @@
 #pragma once
 
+#include <rclcpp/version.h>
+#if RCLCPP_VERSION_MAJOR >= 28
+#include <image_geometry/pinhole_camera_model.hpp>
+#else
 #include <image_geometry/pinhole_camera_model.h>
+#endif
 #include <image_transport/image_transport.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -17,6 +22,8 @@
 #include <opencv2/core/core.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <string>
+
+#include "SimDataRegistry.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -35,7 +42,8 @@ public:
   {
     Auto,
     Pbo,
-    Legacy
+    Legacy,
+    Cuda
   };
 
   /** \brief Register plugin. */
@@ -89,25 +97,29 @@ protected:
       \param publish_rate publish rate
   */
   ImagePublisher(
-      const mjModel *m, 
-      mjData *d, 
-      int sensor_id, 
-      const std::string &color_frame_id,             
+      const mjModel *m,
+      mjData *d,
+      int sensor_id,
+      int depth_camera_id,
+      int color_camera_id,
+      const std::string &color_frame_id,
       const std::string &depth_frame_id,
-      const std::string &topic_namespace, 
+      const std::string &topic_namespace,
       std::string color_topic_name,
-      std::string depth_topic_name, 
+      std::string depth_topic_name,
       std::string info_topic_name,
-      std::string point_cloud_topic_name, 
-      bool rotate_point_cloud, 
-      const std::string &point_cloud_rotation_preset, 
+      std::string point_cloud_topic_name,
+      bool rotate_point_cloud,
+      const std::string &point_cloud_rotation_preset,
       int height, int width,
       mjtNum publish_rate,
       double min_range,
       double max_range,
       ReadbackMode readback_mode,
       bool enable_parallel,
-      int point_cloud_downsample
+      int point_cloud_downsample,
+      float depth_near = 0.0f,
+      float depth_far  = 0.0f
   );
 
 protected:
@@ -117,13 +129,20 @@ protected:
   //! Sensor ID
   int sensor_id_ = -1;
 
-  //! Camera ID
+  //! Camera ID (depth camera — the sensor attachment point, used for depth rendering)
   int camera_id_ = -1;
+
+  //! Color camera ID (used for color rendering; equals camera_id_ in single-camera mode)
+  int color_camera_id_ = -1;
 
   //! Frame ID
   std::string frame_id_       = "";
   std::string color_frame_id_ = "";
   std::string depth_frame_id_ = "";
+
+  //! Key used to publish rendered color frames into SimDataRegistry (= namespace without trailing /).
+  //! Empty means registry publishing is disabled for this instance.
+  std::string registry_key_ = "";
 
   ReadbackMode readback_mode_   = ReadbackMode::Pbo;
   bool         use_pbo_readback_ = true;
@@ -131,6 +150,31 @@ protected:
 
   //! Point cloud downsample factor (1 = full resolution, 2 = half res, etc.)
   int point_cloud_downsample_ = 1;
+
+  //! Per-camera depth clip planes (metres). 0 = use MuJoCo model globals.
+  //! Setting these prevents the "mostly black/white" depth image caused by the large global far
+  //! plane (vis.map.zfar * stat.extent can be 250 m for a room-scale scene).
+  float depth_near_ = 0.0f;
+  float depth_far_  = 0.0f;
+
+  /** Override scene frustum with per-camera clip planes (if configured).
+   *  Call this immediately after mjv_updateScene() and before mjr_render().
+   *  mjr_render() reads scene.camera[*].frustum_near/far to build the projection matrix, so
+   *  overriding them here changes both the rendering AND the depth buffer linearisation range.
+   */
+  inline void applyDepthClip(mjvScene &scn)
+  {
+    if (depth_near_ > 0.0f)
+    {
+      scn.camera[0].frustum_near = depth_near_;
+      scn.camera[1].frustum_near = depth_near_;
+    }
+    if (depth_far_ > 0.0f)
+    {
+      scn.camera[0].frustum_far = depth_far_;
+      scn.camera[1].frustum_far = depth_far_;
+    }
+  }
 
   //! Rotate point cloud
   bool        rotate_point_cloud_          = false;
@@ -166,7 +210,8 @@ protected:
   //! Variables for visualization and rendering in MuJoCo
   //! @{
   mjvScene    scene_;
-  mjvCamera   camera_;
+  mjvCamera   camera_;       // depth camera (sensor attachment)
+  mjvCamera   color_camera_; // color camera (equals camera_ in single-camera mode)
   mjvOption   option_;
   mjrContext  context_;
   GLFWwindow *window_;
@@ -239,9 +284,30 @@ protected:
   //! Reusable buffer for RGB-flipped color data in point cloud generation
   std::vector<unsigned char> color_flipped_rgb_;
 
-  //! Build a CameraInfo message from current camera parameters
+#ifdef HAS_CUDA
+  //! CUDA depth-processing state (active when readback_mode_ == Cuda)
+  //! @{
+  void* cuda_stream_     = nullptr;  ///< cudaStream_t, cast in .cpp
+  int   cuda_rot_preset_ = 0;        ///< rotationPresetToInt() result for cloud kernel
+
+  struct CudaBuffers {
+    void*  d_depth_raw    = nullptr;  // float H×W device
+    void*  d_depth_linear = nullptr;  // float H×W device
+    void*  d_color_raw    = nullptr;  // uint8 H×W×3 device
+    void*  d_cloud        = nullptr;  // uint8 H×W×point_step device
+    float* h_depth_linear = nullptr;  // float H×W pinned host
+    void*  h_cloud        = nullptr;  // uint8 H×W×point_step pinned host
+    int width = 0, height = 0, point_step = 0;
+    bool isAllocated() const { return d_depth_raw != nullptr; }
+  } cuda_bufs_;
+  //! @}
+#endif
+
+  //! Build a CameraInfo message from current camera parameters.
+  //! cam_id selects which MuJoCo camera's FOV to use for intrinsics.
   sensor_msgs::msg::CameraInfo buildCameraInfo(const rclcpp::Time &stamp,
-                                               const std::string &frame_id) const;
+                                               const std::string &frame_id,
+                                               int cam_id) const;
 };
 
 } // namespace MujocoRosUtils

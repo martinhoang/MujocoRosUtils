@@ -51,8 +51,14 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 
+#include <algorithm>
+#include <cstring>
 #include <limits>
 #include <string>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include <opencv2/imgproc/imgproc.hpp>
 
@@ -68,147 +74,161 @@ constexpr char PCL_ROT_PRESET_PITCH_90[]   = "pitch_90";
 constexpr char PCL_ROT_PRESET_YAW_90[]     = "yaw_90";
 
 // Handles float or uint16 depths
+// num_threads: number of OpenMP threads to use for the pixel loop.
+//   Pass 1 (default) for single-threaded. When >1, requires OpenMP.
 template <typename T>
 void convert(const sensor_msgs::msg::Image::ConstSharedPtr &depth_msg,
              sensor_msgs::msg::PointCloud2::SharedPtr      &cloud_msg,
              const image_geometry::PinholeCameraModel &model, double range_max = 0.0,
              bool use_quiet_nan = false, const std::string &rotation_preset = "",
-             cv_bridge::CvImageConstPtr cv_ptr = nullptr, double range_min = 0.0)
+             cv_bridge::CvImageConstPtr cv_ptr = nullptr, double range_min = 0.0,
+             int num_threads = 1)
 {
   // Use correct principal point from calibration
-  float center_x = model.cx();
-  float center_y = model.cy();
+  const float center_x   = model.cx();
+  const float center_y   = model.cy();
+  const float constant_x = static_cast<float>(DepthTraits<T>::toMeters(T(1)) / model.fx());
+  const float constant_y = static_cast<float>(DepthTraits<T>::toMeters(T(1)) / model.fy());
+  const float bad_point  = std::numeric_limits<float>::quiet_NaN();
 
-  // Combine unit conversion (if necessary) with scaling by focal length for computing (X,Y)
-  double unit_scaling = DepthTraits<T>::toMeters(T(1));
-  float  constant_x   = unit_scaling / model.fx();
-  float  constant_y   = unit_scaling / model.fy();
-  float  bad_point    = std::numeric_limits<float>::quiet_NaN();
+  // Pre-compute range limits as depth-type values once (avoids per-pixel conversion)
+  const T depth_max_t = (range_max != 0.0) ? DepthTraits<T>::fromMeters(range_max) : T(0);
+  const T depth_min_t = (range_min != 0.0) ? DepthTraits<T>::fromMeters(range_min) : T(0);
 
-  sensor_msgs::PointCloud2Iterator<float> iter_x(*cloud_msg, "x");
-  sensor_msgs::PointCloud2Iterator<float> iter_y(*cloud_msg, "y");
-  sensor_msgs::PointCloud2Iterator<float> iter_z(*cloud_msg, "z");
-  sensor_msgs::PointCloud2Iterator<float> iter_rgb(*cloud_msg, "rgb");
-  const T *depth_row = reinterpret_cast<const T *>(&depth_msg->data[0]);
-  int      row_step  = depth_msg->step / sizeof(T);
-  for (int v = 0; v < static_cast<int>(cloud_msg->height); ++v)
+  // Resolve byte offsets for x, y, z, rgb fields in the cloud point_step layout.
+  // Using raw pointer arithmetic instead of PointCloud2Iterator enables true random
+  // access into any row, making the outer loop safely parallelisable with OpenMP.
+  uint32_t off_x = 0, off_y = 4, off_z = 8, off_rgb = 12;
+  for (const auto & f : cloud_msg->fields)
   {
-    const T                                *depth_row_ptr = depth_row + v * row_step;
-    sensor_msgs::PointCloud2Iterator<float> iter_x_local(iter_x + v * cloud_msg->width);
-    sensor_msgs::PointCloud2Iterator<float> iter_y_local(iter_y + v * cloud_msg->width);
-    sensor_msgs::PointCloud2Iterator<float> iter_z_local(iter_z + v * cloud_msg->width);
-    sensor_msgs::PointCloud2Iterator<float> iter_rgb_local(iter_rgb + v * cloud_msg->width);
+    if (f.name == "x") off_x = f.offset;
+    else if (f.name == "y") off_y = f.offset;
+    else if (f.name == "z") off_z = f.offset;
+    else if (f.name == "rgb") off_rgb = f.offset;
+  }
 
-    for (int u = 0; u < static_cast<int>(cloud_msg->width);
-         ++u, ++iter_x_local, ++iter_y_local, ++iter_z_local, ++iter_rgb_local)
+  uint8_t *      cloud_data  = cloud_msg->data.data();
+  const uint32_t point_step  = cloud_msg->point_step;
+  const T *      depth_data  = reinterpret_cast<const T *>(depth_msg->data.data());
+  const int      row_step    = static_cast<int>(depth_msg->step / sizeof(T));
+  const int      height      = static_cast<int>(cloud_msg->height);
+  const int      width       = static_cast<int>(cloud_msg->width);
+  const bool     has_rgb     = (cv_ptr != nullptr);
+  const bool     is_gray     = has_rgb && (cv_ptr->image.type() == CV_8UC1);
+  const bool     is_bgr      = has_rgb && (cv_ptr->image.type() == CV_8UC3);
+
+#ifdef _OPENMP
+  // Cap threads to what OpenMP has available
+  const int n_threads = std::min(num_threads, omp_get_max_threads());
+#pragma omp parallel for schedule(static) num_threads(n_threads)
+#endif
+  for (int v = 0; v < height; ++v)
+  {
+    const T * depth_row_ptr = depth_data + v * row_step;
+
+    for (int u = 0; u < width; ++u)
     {
+      // Direct pointer into flat cloud buffer — no iterator copies needed
+      uint8_t * p    = cloud_data + static_cast<size_t>(v * width + u) * point_step;
+      float *   px   = reinterpret_cast<float *>(p + off_x);
+      float *   py   = reinterpret_cast<float *>(p + off_y);
+      float *   pz   = reinterpret_cast<float *>(p + off_z);
+      int *     prgb = reinterpret_cast<int *>(p + off_rgb);
+
       T depth = depth_row_ptr[u];
 
-      // Missing points denoted by NaNs
+      // Missing / out-of-range points → NaN
       if (!DepthTraits<T>::valid(depth))
       {
         if (range_max != 0.0 && !use_quiet_nan)
-        {
-          depth = DepthTraits<T>::fromMeters(range_max);
-        }
+          depth = depth_max_t;
         else
         {
-          *iter_x_local = *iter_y_local = *iter_z_local = *iter_rgb_local = bad_point;
+          *px = *py = *pz = bad_point;
+          *prgb            = 0;
           continue;
         }
       }
 
-      if (range_max != 0.0)
+      if (range_max != 0.0 && depth > depth_max_t)
       {
-        T depth_max = DepthTraits<T>::fromMeters(range_max);
-        if (depth > depth_max)
-        {
-          *iter_x_local = *iter_y_local = *iter_z_local = *iter_rgb_local = bad_point;
-          continue;
-        }
+        *px = *py = *pz = bad_point;
+        *prgb            = 0;
+        continue;
       }
 
-      if (range_min != 0.0)
+      if (range_min != 0.0 && depth < depth_min_t)
       {
-        T depth_min = DepthTraits<T>::fromMeters(range_min);
-        if (depth < depth_min)
-        {
-          *iter_x_local = *iter_y_local = *iter_z_local = *iter_rgb_local = bad_point;
-          continue;
-        }
+        *px = *py = *pz = bad_point;
+        *prgb            = 0;
+        continue;
       }
 
-      // Fill in XYZ
+      // Unproject depth pixel to 3-D point
       float x = (u - center_x) * depth * constant_x;
       float y = (v - center_y) * depth * constant_y;
       float z = DepthTraits<T>::toMeters(depth);
 
       if (!rotation_preset.empty())
       {
-        float temp_x = x, temp_y = y, temp_z = z;
-        if (rotation_preset == PCL_ROT_NO_PRESET)
+        const float tx = x, ty = y, tz = z;
+        if (rotation_preset == PCL_ROT_PRESET_ROLL_180)
         {
-          // do nothing
-        }
-        else if (rotation_preset == PCL_ROT_PRESET_ROLL_180)
-        { // Default MuJoCo to ROS
-          x = -temp_x;
-          y = -temp_y;
+          x = -tx;
+          y = -ty;
         }
         else if (rotation_preset == PCL_ROT_PRESET_RDF_TO_FLU)
-        { // Standard ROS camera to standard robot
-          x = temp_z;
-          y = -temp_x;
-          z = -temp_y;
+        {
+          x = tz;
+          y = -tx;
+          z = -ty;
         }
         else if (rotation_preset == PCL_ROT_PRESET_ROLL_90)
         {
-          x = temp_x;
-          y = -temp_z;
-          z = temp_y;
+          x = tx;
+          y = -tz;
+          z = ty;
         }
         else if (rotation_preset == PCL_ROT_PRESET_N_ROLL_90)
         {
-          x = -temp_x;
-          y = temp_z;
-          z = -temp_y;
+          x = -tx;
+          y = tz;
+          z = -ty;
         }
         else if (rotation_preset == PCL_ROT_PRESET_PITCH_90)
         {
-          x = temp_z;
-          y = temp_y;
-          z = -temp_x;
+          x = tz;
+          y = ty;
+          z = -tx;
         }
         else if (rotation_preset == PCL_ROT_PRESET_YAW_90)
         {
-          x = -temp_y;
-          y = temp_x;
-          z = temp_z;
+          x = -ty;
+          y = tx;
+          z = tz;
         }
       }
-      *iter_x_local = x;
-      *iter_y_local = y;
-      *iter_z_local = z;
 
-      // and RGB
-      int rgb = 0x000000;
-      if (cv_ptr != nullptr)
+      *px = x;
+      *py = y;
+      *pz = z;
+
+      // RGB — cv::Mat::at<> is safe for concurrent reads from different (v,u) pairs
+      int rgb = 0;
+      if (has_rgb)
       {
-        if (cv_ptr->image.type() == CV_8UC1)
+        if (is_gray)
         {
-          // grayscale
-          rgb = cv_ptr->image.at<uchar>(v, u);
-          rgb = (rgb << 16) | (rgb << 8) | rgb; // Convert grayscale to RGB
+          const int g = cv_ptr->image.at<uchar>(v, u);
+          rgb         = (g << 16) | (g << 8) | g;
         }
-        else if (cv_ptr->image.type() == CV_8UC3)
+        else if (is_bgr)
         {
-          // RGB
-          cv::Vec3b intensity = cv_ptr->image.at<cv::Vec3b>(v, u);
-          rgb                 = (intensity[0] << 16) | (intensity[1] << 8)
-                | intensity[2]; // Convert BGR to RGB correctly
+          const cv::Vec3b & px_bgr = cv_ptr->image.at<cv::Vec3b>(v, u);
+          rgb                      = (px_bgr[0] << 16) | (px_bgr[1] << 8) | px_bgr[2];
         }
       }
-      std::memcpy(&(*iter_rgb_local), &rgb, sizeof(int));
+      std::memcpy(prgb, &rgb, sizeof(int));
     }
   }
 }
