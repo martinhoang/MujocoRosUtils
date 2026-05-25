@@ -9,6 +9,7 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -53,6 +54,11 @@ protected:
   std::string config_file_path_;
   std::string node_namespace_;
   std::string robot_param_node_;
+
+  // Retry back-off: after a failed initialize(), wait this long before trying again.
+  // Prevents compute() from blocking the simulation thread on every frame.
+  static constexpr int                            kInitRetrySeconds = 5;
+  std::chrono::steady_clock::time_point           next_init_retry_time_{};
 
   // Simulation reset — set by service callback, applied in compute() to avoid mid-step races
   std::atomic<bool> reset_requested_{false};

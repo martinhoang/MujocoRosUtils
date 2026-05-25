@@ -178,8 +178,9 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
   }
   catch (const std::exception &e)
   {
+    next_init_retry_time_ = std::chrono::steady_clock::now() + std::chrono::seconds(kInitRetrySeconds);
     RCLCPP_WARN(rclcpp::get_logger("Ros2Control"),
-                "Initial initialization failed, will retry during compute: %s", e.what());
+                "Initial initialization failed, will retry in %ds: %s", kInitRetrySeconds, e.what());
   }
 }
 
@@ -233,7 +234,7 @@ bool Ros2Control::initialize()
       = std::make_shared<rclcpp::AsyncParametersClient>(node_, robot_param_node);
     constexpr int max_attempts = 3;
     int           attempts     = 0;
-    while (!parameters_client->wait_for_service(200ms))
+    while (!parameters_client->wait_for_service(50ms))
     {
       attempts++;
       if (attempts >= max_attempts)
@@ -588,18 +589,27 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
   // Try to initialize if not yet initialized
   if (!initialized_)
   {
+    auto now = std::chrono::steady_clock::now();
+    if (now < next_init_retry_time_)
+    {
+      return; // Back off: RSP was unavailable recently; don't block the sim thread
+    }
     try
     {
       if (!initialize())
       {
+        next_init_retry_time_ = now + std::chrono::seconds(kInitRetrySeconds);
         return;
       }
     }
     catch (const std::exception &e)
     {
-      RCLCPP_DEBUG_THROTTLE(rclcpp::get_logger("Ros2Control"),
-                            *rclcpp::Clock::make_shared(RCL_ROS_TIME), 2000,
-                            "Initialization still failing: %s", e.what());
+      next_init_retry_time_ = now + std::chrono::seconds(kInitRetrySeconds);
+      // Use plain WARN — the retry gate already limits frequency to once per kInitRetrySeconds.
+      // WARN_THROTTLE with a temporary Clock causes a dangling reference crash.
+      RCLCPP_WARN(rclcpp::get_logger("Ros2Control"),
+                  "Initialization still failing (retrying in %ds): %s",
+                  kInitRetrySeconds, e.what());
       return;
     }
   }
