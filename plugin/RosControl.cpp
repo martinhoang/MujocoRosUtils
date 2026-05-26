@@ -178,8 +178,9 @@ Ros2Control::Ros2Control(const mjModel *model, mjData *data, std::string &config
   }
   catch (const std::exception &e)
   {
+    next_init_retry_time_ = std::chrono::steady_clock::now() + std::chrono::seconds(kInitRetrySeconds);
     RCLCPP_WARN(rclcpp::get_logger("Ros2Control"),
-                "Initial initialization failed, will retry during compute: %s", e.what());
+                "Initial initialization failed, will retry in %ds: %s", kInitRetrySeconds, e.what());
   }
 }
 
@@ -233,7 +234,7 @@ bool Ros2Control::initialize()
       = std::make_shared<rclcpp::AsyncParametersClient>(node_, robot_param_node);
     constexpr int max_attempts = 3;
     int           attempts     = 0;
-    while (!parameters_client->wait_for_service(200ms))
+    while (!parameters_client->wait_for_service(50ms))
     {
       attempts++;
       if (attempts >= max_attempts)
@@ -591,29 +592,27 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
   // (each initialize() attempt takes up to 600 ms due to wait_for_service calls).
   if (!initialized_)
   {
-    const auto now    = std::chrono::steady_clock::now();
-    const double elapsed = std::chrono::duration<double>(now - last_init_attempt_).count();
-    if (elapsed < INIT_RETRY_INTERVAL_S)
-      return;
-    last_init_attempt_ = now;
-
+    auto now = std::chrono::steady_clock::now();
+    if (now < next_init_retry_time_)
+    {
+      return; // Back off: RSP was unavailable recently; don't block the sim thread
+    }
     try
     {
       if (!initialize())
       {
+        next_init_retry_time_ = now + std::chrono::seconds(kInitRetrySeconds);
         return;
       }
     }
     catch (const std::exception &e)
     {
-      ++init_retry_count_;
-      // Log at WARN on first failure, then only every 12th retry (~60 s) to avoid spam.
-      if (init_retry_count_ == 1 || init_retry_count_ % 12 == 0)
-      {
-        RCLCPP_WARN(rclcpp::get_logger("Ros2Control"),
-                    "Initialization still failing (attempt %d): %s",
-                    init_retry_count_, e.what());
-      }
+      next_init_retry_time_ = now + std::chrono::seconds(kInitRetrySeconds);
+      // Use plain WARN — the retry gate already limits frequency to once per kInitRetrySeconds.
+      // WARN_THROTTLE with a temporary Clock causes a dangling reference crash.
+      RCLCPP_WARN(rclcpp::get_logger("Ros2Control"),
+                  "Initialization still failing (retrying in %ds): %s",
+                  kInitRetrySeconds, e.what());
       return;
     }
   }

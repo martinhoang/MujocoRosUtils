@@ -9,6 +9,7 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -54,12 +55,10 @@ protected:
   std::string node_namespace_;
   std::string robot_param_node_;
 
-  /// Wall-clock time of the last initialize() attempt (avoids blocking the sim
-  /// thread on every step while the robot_state_publisher is not yet available).
-  std::chrono::steady_clock::time_point last_init_attempt_{};
-  static constexpr double INIT_RETRY_INTERVAL_S = 5.0;
-  /// How many times initialize() has been retried (for log-spam suppression).
-  int init_retry_count_ = 0;
+  // Retry back-off: after a failed initialize(), wait this long before trying again.
+  // Prevents compute() from blocking the simulation thread on every frame.
+  static constexpr int                  kInitRetrySeconds = 5;
+  std::chrono::steady_clock::time_point next_init_retry_time_{};
 
   // Simulation reset — set by service callback, applied in compute() to avoid mid-step races
   std::atomic<bool> reset_requested_{false};
