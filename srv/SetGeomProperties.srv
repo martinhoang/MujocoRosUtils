@@ -1,0 +1,20 @@
+# SetGeomProperties.srv — change size and/or color of a geom at runtime
+#
+# Size fields map to m->geom_size[3*gid + 0/1/2]:
+#   sphere/capsule  → size_x = radius  (size_y/z unused or capsule half-length)
+#   box             → size_x/y/z = half-extents
+#   cylinder        → size_x = radius, size_y = half-length
+# Set any field to NaN to keep its current value.
+#
+# RGBA values are in [0, 1].  Set any channel to NaN to keep current.
+string  geom_name  # MuJoCo geom name (exact, case-sensitive)
+float64 size_x     # NaN = keep current
+float64 size_y
+float64 size_z
+float64 rgba_r     # NaN = keep current
+float64 rgba_g
+float64 rgba_b
+float64 rgba_a
+---
+bool   success
+string message

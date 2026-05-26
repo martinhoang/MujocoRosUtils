@@ -1,0 +1,12 @@
+string filter_prefix      # optional name-prefix filter; empty string = return all
+---
+bool     success
+string   message
+string[] body_names       # all body names (matches filter_prefix)
+string[] geom_names       # all geom names (matches filter_prefix)
+string[] joint_names      # all joint names (matches filter_prefix)
+string[] actuator_names   # all actuator names (matches filter_prefix)
+int32    nbody
+int32    ngeom
+int32    njnt
+int32    nu

@@ -8,6 +8,8 @@
 namespace MujocoRosUtils
 {
 
+std::weak_ptr<rclcpp::Node> ClockPublisher::s_node_;
+
 void ClockPublisher::RegisterPlugin()
 {
   mjpPlugin plugin;
@@ -132,11 +134,17 @@ ClockPublisher::ClockPublisher(const mjModel * m,
   {
     rclcpp::init(argc, argv);
   }
-  rclcpp::NodeOptions node_options;
 
-  nh_ = rclcpp::Node::make_shared("_clock_publisher", node_options);
-  pub_ = nh_->create_publisher<rosgraph_msgs::msg::Clock>(topic_name, 1);
-  // nh_->setParam("/use_sim_time", use_sim_time_);
+  // Reuse the node across mj_recompile re-inits to avoid duplicate-node crashes.
+  nh_ = s_node_.lock();
+  if (!nh_)
+  {
+    rclcpp::NodeOptions node_options;
+    nh_ = rclcpp::Node::make_shared("_clock_publisher", node_options);
+    s_node_ = nh_;
+  }
+
+  pub_ = nh_->create_publisher<rosgraph_msgs::msg::Clock>(topic_name_, 1);
 }
 
 void ClockPublisher::reset(const mjModel *, // m

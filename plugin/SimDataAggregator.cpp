@@ -157,15 +157,23 @@ SimDataAggregator::SimDataAggregator(std::string              instance_name,
         return;
       }
 
-      SimRecorder::Format fmt = SimRecorder::Format::MCAP;
-      if (req->format == "lerobot")
+      SimRecorder::Format fmt = SimRecorder::Format::HDF5;  // default
+      if (req->format == "mcap")
+        fmt = SimRecorder::Format::MCAP;
+      else if (req->format == "lerobot")
         fmt = SimRecorder::Format::LeRobot;
       else if (req->format == "both")
         fmt = SimRecorder::Format::Both;
-      else if (req->format != "mcap" && !req->format.empty())
+      else if (req->format == "hdf5_and_mcap")
+        fmt = SimRecorder::Format::HDF5AndMCAP;
+      else if (req->format == "hdf5_and_lerobot")
+        fmt = SimRecorder::Format::HDF5AndLeRobot;
+      else if (!req->format.empty() && req->format != "hdf5")
       {
         res->success = false;
-        res->message = "Unknown format '" + req->format + "'. Use 'mcap', 'lerobot', or 'both'.";
+        res->message = "Unknown format '" + req->format +
+                       "'. Use 'hdf5' (default), 'mcap', 'lerobot', 'both', "
+                       "'hdf5_and_mcap', or 'hdf5_and_lerobot'.";
         return;
       }
 

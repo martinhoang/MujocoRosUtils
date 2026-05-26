@@ -55,11 +55,14 @@ protected:
   ClockPublisher(const mjModel * m, mjData * d, const std::string & topic_name, mjtNum publish_rate, bool use_sim_time);
 
 protected:
-  //! ROS node handle
+  //! Shared ROS node — static so it survives mj_recompile re-inits
   rclcpp::Node::SharedPtr nh_;
 
   //! ROS publisher for clock
   rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr pub_;
+
+  //! Static node instance shared across all ClockPublisher re-inits
+  static std::weak_ptr<rclcpp::Node> s_node_;
 
   //! Topic name of clock
   std::string topic_name_;

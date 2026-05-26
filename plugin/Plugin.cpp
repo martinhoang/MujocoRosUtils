@@ -11,6 +11,7 @@
 #include "MimicJoint.hpp"
 #include "PoseRandomizer.h"
 #include "RosControl.hpp"
+#include "SceneManager.h"
 #include "SimDataAggregator.h"
 #include "SimPlotter.h"
 
@@ -37,6 +38,7 @@ mjPLUGIN_LIB_INIT
   Ros2Control::RegisterPlugin();
   SimDataAggregator::RegisterPlugin();
   SimPlotter::RegisterPlugin();
+  SceneManager::RegisterPlugin();
 }
 
 } // namespace MujocoRosUtils

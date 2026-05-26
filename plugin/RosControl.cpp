@@ -238,9 +238,9 @@ bool Ros2Control::initialize()
       attempts++;
       if (attempts >= max_attempts)
       {
-        RCLCPP_WARN(node_->get_logger(),
-                    "Could not connect to %s service after %d attempts. Will retry later.",
-                    robot_param_node.c_str(), max_attempts);
+        RCLCPP_DEBUG(node_->get_logger(),
+                     "Could not connect to %s service after %d attempts. Will retry later.",
+                     robot_param_node.c_str(), max_attempts);
         throw std::runtime_error("Service not available: " + robot_param_node);
       }
       if (!rclcpp::ok())
@@ -585,9 +585,18 @@ void Ros2Control::reset(const mjModel *m, int plugin_id)
 
 void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
 {
-  // Try to initialize if not yet initialized
+  // Try to initialize if not yet initialized.
+  // Rate-limit retries to INIT_RETRY_INTERVAL_S seconds so that a missing
+  // robot_state_publisher service does not block the sim thread on every step
+  // (each initialize() attempt takes up to 600 ms due to wait_for_service calls).
   if (!initialized_)
   {
+    const auto now    = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(now - last_init_attempt_).count();
+    if (elapsed < INIT_RETRY_INTERVAL_S)
+      return;
+    last_init_attempt_ = now;
+
     try
     {
       if (!initialize())
@@ -597,9 +606,14 @@ void Ros2Control::compute(const mjModel *m, mjData *d, int plugin_id)
     }
     catch (const std::exception &e)
     {
-      RCLCPP_DEBUG_THROTTLE(rclcpp::get_logger("Ros2Control"),
-                            *rclcpp::Clock::make_shared(RCL_ROS_TIME), 2000,
-                            "Initialization still failing: %s", e.what());
+      ++init_retry_count_;
+      // Log at WARN on first failure, then only every 12th retry (~60 s) to avoid spam.
+      if (init_retry_count_ == 1 || init_retry_count_ % 12 == 0)
+      {
+        RCLCPP_WARN(rclcpp::get_logger("Ros2Control"),
+                    "Initialization still failing (attempt %d): %s",
+                    init_retry_count_, e.what());
+      }
       return;
     }
   }

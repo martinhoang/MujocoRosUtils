@@ -54,6 +54,13 @@ protected:
   std::string node_namespace_;
   std::string robot_param_node_;
 
+  /// Wall-clock time of the last initialize() attempt (avoids blocking the sim
+  /// thread on every step while the robot_state_publisher is not yet available).
+  std::chrono::steady_clock::time_point last_init_attempt_{};
+  static constexpr double INIT_RETRY_INTERVAL_S = 5.0;
+  /// How many times initialize() has been retried (for log-spam suppression).
+  int init_retry_count_ = 0;
+
   // Simulation reset — set by service callback, applied in compute() to avoid mid-step races
   std::atomic<bool> reset_requested_{false};
   // Set whenever a reset is detected (service or viewer Backspace).

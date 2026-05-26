@@ -98,6 +98,14 @@ rosidl_generate_interfaces(
   "srv/StartRecording.srv"
   "srv/StopRecording.srv"
   "srv/PlotCommand.srv"
+  "srv/SpawnEntity.srv"
+  "srv/DespawnEntity.srv"
+  "srv/ListEntities.srv"
+  "srv/SetBodyPose.srv"
+  "srv/SetGeomProperties.srv"
+  "srv/GetBodyPose.srv"
+  "srv/GetGeomProperties.srv"
+  "srv/GetModelInfo.srv"
   DEPENDENCIES
   std_msgs
   geometry_msgs

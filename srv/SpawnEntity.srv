@@ -1,0 +1,24 @@
+# SpawnEntity.srv — add a robot or free body to the running MuJoCo simulation
+#
+# Provide the model via xml_content (MJCF/URDF string, takes priority) or
+# xml_path (path to .xml/.urdf).  URDF input is auto-converted to MJCF.
+#
+# The entity is grafted onto attach_to (default: worldbody) using
+# mjs_attach + mj_recompile, which preserves all physics state.
+# The operation blocks until the sim thread applies it (or until timeout).
+string name           # unique label used to despawn later; must be non-empty
+string xml_content    # MJCF or URDF string  (takes priority over xml_path)
+string xml_path       # path to .xml/.urdf   (used if xml_content is empty)
+string attach_to      # body name to attach to (default: worldbody)
+float64 pos_x         # position offset (metres) relative to attach_to
+float64 pos_y
+float64 pos_z
+float64 rot_qw        # orientation quaternion w x y z (default: 1 0 0 0)
+float64 rot_qx
+float64 rot_qy
+float64 rot_qz
+bool    with_freejoint  # add a freejoint so the body is dynamic (for free objects)
+---
+bool   success
+string message
+string spawned_body_name  # actual MuJoCo body name after name-prefix disambiguation

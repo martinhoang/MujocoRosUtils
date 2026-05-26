@@ -12,6 +12,8 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
+#include <hdf5/serial/hdf5.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -49,7 +51,10 @@ public:
   {
     MCAP,
     LeRobot,
-    Both
+    Both,
+    HDF5,
+    HDF5AndMCAP,
+    HDF5AndLeRobot
   };
 
   SimRecorder(std::string              aggregator_name,
@@ -198,6 +203,42 @@ private:
                                      const std::string & parquet_path) const;
   std::string  episodeTag() const;
   std::string  chunkDir(const std::string & lr_root, const std::string & sub) const;
+
+  // ── HDF5 ────────────────────────────────────────────────────────────────────
+  // All dataset IDs are -1 when not open.
+  hid_t hdf5_file_id_  = -1;
+  hid_t hdf5_jpos_ds_  = -1;   ///< /observations/joint_positions  [T, N] float32
+  hid_t hdf5_jvel_ds_  = -1;   ///< /observations/joint_velocities [T, N] float32
+  hid_t hdf5_jeff_ds_  = -1;   ///< /observations/joint_efforts    [T, N] float32
+  hid_t hdf5_act_ds_   = -1;   ///< /actions                       [T, N] float32
+  hid_t hdf5_ts_ds_    = -1;   ///< /timestamps                    [T]    float64
+  std::unordered_map<std::string, hid_t> hdf5_img_ds_;  ///< per-camera [T,H,W,3] uint8
+  hsize_t hdf5_n_rows_             = 0;  ///< rows written so far
+  int     hdf5_img_h_              = 0;
+  int     hdf5_img_w_              = 0;
+  std::string hdf5_path_;
+
+  /// Per-camera deduplication for HDF5 (independent of LeRobot seq tracker).
+  std::unordered_map<std::string, uint64_t> hdf5_last_video_seq_;
+  int hdf5_video_frame_count_ = 0;
+
+  bool openHDF5(const std::string & path);
+  void writeHDF5Frame(const SimSnapshot & snap);
+  bool closeHDF5();
+  void discardHDF5();
+
+  /// Create a chunked, gzip-compressed, unlimited-extent 2-D float32 dataset.
+  hid_t hdf5CreateJointDataset(hid_t group, const char * name, hsize_t n_joints);
+  /// Create the per-camera image dataset once dimensions are known.
+  hid_t hdf5CreateImageDataset(const std::string & cam_ns, int h, int w);
+  /// Append one row of float32 values to a 2-D dataset.
+  void  hdf5AppendRow2D(hid_t ds, hsize_t row, hsize_t n_cols,
+                        const float * data);
+  /// Append one float64 scalar to a 1-D dataset.
+  void  hdf5AppendScalar(hid_t ds, hsize_t row, double value);
+  /// Append one image frame (H×W×3 uint8) to a 4-D dataset.
+  void  hdf5AppendImage(hid_t ds, hsize_t frame_idx,
+                        int h, int w, const uint8_t * bgr_data);
 };
 
 }  // namespace MujocoRosUtils
