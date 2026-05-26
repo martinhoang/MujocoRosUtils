@@ -98,6 +98,14 @@ rosidl_generate_interfaces(
   "srv/StartRecording.srv"
   "srv/StopRecording.srv"
   "srv/PlotCommand.srv"
+  "srv/SpawnEntity.srv"
+  "srv/DespawnEntity.srv"
+  "srv/ListEntities.srv"
+  "srv/SetBodyPose.srv"
+  "srv/SetGeomProperties.srv"
+  "srv/GetBodyPose.srv"
+  "srv/GetGeomProperties.srv"
+  "srv/GetModelInfo.srv"
   DEPENDENCIES
   std_msgs
   geometry_msgs
@@ -108,7 +116,7 @@ install(DIRECTORY scripts DESTINATION share/${PROJECT_NAME})
 
 # Do this to allow for loading xml according to the instructions in the README
 # However, it is normally not done that way.
-install(DIRECTORY xml DESTINATION share)
+install(DIRECTORY xml DESTINATION share/${PROJECT_NAME})
 
 ament_export_dependencies(rosidl_default_runtime)
 

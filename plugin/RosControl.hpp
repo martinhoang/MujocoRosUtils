@@ -9,7 +9,9 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 namespace MujocoRosUtils
@@ -23,7 +25,9 @@ public:
 
 public:
   Ros2Control(Ros2Control &&) = default;
-  Ros2Control(const mjModel *model, mjData *data, std::string &config_file_path);
+  Ros2Control(const mjModel *model, mjData *data, std::string &config_file_path,
+              std::string node_namespace   = "",
+              std::string robot_param_node = "robot_state_publisher");
   ~Ros2Control();
 
   void reset(const mjModel *m, int plugin_id);
@@ -48,16 +52,26 @@ protected:
   // Initialization state management
   bool        initialized_ = false;
   std::string config_file_path_;
+  std::string node_namespace_;
+  std::string robot_param_node_;
+
+  // Retry back-off: after a failed initialize(), wait this long before trying again.
+  // Prevents compute() from blocking the simulation thread on every frame.
+  static constexpr int                  kInitRetrySeconds = 5;
+  std::chrono::steady_clock::time_point next_init_retry_time_{};
 
   // Simulation reset — set by service callback, applied in compute() to avoid mid-step races
-  std::atomic<bool>                                         reset_requested_{false};
+  std::atomic<bool> reset_requested_{false};
   // Set whenever a reset is detected (service or viewer Backspace).
   // Forces write() with period=0 on the next tick so MujocoSystem::reset() runs
   // and d->ctrl is held at initial values before any stale controller commands land.
-  std::atomic<bool>                                         hardware_reset_pending_{false};
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        reset_service_;
+  std::atomic<bool>                                  hardware_reset_pending_{false};
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
 
   static inline std::atomic<int> ros_control_instances_{0};
+  // Serialises the rcl_context global_arguments read-modify-write across all
+  // plugin instances in the same process (MuJoCo loads every plugin concurrently).
+  static inline std::mutex rcl_global_args_mutex_;
 };
 
 } // namespace MujocoRosUtils

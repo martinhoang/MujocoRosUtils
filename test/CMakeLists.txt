@@ -8,4 +8,5 @@ target_link_libraries(test_load_mujoco_ros2_control ${LIB_MUJOCO})
 install(TARGETS test_load_mujoco_ros2_control DESTINATION lib/${PROJECT_NAME})
 
 install(PROGRAMS test_joint_trajectory_publisher.py
+                 test_scene_manager_services.py
         DESTINATION lib/${PROJECT_NAME})

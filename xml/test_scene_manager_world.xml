@@ -1,0 +1,85 @@
+<!--
+  Test world for SceneManager service integration tests.
+  Named bodies/geoms are referenced by the test script.
+
+  Bodies
+  ======
+  static_body   – welded (no freejoint), at pos="0.3 0.0 0.5"
+  dynamic_body  – freejoint, at pos="0.0 0.5 0.5"
+
+  Geoms
+  =====
+  static_box_geom     – box  size="0.1 0.1 0.1"  rgba="1 0 0 1" (red)
+  dynamic_sphere_geom – sphere size="0.08"         rgba="0 1 0 1" (green)
+  floor               – plane
+
+  Plugin patterns (MuJoCo 3.8.1):
+  - ClockPublisher: bare extension declaration + worldbody instance (confirmed working)
+  - SceneManager: <instance> inside <extension> (SimPlotter pattern) — avoids bare
+    extension entry that crashes when nattribute > 0 in MuJoCo 3.8.1
+-->
+<mujoco model="scene_manager_test">
+  <compiler autolimits="true"/>
+
+  <option impratio="10" integrator="implicitfast" timestep="0.002"/>
+
+  <statistic center="0 0 0.5" extent="1.5" meansize="0.1"/>
+
+  <visual>
+    <headlight ambient="0.8 0.8 0.8" diffuse="0.2 0.2 0.2"/>
+    <map znear="0.01"/>
+  </visual>
+
+  <asset>
+    <texture name="floor_tex" type="2d" builtin="checker"
+             rgb1="0.15 0.2 0.25" rgb2="0.25 0.3 0.35"
+             width="200" height="200"/>
+    <material name="floor_mat" texture="floor_tex" texrepeat="8 8"/>
+  </asset>
+
+  <extension>
+    <plugin plugin="MujocoRosUtils::ClockPublisher"/>
+    <!-- SceneManager: use <instance> pattern to avoid bare-entry compile crash -->
+    <plugin plugin="MujocoRosUtils::SceneManager">
+      <instance name="scene_manager_inst">
+        <config key="node_name" value="scene_manager"/>
+        <config key="namespace"  value=""/>
+      </instance>
+    </plugin>
+  </extension>
+
+  <worldbody>
+    <!-- Clock passive plugin (worldbody instance) -->
+    <plugin plugin="MujocoRosUtils::ClockPublisher">
+      <config key="topic_name" value="/clock"/>
+      <config key="publish_rate" value="100"/>
+      <config key="use_sim_time" value="true"/>
+    </plugin>
+
+    <light pos="0 0 2" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
+
+    <!-- Ground plane -->
+    <geom name="floor" type="plane" material="floor_mat"
+          size="5 5 0.01" pos="0 0 -0.01"/>
+
+    <!-- Static (welded) body -->
+    <body name="static_body" pos="0.3 0.0 0.5">
+      <geom name="static_box_geom" type="box" size="0.1 0.1 0.1"
+            mass="1.0" rgba="1.0 0.0 0.0 1.0"/>
+    </body>
+
+    <!-- Dynamic (freejoint) body -->
+    <body name="dynamic_body" pos="0.0 0.5 0.5">
+      <freejoint/>
+      <geom name="dynamic_sphere_geom" type="sphere" size="0.08"
+            mass="0.5" rgba="0.0 1.0 0.0 1.0"/>
+    </body>
+
+    <!-- Extra body for relative pose test -->
+    <body name="ref_body" pos="-0.4 -0.4 0.3">
+      <geom name="ref_geom" type="cylinder" size="0.05 0.1"
+            mass="0.5" rgba="0.2 0.2 1.0 1.0"/>
+    </body>
+
+  </worldbody>
+</mujoco>

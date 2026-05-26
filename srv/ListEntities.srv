@@ -1,0 +1,5 @@
+# ListEntities.srv — list all entities currently managed by SceneManager
+---
+string[] names          # entity labels as given at spawn time
+string[] body_names     # actual MuJoCo body names after name-prefix disambiguation
+string[] attach_points  # parent body names at spawn time

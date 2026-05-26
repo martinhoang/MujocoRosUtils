@@ -1,0 +1,5 @@
+# DespawnEntity.srv — remove a previously spawned entity from the simulation
+string name  # label given at spawn time
+---
+bool   success
+string message

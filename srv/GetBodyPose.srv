@@ -1,0 +1,14 @@
+string body_name          # MuJoCo body name to query
+---
+bool    success
+string  message
+# World-frame pose (from d->xpos / d->xquat, updated after mj_kinematics)
+float64 pos_x
+float64 pos_y
+float64 pos_z
+float64 rot_qw            # quaternion: w x y z
+float64 rot_qx
+float64 rot_qy
+float64 rot_qz
+string  parent_body       # name of the parent body
+bool    is_dynamic        # true if the body has a freejoint (i.e. moves via qpos)

@@ -1,0 +1,21 @@
+string geom_name          # MuJoCo geom name to query
+---
+bool    success
+string  message
+# Size semantics depend on geom_type:
+#   box      → half-extents (size_x, size_y, size_z)
+#   sphere   → radius (size_x only)
+#   capsule  → radius (size_x), half-length (size_y)
+#   cylinder → radius (size_x), half-length (size_y)
+#   plane    → half-widths (size_x, size_y); size_z unused
+#   mesh     → scale (size_x, size_y, size_z)
+float64 size_x
+float64 size_y
+float64 size_z
+# RGBA color [0, 1]
+float64 rgba_r
+float64 rgba_g
+float64 rgba_b
+float64 rgba_a
+string  geom_type         # "box", "sphere", "capsule", "cylinder", "plane", "mesh", etc.
+string  parent_body       # name of the body that owns this geom

@@ -91,7 +91,18 @@ struct LineConfig
   int         yaxis    = 1;   ///< 1 = left, 2 = right Y axis
   bool        paused   = false;
   bool        is_scatter = false; ///< true → PlotScatter; source_x drives the X axis
+  bool        persist_on_reset = false; ///< true → ring buffer survives sim reset/reload
   RingBuffer  ring{500};
+  /// Accumulated data from all past resets (only populated when persist_on_reset=true).
+  /// On each reset the live ring is drained here and the ring is cleared for the new episode.
+  std::vector<double> persist_xs;
+  std::vector<double> persist_ys;
+  uint64_t persist_gen   = 0;     ///< incremented each time persist_xs/ys change
+  /// Cached axis bounds for the persist data (updated at reset, not every frame).
+  double persist_xmin =  std::numeric_limits<double>::max();
+  double persist_xmax = -std::numeric_limits<double>::max();
+  double persist_ymin =  std::numeric_limits<double>::max();
+  double persist_ymax = -std::numeric_limits<double>::max();
 };
 
 // ─── Per-plot configuration ───────────────────────────────────────────────────
@@ -109,8 +120,24 @@ struct PlotConfig
   double range_y[2]    = {0, 0};
   double range_y2[2]   = {0, 0};
 
+  /** Scrolling time window width in seconds for line plots.
+   *  When auto-scroll is active the x-axis always shows
+   *  [latest_t - time_window, latest_t].  Set to 0 to show all data. */
+  double time_window = 10.0;
+
   bool paused  = false;
   bool has_y2  = false;
+  bool persist_on_reset = false; ///< true → all lines inherit persist unless overridden
+  /** Max points passed to ImPlot per scatter series per frame.
+   *  Points outside the visible axis range are discarded first, then the
+   *  remainder is stride-sampled down to this limit.  Keeps cursor/tooltip
+   *  search fast regardless of how much history has accumulated. */
+  int scatter_render_cap = 3000;
+  /** Minimum pixel separation between rendered scatter points (grid deduplication).
+   *  A 2-D grid of (plot_w/res)×(plot_h/res) cells is built per render call;
+   *  only the first point that maps to each cell is drawn.  Larger values = fewer
+   *  points and faster cursor search.  0 = disabled (only stride cap applies). */
+  int scatter_pixel_res = 4;
 
   std::vector<LineConfig> lines;
 };
@@ -159,6 +186,15 @@ struct PlotConfig
  *   sensor.<name>           (scalar sensor; use sensor.<name>.<N> for Nth component)
  *   actuator.<name>.ctrl | force
  *   qpos.<index> | qvel.<index> | qacc.<index> | ctrl.<index>
+ *
+ * Persist on reset
+ * ----------------
+ *   Add persist=true to a plot or line config to retain ring-buffer data across
+ *   simulation resets (Ctrl+R) and episode boundaries.  Useful for scatter plots
+ *   where you want to accumulate the torque-velocity manifold over many runs.
+ *     plot level:  "title=...;persist=true"          → all lines in that plot persist
+ *     line level:  "label=...;src=...;persist=true"  → only this line persists
+ *   Line-level setting takes priority over plot-level.
  *
  * ROS 2 service
  * -------------
@@ -224,6 +260,10 @@ private:
   const mjModel *         model_        = nullptr;  ///< saved for service-time resolution
 
   std::atomic<bool>  running_{false};
+  // Shared-ownership running flag: lets renderLoop() safely read it even after
+  // the plugin object has been destroyed (which can happen when the old plugin
+  // is destroyed just after the new one is created on CTRL+L reload).
+  std::shared_ptr<std::atomic<bool>> running_sptr_;
   std::thread        render_thread_;
   std::thread        ros_thread_;
 

@@ -2,6 +2,16 @@ find_package(OpenGL REQUIRED)
 find_package(OpenMP)
 find_package(X11 REQUIRED)
 
+# ── HDF5 (used by SimRecorder) ────────────────────────────────────────────────
+# Ubuntu packages provide headers under /usr/include/hdf5/serial so we must
+# add that path explicitly; the pkg-config name is hdf5 (serial build).
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(HDF5_SERIAL hdf5 QUIET)
+endif()
+set(HDF5_INCLUDE_DIR "/usr/include/hdf5/serial")
+set(HDF5_LIBRARY     "/usr/lib/x86_64-linux-gnu/hdf5/serial/libhdf5.so")
+
 # ── SDL2 (required by SimPlotter render thread) ───────────────────────────────
 find_package(SDL2 REQUIRED)
 
@@ -88,12 +98,15 @@ add_library(
   SimDataAggregator.cpp
   SimRecorder.cpp
   SimPlotter.cpp
+  SceneManager.cpp
+  ../simulate/between_step_hook.cpp
   # mujoco_ros2_control.cpp
   )
 target_include_directories(
   MujocoRosUtils PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
                         $<INSTALL_INTERFACE:include>)
 target_include_directories(MujocoRosUtils PRIVATE ${MUJOCO_INCLUDE_DIR})
+target_include_directories(MujocoRosUtils PRIVATE ${HDF5_INCLUDE_DIR})
 target_include_directories(MujocoRosUtils PUBLIC ${ament_INCLUDE_DIRS})
 ament_target_dependencies(
   MujocoRosUtils
@@ -126,6 +139,7 @@ target_link_libraries(MujocoRosUtils PUBLIC ${cpp_typesupport_target}
 target_link_libraries(MujocoRosUtils PUBLIC ${LIB_MUJOCO} glfw)
 target_link_libraries(MujocoRosUtils PUBLIC OpenGL::GL)
 target_link_libraries(MujocoRosUtils PUBLIC imgui_simplot implot_simplot SDL2::SDL2 X11::X11)
+target_link_libraries(MujocoRosUtils PUBLIC ${HDF5_LIBRARY})
 if(OpenMP_CXX_FOUND)
   target_link_libraries(MujocoRosUtils PUBLIC OpenMP::OpenMP_CXX)
 endif()
@@ -138,6 +152,24 @@ endif()
 add_library(MujocoRosUtilsPlugin SHARED Plugin.cpp)
 target_include_directories(MujocoRosUtilsPlugin PRIVATE ${MUJOCO_INCLUDE_DIR})
 target_link_libraries(MujocoRosUtilsPlugin PUBLIC MujocoRosUtils)
+
+# ── LD_PRELOAD shim: interposes mj_step to run between-step hooks ─────────────
+# Load with: LD_PRELOAD=/path/to/libmujoco_step_hook.so simulate world.xml
+# This gives plugin hooks a safe pre-step window to call mj_recompile.
+add_library(mujoco_step_hook SHARED ../simulate/mujoco_step_hook.cpp)
+target_include_directories(mujoco_step_hook PRIVATE
+  ${MUJOCO_INCLUDE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../simulate)
+# Link against MujocoRosUtils so that CheckBetweenStepHook shares the same
+# globals as the plugin (single .so instance in the process).
+target_link_libraries(mujoco_step_hook PRIVATE
+  MujocoRosUtils
+  ${LIB_MUJOCO}
+  ${CMAKE_DL_LIBS})
+set_target_properties(mujoco_step_hook PROPERTIES
+  INSTALL_RPATH "$ORIGIN"
+  INSTALL_RPATH_USE_LINK_PATH TRUE)
+
 set_target_properties(
   MujocoRosUtils MujocoRosUtilsPlugin
   PROPERTIES INSTALL_RPATH "${MUJOCO_BIN_DIR}:${MUJOCO_LIB_DIR}")
@@ -146,8 +178,18 @@ set_target_properties(MujocoRosUtils MujocoRosUtilsPlugin
                       PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 install(
-  TARGETS MujocoRosUtils MujocoRosUtilsPlugin
+  TARGETS MujocoRosUtils MujocoRosUtilsPlugin mujoco_step_hook
   EXPORT "${TARGETS_EXPORT_NAME}"
   LIBRARY DESTINATION ${MUJOCO_BIN_DIR}/mujoco_plugin
   ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
+# Also install to MUJOCO_PLUGIN_PATH if it differs from MUJOCO_BIN_DIR/mujoco_plugin
+if(DEFINED ENV{MUJOCO_PLUGIN_PATH} AND
+   NOT "$ENV{MUJOCO_PLUGIN_PATH}" STREQUAL "${MUJOCO_BIN_DIR}/mujoco_plugin")
+  install(
+    TARGETS MujocoRosUtils MujocoRosUtilsPlugin
+    LIBRARY DESTINATION $ENV{MUJOCO_PLUGIN_PATH}
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()

@@ -1,0 +1,20 @@
+# SetBodyPose.srv — move / rotate a body in the running simulation
+#
+# For bodies with a freejoint (dynamic): writes d->qpos at the joint DOF.
+# For static (welded) bodies: writes m->body_pos / m->body_quat and triggers
+# mj_kinematics so the change is immediately visible.
+#
+# Set any field to NaN to keep its current value.
+# Set all rot_* fields to 0.0 to keep the current orientation.
+string  body_name  # MuJoCo body name (exact, case-sensitive)
+float64 pos_x      # new world position (m); NaN = keep current
+float64 pos_y
+float64 pos_z
+float64 rot_qw     # new orientation quaternion w x y z; all-zero = keep current
+float64 rot_qx
+float64 rot_qy
+float64 rot_qz
+bool    relative   # if true, treat pos_* as delta from current position
+---
+bool   success
+string message
