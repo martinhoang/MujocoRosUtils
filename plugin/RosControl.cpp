@@ -59,11 +59,13 @@ void Ros2Control::RegisterPlugin()
 
   plugin.reset = +[](const mjModel *m, double *plugin_state, void *plugin_data, int plugin_id) {
     auto *plugin_instance = reinterpret_cast<Ros2Control *>(plugin_data);
+    if(!plugin_instance) { return; }
     plugin_instance->reset(m, plugin_id);
   };
 
   plugin.compute = +[](const mjModel *m, mjData *d, int plugin_id, int capability_bit) {
     auto *plugin_instance = reinterpret_cast<Ros2Control *>(d->plugin_data[plugin_id]);
+    if(!plugin_instance) { return; }
     plugin_instance->compute(m, d, plugin_id);
   };
 
@@ -240,7 +242,7 @@ bool Ros2Control::initialize()
       if (attempts >= max_attempts)
       {
         RCLCPP_DEBUG(node_->get_logger(),
-                     "Could not connect to %s service after %d attempts. Will retry later.",
+                     "Could not connect to parameter service on node '%s' after %d attempts. Will retry later.",
                      robot_param_node.c_str(), max_attempts);
         throw std::runtime_error("Service not available: " + robot_param_node);
       }
@@ -248,13 +250,14 @@ bool Ros2Control::initialize()
       {
         throw std::runtime_error("ROS shutdown while waiting for service");
       }
-      RCLCPP_DEBUG(node_->get_logger(), "%s service not available, waiting again...",
+      RCLCPP_DEBUG(node_->get_logger(), "Parameter service on node '%s' not yet available, waiting...",
                    robot_param_node.c_str());
     }
 
     std::string param_name = "robot_description";
-    RCLCPP_INFO(node_->get_logger(), "Found %s service. Asking for %s", robot_param_node.c_str(),
-                param_name.c_str());
+    RCLCPP_INFO(node_->get_logger(),
+                "Connected to parameter service on node '%s'. Requesting parameter '%s'.",
+                robot_param_node.c_str(), param_name.c_str());
 
     rclcpp::Time start_time = node_->get_clock()->now();
     while (urdf_string.empty() && (node_->get_clock()->now() - start_time).seconds() < 2)

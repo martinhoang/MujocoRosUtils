@@ -63,6 +63,7 @@ void PosePublisher::RegisterPlugin()
                      void * plugin_data, int plugin_id)
   {
     auto * plugin_instance = reinterpret_cast<class PosePublisher *>(plugin_data);
+    if(!plugin_instance) { return; }
     plugin_instance->reset(m, plugin_id);
   };
 
@@ -70,6 +71,7 @@ void PosePublisher::RegisterPlugin()
                     )
   {
     auto * plugin_instance = reinterpret_cast<class PosePublisher *>(d->plugin_data[plugin_id]);
+    if(!plugin_instance) { return; }
     plugin_instance->compute(m, d, plugin_id);
   };
 
@@ -111,7 +113,7 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   }
   if(publish_rate <= 0)
   {
-    mju_error("[PosePublisher] `publish_rate` must be positive.");
+    mju_warning("[PosePublisher] `publish_rate` must be positive.");
     return nullptr;
   }
 
@@ -120,12 +122,14 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   bool output_tf = false;
   if(output_tf_char && strlen(output_tf_char) > 0)
   {
-    if(!(strcmp(output_tf_char, "true") == 0 || strcmp(output_tf_char, "false") == 0))
+    std::string output_tf_str = output_tf_char;
+    std::transform(output_tf_str.begin(), output_tf_str.end(), output_tf_str.begin(), [](unsigned char c){ return std::tolower(c); });
+    if(!(output_tf_str == "true" || output_tf_str == "false"))
     {
-      mju_error("[PosePublisher] `output_tf` must be `true` or `false`.");
+      mju_warning("[PosePublisher] `output_tf` must be `true` or `false`, not %s", output_tf_char);
       return nullptr;
     }
-    output_tf = (strcmp(output_tf_char, "true") == 0);
+    output_tf = (output_tf_str == "true");
   }
 
   // tf_child_frame_id
@@ -147,12 +151,12 @@ PosePublisher * PosePublisher::Create(const mjModel * m, mjData * d, int plugin_
   }
   if(sensor_id == m->nsensor)
   {
-    mju_error("[PosePublisher] Plugin not found in sensors.");
+    mju_warning("[PosePublisher] Plugin not found in sensors.");
     return nullptr;
   }
   if(m->sensor_objtype[sensor_id] != mjOBJ_XBODY)
   {
-    mju_error("[PosePublisher] Plugin must be attached to a xbody.");
+    mju_warning("[PosePublisher] Plugin must be attached to a xbody.");
     return nullptr;
   }
 
@@ -227,8 +231,8 @@ PosePublisher::PosePublisher(const mjModel * m,
   }
   else
   {
-    pose_pub_ = nh_->create_publisher<geometry_msgs::msg::PoseStamped>(pose_topic_name, 1);
-    vel_pub_ = nh_->create_publisher<geometry_msgs::msg::TwistStamped>(vel_topic_name, 1);
+    pose_pub_ = nh_->create_publisher<geometry_msgs::msg::PoseStamped>(pose_topic_name_, 1);
+    vel_pub_ = nh_->create_publisher<geometry_msgs::msg::TwistStamped>(vel_topic_name_, 1);
   }
 }
 

@@ -62,6 +62,7 @@ void ActuatorCommand::RegisterPlugin()
                      void * plugin_data, int plugin_id)
   {
     auto * plugin_instance = reinterpret_cast<class ActuatorCommand *>(plugin_data);
+    if(!plugin_instance) { return; }
     plugin_instance->reset(m, plugin_id);
   };
 
@@ -69,6 +70,7 @@ void ActuatorCommand::RegisterPlugin()
                     )
   {
     auto * plugin_instance = reinterpret_cast<class ActuatorCommand *>(d->plugin_data[plugin_id]);
+    if(!plugin_instance) { return; }
     plugin_instance->compute(m, d, plugin_id);
   };
 

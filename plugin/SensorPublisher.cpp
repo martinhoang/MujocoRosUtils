@@ -53,6 +53,7 @@ void SensorPublisher::RegisterPlugin()
                      void * plugin_data, int plugin_id)
   {
     auto * plugin_instance = reinterpret_cast<class SensorPublisher *>(plugin_data);
+    if(!plugin_instance) { return; }
     plugin_instance->reset(m, plugin_id);
   };
 
@@ -60,6 +61,7 @@ void SensorPublisher::RegisterPlugin()
                     )
   {
     auto * plugin_instance = reinterpret_cast<class SensorPublisher *>(d->plugin_data[plugin_id]);
+    if(!plugin_instance) { return; }
     plugin_instance->compute(m, d, plugin_id);
   };
 
