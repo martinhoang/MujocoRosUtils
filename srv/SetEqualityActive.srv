@@ -1,0 +1,14 @@
+# SetEqualityActive.srv — activate or deactivate a named MuJoCo equality constraint
+#
+# When activating (active=true), you can optionally ask the service to compute the
+# current relative pose of body2 w.r.t. body1 from live simulation state and store
+# it in eq_data before activating.  This ensures the weld "locks in" the current
+# configuration rather than snapping to a stale pre-defined offset.
+#
+# Constraint name must match the 'name' attribute in the MJCF <equality> block.
+string constraint_name   # MuJoCo equality constraint name (exact, case-sensitive)
+bool   active            # true = activate, false = deactivate
+bool   use_current_pose  # if true and active=true, snap eq_data to current body pose
+---
+bool   success
+string message
