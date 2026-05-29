@@ -185,7 +185,7 @@ std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjDa
               plugin_id);
   }
 
-  const char * publish_rate_char = mj_getPluginConfig(m, 0, ATTR_PUBLISH_RATE);
+  const char * publish_rate_char = mj_getPluginConfig(m, plugin_id, ATTR_PUBLISH_RATE);
   double publish_rate = 100.0;
   if(publish_rate_char && strlen(publish_rate_char) > 0)
   {
@@ -196,21 +196,22 @@ std::unique_ptr<ActuatorCommand> ActuatorCommand::Create(const mjModel * m, mjDa
     print_warning("[ActuatorCommand] No publish_rate specified in plugin config, using default value of %.2f.\n", publish_rate);
   }
 
+  const char * node_name_str = mj_getPluginConfig(m, plugin_id, ATTR_NODE_NAME);
+  std::string node_name = node_name_str ? std::string(node_name_str) : "";
+
   return std::unique_ptr<ActuatorCommand>(
-      new ActuatorCommand(m, d, std::move(active_actuator_ids), topic_name, publish_rate));
+      new ActuatorCommand(m, d, std::move(active_actuator_ids), topic_name, node_name, publish_rate));
 }
 
 ActuatorCommand::ActuatorCommand(const mjModel * m,
                                  mjData * d,
                                  std::vector<int> actuator_ids,
                                  std::string topic_name,
+                                 std::string node_name,
                                  double publish_rate)
 : model_(m), data_(d), publish_rate_(publish_rate)
 {
   actuators_ = std::move(actuator_ids);
-
-  const char * node_name_char = mj_getPluginConfig(m, 0, ATTR_NODE_NAME);
-  std::string node_name = node_name_char ? std::string(node_name_char) : "";
 
   if(node_name.empty())
   {
@@ -375,7 +376,6 @@ void ActuatorCommand::jointCommandCallback(std::vector<std::string> & names, std
   }
 
   // Update control based on the first point in the trajectory
-  bool is_valid = true;
   std::vector<mjtNum> new_ctrl(ctrl_.size(), std::numeric_limits<mjtNum>::quiet_NaN());
 
   for(size_t i = 0; i < names.size(); ++i)
@@ -387,26 +387,11 @@ void ActuatorCommand::jointCommandCallback(std::vector<std::string> & names, std
       size_t index = std::distance(active_joint_names_.begin(), it);
       new_ctrl[index] = positions[i];
     }
-    else
-    {
-      is_valid = false;
-      std::stringstream ss;
-      for(const auto & active_joint : active_joint_names_)
-      {
-        ss << "- " << active_joint << "\n";
-      }
-      print_warning(
-          "[ActuatorCommand] Joint '%s' not found in active joints, skipping.\nOnly these joints are allowed:\n%s",
-          joint_name.c_str(), ss.str().c_str());
-      break;
-    }
+    // Extra joints not managed by this instance are silently skipped.
   }
 
-  if(is_valid)
-  {
-    print_debug("[ActuatorCommand] Received JointTrajectory command\n");
-    ctrl_ = std::move(new_ctrl);
-  }
+  print_debug("[ActuatorCommand] Received JointState command\n");
+  ctrl_ = std::move(new_ctrl);
 }
 
 } // namespace MujocoRosUtils

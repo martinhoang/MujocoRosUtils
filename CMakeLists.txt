@@ -106,6 +106,7 @@ rosidl_generate_interfaces(
   "srv/GetBodyPose.srv"
   "srv/GetGeomProperties.srv"
   "srv/GetModelInfo.srv"
+  "srv/SetEqualityActive.srv"
   DEPENDENCIES
   std_msgs
   geometry_msgs
