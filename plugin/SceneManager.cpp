@@ -103,12 +103,24 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
   using ListSrv          = mujoco_ros_utils::srv::ListEntities;
   using SetBodyPoseSrv   = mujoco_ros_utils::srv::SetBodyPose;
   using SetGeomPropsSrv  = mujoco_ros_utils::srv::SetGeomProperties;
+  using SetEqActiveSrv   = mujoco_ros_utils::srv::SetEqualityActive;
   using GetBodyPoseSrv   = mujoco_ros_utils::srv::GetBodyPose;
   using GetGeomPropsSrv  = mujoco_ros_utils::srv::GetGeomProperties;
   using GetModelInfoSrv  = mujoco_ros_utils::srv::GetModelInfo;
 
+  // Create an isolated ROS2 context so that rclcpp::shutdown() called by
+  // RosControl (when ros_control_instances_ drops to 0 during mj_recompile)
+  // does NOT kill our executor.  The custom context uses the same domain ID
+  // as the default context (inherited from ROS_DOMAIN_ID env var), so our
+  // node is still discoverable and callable from the CLI and other nodes.
+  rclcpp::InitOptions init_opts;
+  init_opts.shutdown_on_signal = false;  // don't react to SIGINT/SIGTERM
+  rclcpp_context = std::make_shared<rclcpp::Context>();
+  rclcpp_context->init(0, nullptr, init_opts);
+
   rclcpp::NodeOptions opts;
   opts.automatically_declare_parameters_from_overrides(true);
+  opts.context(rclcpp_context);
   node = rclcpp::Node::make_shared(node_name, node_namespace, opts);
 
   // Capture a raw pointer to *this.  SharedState is owned by the static
@@ -273,6 +285,23 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
       else { res->success = false; res->message = "Timeout: set_geom_properties within 5 s."; }
     });
 
+  // ── set_equality_active ──────────────────────────────────────────────────
+  set_equality_active_srv = node->create_service<SetEqActiveSrv>(
+    "~/set_equality_active",
+    [ss, wait_op](const SetEqActiveSrv::Request::SharedPtr  req,
+         SetEqActiveSrv::Response::SharedPtr        res) {
+      if (req->constraint_name.empty()) { res->success = false; res->message = "constraint_name must not be empty."; return; }
+      auto op               = std::make_shared<PendingOp>();
+      op->type              = OpType::SET_EQUALITY_ACTIVE;
+      op->name              = req->constraint_name;
+      op->eq_active         = req->active;
+      op->use_current_pose  = req->use_current_pose;
+      { std::lock_guard<std::mutex> lk(ss->pending_mutex); ss->pending_ops.push(op); }
+      ss->ops_pending.store(true);
+      if (wait_op(op, 5)) { res->success = (op->state.load() == 1); res->message = op->result_msg; }
+      else { res->success = false; res->message = "Timeout: set_equality_active within 5 s."; }
+    });
+
   // ── get_body_pose ────────────────────────────────────────────────────────
   get_body_pose_srv = node->create_service<GetBodyPoseSrv>(
     "~/get_body_pose",
@@ -341,7 +370,11 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
     });
 
   // ── executor ─────────────────────────────────────────────────────────────
-  executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
+  // Use the same custom context so the executor is not affected by
+  // rclcpp::shutdown() on the default context.
+  rclcpp::ExecutorOptions exec_opts;
+  exec_opts.context = rclcpp_context;
+  executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>(exec_opts);
   executor->add_node(node);
   executor_thread = std::thread([this]() { executor->spin(); });
 }
@@ -355,6 +388,8 @@ SceneManager::SharedState::~SharedState()
     if (executor_thread.joinable())
       executor_thread.join();
   }
+  if (rclcpp_context && rclcpp_context->is_valid())
+    rclcpp_context->shutdown("SceneManager destroyed");
 }
 
 // ── Constructor / Destructor ────────────────────────────────────────────────
@@ -368,12 +403,10 @@ SceneManager::SceneManager(std::string node_name, std::string node_namespace)
   auto it = s_registry_.find(node_key_);
   if (it == s_registry_.end())
   {
-    // First SceneManager for this key: init rclcpp, create and initialise SharedState.
-    {
-      static std::mutex init_mutex;
-      std::lock_guard<std::mutex> ilk(init_mutex);
-      if (!rclcpp::ok()) { int argc = 0; char ** argv = nullptr; rclcpp::init(argc, argv); }
-    }
+    // First SceneManager for this key: create and initialise SharedState.
+    // SharedState::initialize() creates its own rclcpp::Context so it is
+    // isolated from the default context's lifecycle (e.g. rclcpp::shutdown()
+    // called by RosControl during mj_recompile does not kill our executor).
     auto ss = std::make_shared<SharedState>();
     ss->initialize(node_name, node_namespace);
     s_registry_[node_key_] = ss;
@@ -397,10 +430,33 @@ SceneManager::~SceneManager()
 
 // ── reset / compute ─────────────────────────────────────────────────────────
 
-void SceneManager::reset(const mjModel * /*m*/, int /*plugin_id*/) {}
+void SceneManager::reset(const mjModel * /*m*/, int /*plugin_id*/)
+{
+  // Clear any pending operations so stale weld activations from before a NaN
+  // crash cannot re-fire with wrong eq_data after sim reset → prevents reset loop.
+  if (shared_) {
+    std::lock_guard<std::mutex> lk(shared_->pending_mutex);
+    while (!shared_->pending_ops.empty()) shared_->pending_ops.pop();
+    shared_->ops_pending.store(false);
+  }
+}
 
 void SceneManager::compute(const mjModel * m, mjData * d, int /*plugin_id*/)
 {
+  // Detect sim reset: time jumped backwards (e.g. NaN recovery, reset_after_run).
+  // Deactivate all equality constraints so a stale active weld doesn't produce
+  // a rank-deficient Hessian on the first step after reset.
+  const double cur_time = d->time;
+  if (shared_->last_sim_time >= 0.0 && cur_time < shared_->last_sim_time) {
+    for (int i = 0; i < m->neq; i++) {
+      d->eq_active[i] = 0;
+    }
+    RCLCPP_INFO(shared_->node->get_logger(),
+      "[SceneManager] Reset detected (%.3f → %.3f) — all equality constraints deactivated",
+      shared_->last_sim_time, cur_time);
+  }
+  shared_->last_sim_time = cur_time;
+
   if (!shared_->ops_pending.load())
     return;
 
@@ -536,6 +592,8 @@ void SceneManager::applyPendingOps(mjModel * m, mjData * d)
       ok = applySetBodyPose(m, d, *op, err);
     else if (op->type == OpType::SET_GEOM_PROPERTIES)
       ok = applySetGeomProperties(m, d, *op, err);
+    else if (op->type == OpType::SET_EQUALITY_ACTIVE)
+      ok = applySetEqualityActive(m, d, *op, err);
     else if (op->type == OpType::GET_BODY_POSE)
       ok = applyGetBodyPose(m, d, *op, err);
     else if (op->type == OpType::GET_GEOM_PROPERTIES)
@@ -544,8 +602,9 @@ void SceneManager::applyPendingOps(mjModel * m, mjData * d)
       ok = applyGetModelInfo(m, *op);
 
     op->result_msg = ok
-      ? (op->type == OpType::SET_BODY_POSE       ? "Body pose updated: " + op->name
-         : op->type == OpType::SET_GEOM_PROPERTIES? "Geom properties updated: " + op->name
+      ? (op->type == OpType::SET_BODY_POSE        ? "Body pose updated: " + op->name
+         : op->type == OpType::SET_GEOM_PROPERTIES ? "Geom properties updated: " + op->name
+         : op->type == OpType::SET_EQUALITY_ACTIVE ? (std::string("Equality ") + (op->eq_active ? "activated" : "deactivated") + ": " + op->name)
          : "ok")
       : err;
     op->state.store(ok ? 1 : 2, std::memory_order_release);
@@ -1092,7 +1151,134 @@ bool SceneManager::applySetGeomProperties(mjModel * m, mjData * /*d*/, PendingOp
   return true;
 }
 
-// ── applyGetBodyPose ─────────────────────────────────────────────────────────
+// ── applySetEqualityActive ───────────────────────────────────────────────────
+// Activate or deactivate a named MuJoCo equality constraint (weld, joint, etc.).
+// When activating with use_current_pose=true, the current relative pose of the
+// two constrained bodies is computed from live simulation state and written into
+// m->eq_data so the weld "locks in" the current configuration.
+//
+// MuJoCo weld eq_data layout (mjNEQDATA = 11 doubles):
+//   [0..2]  : relative position of body2 in body1 frame
+//   [3..9]  : top two rows of the 3×3 rotation matrix R (body2 relative to body1)
+//   [10]    : torquescale (usually 1.0)
+
+bool SceneManager::applySetEqualityActive(mjModel * m, mjData * d, PendingOp & op,
+                                           std::string & err_msg)
+{
+  const int eq_id = mj_name2id(m, mjOBJ_EQUALITY, op.name.c_str());
+  if (eq_id < 0)
+  {
+    err_msg = "Equality constraint '" + op.name + "' not found in model";
+    return false;
+  }
+
+  if (op.eq_active && op.use_current_pose)
+  {
+    // Only weld constraints have meaningful body-relative pose data.
+    if (m->eq_type[eq_id] != mjEQ_WELD)
+    {
+      err_msg = "use_current_pose=true is only supported for weld constraints";
+      return false;
+    }
+
+    const int b1 = m->eq_obj1id[eq_id];
+    const int b2 = m->eq_obj2id[eq_id];
+
+    // World-frame positions and orientations (updated by mj_kinematics).
+    const mjtNum * p1 = d->xpos  + 3 * b1;
+    const mjtNum * p2 = d->xpos  + 3 * b2;
+    const mjtNum * q1 = d->xquat + 4 * b1;   // w x y z
+    const mjtNum * q2 = d->xquat + 4 * b2;
+
+    // MuJoCo weld eq_data layout (mjNEQDATA = 11):
+    //   [0..2]  anchor in body1 frame   (keep as-is, default {0,0,0})
+    //   [3..5]  relpos: position of body2 origin in body1 frame
+    //   [6..9]  relquat (wxyz): rotation from body2 to body1 (q1_inv * q2)
+    //   [10]    torquescale            (keep as-is, default 1.0)
+
+    // Relative position of body2 in body1's frame: R1^T * (p2 - p1)
+    mjtNum R1[9], R1T[9];
+    mju_quat2Mat(R1, q1);
+    mju_transpose(R1T, R1, 3, 3);
+
+    mjtNum dp[3] = { p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2] };
+    mjtNum rel_pos[3];
+    mju_mulMatVec(rel_pos, R1T, dp, 3, 3);
+
+    // Relative quaternion: q_rel = q1_inv * q2
+    mjtNum q1_inv[4] = { q1[0], -q1[1], -q1[2], -q1[3] };
+    mjtNum q_rel[4];
+    mju_mulQuat(q_rel, q1_inv, q2);
+
+    // Normalize q_rel to guard against floating-point drift
+    mju_normalize4(q_rel);
+
+    // Write relpos into [3..5], relquat into [6..9]; leave anchor [0..2] and torquescale [10] intact
+    mjtNum * eqdata = m->eq_data + mjNEQDATA * eq_id;
+    eqdata[3] = rel_pos[0];
+    eqdata[4] = rel_pos[1];
+    eqdata[5] = rel_pos[2];
+    eqdata[6] = q_rel[0];
+    eqdata[7] = q_rel[1];
+    eqdata[8] = q_rel[2];
+    eqdata[9] = q_rel[3];
+
+    // Match body2's freejoint velocity to body1's so the initial constraint velocity
+    // residual is zero — prevents constraint impulse spike on the first solve step.
+    // body1 velocity: d->cvel[6*b1 + 0..2] = angular, [3..5] = linear (world frame)
+    const int j2 = m->body_jntadr[b2];
+    if (j2 >= 0 && m->jnt_type[j2] == mjJNT_FREE)
+    {
+      const int qvel_adr = m->jnt_dofadr[j2];   // 6 dofs: [ang0..2, lin0..2]
+      // body1 cvel in world frame: [ang_x, ang_y, ang_z, lin_x, lin_y, lin_z]
+      const mjtNum * cv1 = d->cvel + 6 * b1;
+      // angular (world) → freejoint angular dofs 0..2
+      d->qvel[qvel_adr + 0] = cv1[0];
+      d->qvel[qvel_adr + 1] = cv1[1];
+      d->qvel[qvel_adr + 2] = cv1[2];
+      // linear (world) → freejoint linear dofs 3..5
+      d->qvel[qvel_adr + 3] = cv1[3];
+      d->qvel[qvel_adr + 4] = cv1[4];
+      d->qvel[qvel_adr + 5] = cv1[5];
+      RCLCPP_INFO(shared_->node->get_logger(),
+        "[WeldDebug] velocity-matched: ang=(%.3f,%.3f,%.3f) lin=(%.3f,%.3f,%.3f)",
+        cv1[0], cv1[1], cv1[2], cv1[3], cv1[4], cv1[5]);
+    }
+
+    RCLCPP_INFO(shared_->node->get_logger(),
+      "[WeldDebug] b1=%s p1=(%.4f,%.4f,%.4f) q1=(%.4f,%.4f,%.4f,%.4f)",
+      m->names + m->name_bodyadr[b1], p1[0], p1[1], p1[2], q1[0], q1[1], q1[2], q1[3]);
+    RCLCPP_INFO(shared_->node->get_logger(),
+      "[WeldDebug] b2=%s p2=(%.4f,%.4f,%.4f) q2=(%.4f,%.4f,%.4f,%.4f)",
+      m->names + m->name_bodyadr[b2], p2[0], p2[1], p2[2], q2[0], q2[1], q2[2], q2[3]);
+    RCLCPP_INFO(shared_->node->get_logger(),
+      "[WeldDebug] eq_data[3..9]=(%.4f,%.4f,%.4f | %.4f,%.4f,%.4f,%.4f)",
+      rel_pos[0], rel_pos[1], rel_pos[2], q_rel[0], q_rel[1], q_rel[2], q_rel[3]);
+  }
+
+  // When deactivating a weld, zero body2's freejoint velocity so the released object
+  // starts from rest rather than flying away at arm velocity, preventing impulse NaN.
+  if (!op.eq_active && m->eq_type[eq_id] == mjEQ_WELD)
+  {
+    const int b2 = m->eq_obj2id[eq_id];
+    const int j2 = m->body_jntadr[b2];
+    if (j2 >= 0 && m->jnt_type[j2] == mjJNT_FREE)
+    {
+      const int qvel_adr = m->jnt_dofadr[j2];
+      const mjtNum * cv2 = d->cvel + 6 * b2;
+      RCLCPP_INFO(shared_->node->get_logger(),
+        "[WeldDebug] deactivate: zeroing body2 vel ang=(%.3f,%.3f,%.3f) lin=(%.3f,%.3f,%.3f)",
+        cv2[0], cv2[1], cv2[2], cv2[3], cv2[4], cv2[5]);
+      for (int k = 0; k < 6; k++) d->qvel[qvel_adr + k] = 0.0;
+    }
+  }
+
+  d->eq_active[eq_id] = op.eq_active ? 1 : 0;
+
+  print_confirm("[SceneManager] Equality '%s' %s.\n",
+                op.name.c_str(), op.eq_active ? "activated" : "deactivated");
+  return true;
+}
 
 bool SceneManager::applyGetBodyPose(const mjModel * m, const mjData * d, PendingOp & op,
                                      std::string & err_msg)

@@ -3,6 +3,7 @@
 #include "mujoco_ros_utils/srv/spawn_entity.hpp"
 #include "mujoco_ros_utils/srv/despawn_entity.hpp"
 #include "mujoco_ros_utils/srv/list_entities.hpp"
+#include "mujoco_ros_utils/srv/set_equality_active.hpp"
 #include "mujoco_ros_utils/srv/set_body_pose.hpp"
 #include "mujoco_ros_utils/srv/set_geom_properties.hpp"
 #include "mujoco_ros_utils/srv/get_body_pose.hpp"
@@ -94,6 +95,7 @@ private:
   enum class OpType {
     SPAWN, DESPAWN,
     SET_BODY_POSE, SET_GEOM_PROPERTIES,
+    SET_EQUALITY_ACTIVE,
     GET_BODY_POSE, GET_GEOM_PROPERTIES, GET_MODEL_INFO
   };
 
@@ -133,6 +135,8 @@ private:
     double      quat[4]  = {1, 0, 0, 0};  ///< w x y z
     bool        with_freejoint = false;
     bool        relative       = false;    ///< SET_BODY_POSE: delta from current
+    bool        eq_active      = false;    ///< SET_EQUALITY_ACTIVE: desired state
+    bool        use_current_pose = false;  ///< SET_EQUALITY_ACTIVE: snap relpose to current
 
     // SET_GEOM_PROPERTIES — NaN means "keep current"
     double geom_size[3] = {std::numeric_limits<double>::quiet_NaN(),
@@ -172,7 +176,13 @@ private:
     // then updated after every successful recompile.
     std::string                              current_model_xml;
 
+    // Last observed sim time — used to detect resets (time jumping backwards).
+    double                                   last_sim_time{-1.0};
+
     // ── ROS2 (created once, never destroyed until process exit) ──────────
+    // Own a dedicated rclcpp context so that rclcpp::shutdown() called by
+    // RosControl during mj_recompile does NOT kill our executor.
+    rclcpp::Context::SharedPtr                                  rclcpp_context;
     rclcpp::Node::SharedPtr                                     node;
     std::shared_ptr<rclcpp::executors::MultiThreadedExecutor>   executor;
     std::thread                                                 executor_thread;
@@ -184,6 +194,7 @@ private:
     rclcpp::Service<mujoco_ros_utils::srv::ListEntities>::SharedPtr        list_srv;
     rclcpp::Service<mujoco_ros_utils::srv::SetBodyPose>::SharedPtr         set_body_pose_srv;
     rclcpp::Service<mujoco_ros_utils::srv::SetGeomProperties>::SharedPtr   set_geom_props_srv;
+    rclcpp::Service<mujoco_ros_utils::srv::SetEqualityActive>::SharedPtr   set_equality_active_srv;
     rclcpp::Service<mujoco_ros_utils::srv::GetBodyPose>::SharedPtr         get_body_pose_srv;
     rclcpp::Service<mujoco_ros_utils::srv::GetGeomProperties>::SharedPtr   get_geom_props_srv;
     rclcpp::Service<mujoco_ros_utils::srv::GetModelInfo>::SharedPtr        get_model_info_srv;
@@ -224,6 +235,7 @@ private:
 
   bool applySetBodyPose(mjModel * m, mjData * d, PendingOp & op, std::string & err_msg);
   bool applySetGeomProperties(mjModel * m, mjData * d, PendingOp & op, std::string & err_msg);
+  bool applySetEqualityActive(mjModel * m, mjData * d, PendingOp & op, std::string & err_msg);
   bool applyGetBodyPose(const mjModel * m, const mjData * d, PendingOp & op, std::string & err_msg);
   bool applyGetGeomProperties(const mjModel * m, PendingOp & op, std::string & err_msg);
   bool applyGetModelInfo(const mjModel * m, PendingOp & op);

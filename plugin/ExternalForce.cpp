@@ -52,6 +52,7 @@ void ExternalForce::RegisterPlugin()
                      void * plugin_data, int plugin_id)
   {
     auto * plugin_instance = reinterpret_cast<class ExternalForce *>(plugin_data);
+    if(!plugin_instance) { return; }
     plugin_instance->reset(m, plugin_id);
   };
 
@@ -59,12 +60,14 @@ void ExternalForce::RegisterPlugin()
                     )
   {
     auto * plugin_instance = reinterpret_cast<class ExternalForce *>(d->plugin_data[plugin_id]);
+    if(!plugin_instance) { return; }
     plugin_instance->compute(m, d, plugin_id);
   };
 
   plugin.visualize = +[](const mjModel * m, mjData * d, const mjvOption * opt, mjvScene * scn, int plugin_id)
   {
     auto * plugin_instance = reinterpret_cast<class ExternalForce *>(d->plugin_data[plugin_id]);
+    if(!plugin_instance) { return; }
     plugin_instance->visualize(m, d, opt, scn, plugin_id);
   };
 

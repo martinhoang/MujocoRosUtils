@@ -82,6 +82,7 @@ protected:
                   mjData * d,
                   std::vector<int> actuator_ids,
                   std::string topic_name,
+                  std::string node_name,
                   double publish_rate = 100.0);
 
   /** \brief Callback for joint trajectory commands.

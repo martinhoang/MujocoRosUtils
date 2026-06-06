@@ -167,6 +167,7 @@ void ImagePublisher::RegisterPlugin()
       return;
     }
     auto *plugin_instance = reinterpret_cast<class ImagePublisher *>(plugin_data);
+    if(!plugin_instance) { return; }
     plugin_instance->reset(m, plugin_id);
   };
 
@@ -183,6 +184,7 @@ void ImagePublisher::RegisterPlugin()
       return;
     }
     auto *plugin_instance = reinterpret_cast<class ImagePublisher *>(d->plugin_data[plugin_id]);
+    if(!plugin_instance) { return; }
     plugin_instance->compute(m, d, plugin_id);
   };
 
@@ -1820,7 +1822,7 @@ void ImagePublisher::publishThread()
     if (publish_cloud_)
     {
       const int depth_cam_for_info = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
-      info_msg = buildCameraInfo(stamp_now, depth_frame_id_, depth_cam_for_info);
+      info_msg = buildCameraInfo(stamp_now, color_frame_id_, depth_cam_for_info);
     }
 
     // --- Publish Point Cloud ---
@@ -1829,6 +1831,7 @@ void ImagePublisher::publishThread()
       sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg
         = std::make_shared<sensor_msgs::msg::PointCloud2>();
       cloud_msg->header       = depth_msg.header;
+      cloud_msg->header.frame_id = color_frame_id_;  // match real RealSense: cloud in color optical frame
       cloud_msg->is_dense     = false;
       cloud_msg->is_bigendian = false;
 
@@ -1949,7 +1952,7 @@ void ImagePublisher::publishThread()
         const int                    depth_cam_for_info
           = (color_camera_id_ != camera_id_) ? color_camera_id_ : camera_id_;
         sensor_msgs::msg::CameraInfo scaled_info
-          = buildCameraInfo(stamp_now, depth_frame_id_, depth_cam_for_info);
+          = buildCameraInfo(stamp_now, color_frame_id_, depth_cam_for_info);
         scaled_info.width  = small_w;
         scaled_info.height = small_h;
         scaled_info.k[0] *= scale; // fx
