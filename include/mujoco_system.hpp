@@ -1,9 +1,14 @@
 #pragma once
 
 #include "mujoco_system_interface.hpp"
+#include "mujoco_ros_utils/ros2_control_compat.hpp"
 #include <joint_limits/joint_limits.hpp>
 #include <control_toolbox/pid.hpp>
 #include <urdf/model.h>
+
+#if MUJOCO_ROS_UTILS_HAS_HARDWARE_COMPONENT_INTERFACE_PARAMS
+#include <hardware_interface/types/hardware_component_interface_params.hpp>
+#endif
 
 using namespace rclcpp_lifecycle;
 using namespace hardware_interface;
@@ -22,6 +27,9 @@ class MujocoSystemPrivate;
 class MujocoSystem : public MujocoSystemInterface
 {
 public:
+  MujocoSystem();
+  ~MujocoSystem() override;
+
   /**
    * @brief Initialize the MujocoSystemInterface
    *
@@ -35,15 +43,27 @@ public:
   bool initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mjData *d,
                   const hardware_interface::HardwareInfo &info) override;
 
-  CallbackReturn on_activate(const State &previous_state);
-  CallbackReturn on_deactivate(const State &previous_state);
+  CallbackReturn on_activate(const State &previous_state) override;
+  CallbackReturn on_deactivate(const State &previous_state) override;
 
   /// Initialization of the hardware interface from data parsed from the robot's URDF.
-  CallbackReturn on_init(const hardware_interface::HardwareComponentInterfaceParams &params) override;
+#if MUJOCO_ROS_UTILS_HAS_HARDWARE_COMPONENT_INTERFACE_PARAMS
+  CallbackReturn on_init(
+      const hardware_interface::HardwareComponentInterfaceParams &params) override;
+#else
+  CallbackReturn on_init(const hardware_interface::HardwareInfo &hardware_info) override;
+#endif
   std::vector<hardware_interface::StateInterface>   export_state_interfaces() override;
   std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
+  return_type prepare_command_mode_switch(
+      const std::vector<std::string> &start_interfaces,
+      const std::vector<std::string> &stop_interfaces) override;
+  return_type perform_command_mode_switch(
+      const std::vector<std::string> &start_interfaces,
+      const std::vector<std::string> &stop_interfaces) override;
   return_type read(const rclcpp::Time &time, const rclcpp::Duration &period) override;
   return_type write(const rclcpp::Time &time, const rclcpp::Duration &period) override;
+  MujocoSystemDiagnostics diagnostics() const override;
 
   /**
    * @brief Called when the world is reset and reset this system as well
@@ -53,6 +73,8 @@ public:
 
 protected:
   void register_joints(const hardware_interface::HardwareInfo &hardware_info, const mjModel *m);
+  void register_sensors(const hardware_interface::HardwareInfo &hardware_info);
+  void register_gpios(const hardware_interface::HardwareInfo &hardware_info);
   void get_joint_limits(urdf::JointConstSharedPtr urdf_joint, joint_limits::JointLimits& joint_limits);
   control_toolbox::Pid get_pid_gains(const hardware_interface::ComponentInfo& joint_info, std::string command_interface);
   double clamp(double v, double lo, double hi) { return (v < lo) ? lo : (hi < v) ? hi : v; }

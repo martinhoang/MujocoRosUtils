@@ -1,4 +1,5 @@
 #include "LidarPublisher.h"
+#include "RosContextManager.hpp"
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <mujoco/mujoco.h>
@@ -683,10 +684,7 @@ LidarPublisher::LidarPublisher(const mjModel *m, int site_id, std::vector<int> e
 {
   int    argc = 0;
   char **argv = nullptr;
-  if (!rclcpp::ok())
-  {
-    rclcpp::init(argc, argv);
-  }
+  ros_context_lease_.acquire(argc, argv);
   rclcpp::NodeOptions node_options;
   node_options.parameter_overrides({{"use_sim_time", true}});
   nh_ = rclcpp::Node::make_shared("lidar_publisher", node_options);
@@ -718,6 +716,10 @@ LidarPublisher::LidarPublisher(const mjModel *m, int site_id, std::vector<int> e
 // ---------------------------------------------------------------------------
 // reset
 // ---------------------------------------------------------------------------
+
+LidarPublisher::~LidarPublisher()
+{
+}
 
 void LidarPublisher::reset(const mjModel *, int)
 {}

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RosContextManager.hpp"
+
 #include <controller_manager/controller_manager.hpp>
 #include <mujoco/mjdata.h>
 #include <mujoco/mjmodel.h>
@@ -34,6 +36,8 @@ public:
   void compute(const mjModel *m, mjData *d, int plugin_id);
 
 protected:
+  RosContextLease ros_context_lease_;
+
   bool                    initialize();
   rclcpp::Node::SharedPtr node_  = nullptr;
   const mjModel          *model_ = nullptr;

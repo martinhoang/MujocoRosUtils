@@ -1,5 +1,6 @@
 #pragma once
 
+#include "RosContextManager.hpp"
 #include "SimDataRegistry.hpp"
 #include "SimRecorder.hpp"
 #include "mujoco_ros_utils/srv/start_recording.hpp"
@@ -84,6 +85,8 @@ public:
   void compute(const mjModel * m, mjData * d, int plugin_id);
 
 protected:
+  RosContextLease ros_context_lease_;
+
   SimDataAggregator(std::string instance_name,
                     std::vector<std::string> camera_namespaces,
                     std::vector<std::string> joint_names);

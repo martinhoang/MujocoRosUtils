@@ -1,4 +1,5 @@
 #include "SimPlotter.h"
+#include "RosContextManager.hpp"
 #include "mujoco_utils.hpp"
 
 #include <mujoco/mujoco.h>
@@ -846,6 +847,7 @@ void SimPlotter::stopThreads()
 
   if (executor_) executor_->cancel();
   if (ros_thread_.joinable()) ros_thread_.join();
+
 }
 
 /** Snapshot of one line for rendering. */
@@ -2159,7 +2161,12 @@ void SimPlotter::startRosThread(const std::string & node_name)
   {
     int    argc = 0;
     char **argv = nullptr;
-    rclcpp::init(argc, argv);
+    ros_context_lease_.acquire(argc, argv);
+  }
+  else
+  {
+    // Context already initialised — still acquire a lease for balanced release.
+    ros_context_lease_.acquire();
   }
 
   rclcpp::NodeOptions opts;

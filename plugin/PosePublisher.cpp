@@ -1,4 +1,5 @@
 #include "PosePublisher.h"
+#include "RosContextManager.hpp"
 
 #include <mujoco/mujoco.h>
 #include <tf2/LinearMath/Transform.h>
@@ -213,10 +214,7 @@ PosePublisher::PosePublisher(const mjModel * m,
 
   int argc = 0;
   char ** argv = nullptr;
-  if(!rclcpp::ok())
-  {
-    rclcpp::init(argc, argv);
-  }
+  ros_context_lease_.acquire(argc, argv);
   rclcpp::NodeOptions node_options;
 
   node_options.parameter_overrides({
@@ -234,6 +232,10 @@ PosePublisher::PosePublisher(const mjModel * m,
     pose_pub_ = nh_->create_publisher<geometry_msgs::msg::PoseStamped>(pose_topic_name_, 1);
     vel_pub_ = nh_->create_publisher<geometry_msgs::msg::TwistStamped>(vel_topic_name_, 1);
   }
+}
+
+PosePublisher::~PosePublisher()
+{
 }
 
 void PosePublisher::reset(const mjModel *, // m

@@ -1,0 +1,17 @@
+<mujoco model="actuator_plugin_load_test">
+  <extension>
+    <plugin plugin="MujocoRosUtils::ActuatorCommand"/>
+  </extension>
+  <worldbody>
+    <body name="actuated_body">
+      <joint name="load_test_joint" type="hinge"/>
+      <geom type="capsule" size="0.03 0.1" mass="1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="load_test_actuator" joint="load_test_joint"/>
+    <plugin plugin="MujocoRosUtils::ActuatorCommand" joint="load_test_joint">
+      <config key="topic_name" value="/plugin_load_test/command"/>
+    </plugin>
+  </actuator>
+</mujoco>

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RosContextManager.hpp"
+
 #include <rclcpp/version.h>
 #if RCLCPP_VERSION_MAJOR >= 28
 #include <image_geometry/pinhole_camera_model.hpp>
@@ -59,6 +61,9 @@ public:
 public:
   /** \brief Copy constructor. */
   ImagePublisher(ImagePublisher &&) = default;
+
+  /** \brief Destructor — releases the shared ROS context lease. */
+  ~ImagePublisher();
 
   /** \brief Reset.
       \param m model
@@ -123,6 +128,8 @@ protected:
   );
 
 protected:
+  RosContextLease ros_context_lease_;
+
   //! MuJoCo model
   const mjModel *m_;
 

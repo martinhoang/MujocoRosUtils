@@ -1,0 +1,46 @@
+<mujoco model="ros2_control_interface_test">
+  <compiler autolimits="true"/>
+  <option gravity="0 0 0" timestep="0.001"/>
+
+  <worldbody>
+    <body name="base" pos="0 0 0.5">
+      <freejoint name="base_freejoint"/>
+      <geom type="box" size="0.1 0.1 0.1" mass="1"/>
+      <site name="base_imu_site" size="0.01"/>
+      <site name="tool_site" pos="0.1 0 0" size="0.01"/>
+      <site name="range_site" pos="0 0 -0.1" zaxis="0 0 -1" size="0.01"/>
+    </body>
+
+    <body name="controlled_link" pos="0 0 0.2">
+      <joint name="controlled_joint" type="hinge" axis="0 0 1" range="-2 2"/>
+      <geom type="capsule" size="0.03 0.15" mass="0.2"/>
+    </body>
+
+    <body name="gpio_link" pos="0.3 0 0.2">
+      <joint name="gpio_joint" type="slide" axis="1 0 0" range="0 1"/>
+      <geom type="box" size="0.03 0.03 0.03" mass="0.1"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="controlled_position" joint="controlled_joint" kp="20"/>
+    <velocity name="controlled_velocity" joint="controlled_joint" kv="2"/>
+    <motor name="controlled_effort" joint="controlled_joint" ctrlrange="-5 5"/>
+    <motor name="gpio_output" joint="gpio_joint" ctrlrange="0 1"/>
+    <motor name="gpio_bidirectional" joint="gpio_joint" ctrlrange="-1 1"/>
+  </actuator>
+
+  <sensor>
+    <framequat name="base_quat" objtype="site" objname="base_imu_site"/>
+    <gyro name="base_gyro" site="base_imu_site"/>
+    <accelerometer name="base_accel" site="base_imu_site"/>
+    <force name="tool_force" site="tool_site"/>
+    <torque name="tool_torque" site="tool_site"/>
+    <rangefinder name="proximity_range" site="range_site"/>
+    <framepos name="tracked_position" objtype="site" objname="tool_site"/>
+    <framequat name="tracked_orientation" objtype="site" objname="tool_site"/>
+    <user name="tool_temperature" dim="1" needstage="pos"/>
+    <user name="tool_contact" dim="3" needstage="pos"/>
+    <user name="digital_inputs" dim="2" needstage="pos"/>
+  </sensor>
+</mujoco>

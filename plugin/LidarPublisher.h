@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RosContextManager.hpp"
+
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -181,6 +183,9 @@ public:
   /** \brief Move constructor. */
   LidarPublisher(LidarPublisher &&) = default;
 
+  /** \brief Destructor — releases the shared ROS context lease. */
+  ~LidarPublisher();
+
   /** \brief Reset (no-op).
       \param m model
       \param plugin_id plugin ID
@@ -253,6 +258,8 @@ protected:
                  double noise_jitter_stddev);
 
 protected:
+  RosContextLease ros_context_lease_;
+
   //! Site ID of the LiDAR origin
   int site_id_ = -1;
 

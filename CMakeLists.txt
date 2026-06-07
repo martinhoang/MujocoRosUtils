@@ -12,6 +12,65 @@ set(CXX_DISABLE_WERROR ON)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 
 option(INSTALL_DOCUMENTATION "Generate and install the documentation" OFF)
+option(
+  MUJOCO_ROS_UTILS_BUILD_TESTING
+  "Build MujocoRosUtils unit and integration tests"
+  ON)
+option(
+  MUJOCO_ROS_UTILS_BUILD_BENCHMARKS
+  "Build manually-invoked MujocoRosUtils benchmark executables"
+  OFF)
+set(
+  MUJOCO_ROS_UTILS_ENABLE_CUDA
+  "AUTO"
+  CACHE STRING "ImagePublisher CUDA support: AUTO, ON, or OFF")
+set_property(
+  CACHE MUJOCO_ROS_UTILS_ENABLE_CUDA PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${MUJOCO_ROS_UTILS_ENABLE_CUDA}" MUJOCO_ROS_UTILS_ENABLE_CUDA)
+if(NOT MUJOCO_ROS_UTILS_ENABLE_CUDA MATCHES "^(AUTO|ON|OFF)$")
+  message(
+    FATAL_ERROR
+      "MUJOCO_ROS_UTILS_ENABLE_CUDA must be AUTO, ON, or OFF, got "
+      "'${MUJOCO_ROS_UTILS_ENABLE_CUDA}'")
+endif()
+set(
+  MUJOCO_ROS_UTILS_PLUGIN_LAYOUT
+  "MODULAR"
+  CACHE STRING
+        "MuJoCo plugin library layout: MODULAR (one DSO per plugin) or MONOLITHIC")
+set_property(
+  CACHE MUJOCO_ROS_UTILS_PLUGIN_LAYOUT PROPERTY STRINGS MODULAR MONOLITHIC)
+string(TOUPPER
+       "${MUJOCO_ROS_UTILS_PLUGIN_LAYOUT}"
+       MUJOCO_ROS_UTILS_PLUGIN_LAYOUT)
+if(NOT MUJOCO_ROS_UTILS_PLUGIN_LAYOUT STREQUAL "MODULAR"
+   AND NOT MUJOCO_ROS_UTILS_PLUGIN_LAYOUT STREQUAL "MONOLITHIC")
+  message(
+    FATAL_ERROR
+      "MUJOCO_ROS_UTILS_PLUGIN_LAYOUT must be MODULAR or MONOLITHIC, got "
+      "'${MUJOCO_ROS_UTILS_PLUGIN_LAYOUT}'")
+endif()
+
+option(MUJOCO_ROS_UTILS_BUILD_CLOCK_PUBLISHER "Build ClockPublisher" ON)
+option(MUJOCO_ROS_UTILS_BUILD_POSE_PUBLISHER "Build PosePublisher" ON)
+option(MUJOCO_ROS_UTILS_BUILD_IMAGE_PUBLISHER "Build ImagePublisher" ON)
+option(MUJOCO_ROS_UTILS_BUILD_ACTUATOR_COMMAND "Build ActuatorCommand" ON)
+option(MUJOCO_ROS_UTILS_BUILD_EXTERNAL_FORCE "Build ExternalForce" ON)
+option(MUJOCO_ROS_UTILS_BUILD_SENSOR_PUBLISHER "Build SensorPublisher" ON)
+option(MUJOCO_ROS_UTILS_BUILD_LIDAR_PUBLISHER "Build LidarPublisher" ON)
+option(MUJOCO_ROS_UTILS_BUILD_MIMIC_JOINT "Build MimicJoint" ON)
+option(MUJOCO_ROS_UTILS_BUILD_POSE_RANDOMIZER "Build PoseRandomizer" ON)
+option(MUJOCO_ROS_UTILS_BUILD_ROS2_CONTROL "Build Ros2Control" ON)
+option(MUJOCO_ROS_UTILS_BUILD_SIM_DATA_AGGREGATOR
+       "Build SimDataAggregator and SimRecorder" ON)
+option(MUJOCO_ROS_UTILS_BUILD_SIM_PLOTTER "Build SimPlotter" ON)
+option(MUJOCO_ROS_UTILS_BUILD_SCENE_MANAGER "Build SceneManager" ON)
+
+set(
+  MUJOCO_ROS_UTILS_CORE_EXTRA_SOURCES
+  ""
+  CACHE STRING
+        "Additional source files to compile into MujocoRosUtilsCore")
 
 # include(cmake/base.cmake)
 project(${PROJECT_NAME})
@@ -68,25 +127,15 @@ endfunction()
 
 find_mujoco()
 
-# GLFW
-find_package(glfw3 3.3 REQUIRED)
 set(AMENT_CMAKE_UNINSTALL_TARGET OFF)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(tf2_ros REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(visualization_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(cv_bridge REQUIRED)
-find_package(image_geometry REQUIRED)
-find_package(trajectory_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(hardware_interface REQUIRED)
-find_package(controller_manager REQUIRED)
-find_package(image_transport REQUIRED)
 find_package(control_toolbox REQUIRED)
 find_package(joint_limits REQUIRED)
 find_package(urdf REQUIRED)
@@ -124,9 +173,6 @@ ament_export_dependencies(rosidl_default_runtime)
 # Adding new pluginlib for MujocoSystem hardware interface
 find_package(pluginlib REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
-find_package(rosbag2_cpp REQUIRED)
-find_package(rosbag2_storage REQUIRED)
-find_package(ament_index_cpp REQUIRED)
 
 add_library(mujoco_hardware_plugin SHARED src/mujoco_system.cpp)
 
@@ -137,7 +183,8 @@ target_include_directories(
   PRIVATE ${MUJOCO_INCLUDE_DIR})
 
 ament_target_dependencies(mujoco_hardware_plugin rclcpp rclcpp_lifecycle
-                          hardware_interface pluginlib control_toolbox joint_limits urdf)
+                          hardware_interface pluginlib control_toolbox joint_limits
+                          sensor_msgs urdf)
 
 target_link_libraries(mujoco_hardware_plugin ${LIB_MUJOCO})
 
@@ -156,10 +203,13 @@ ament_export_libraries(mujoco_hardware_plugin)
 pluginlib_export_plugin_description_file(mujoco_ros_utils
                                          mujoco_hardware_plugin.xml)
 
-ament_package()
+ament_environment_hooks(cmake/mujoco_plugin_path.dsv)
+
 add_subdirectory(plugin)
 add_subdirectory(test)
 
 if(INSTALL_DOCUMENTATION)
   add_subdirectory(doc)
 endif()
+
+ament_package()

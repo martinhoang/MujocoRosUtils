@@ -1,0 +1,23 @@
+<mujoco model="sensor_plugin_load_test">
+  <extension>
+    <plugin plugin="MujocoRosUtils::SensorPublisher"/>
+  </extension>
+  <worldbody>
+    <body name="sensor_body">
+      <geom type="sphere" size="0.05" mass="1"/>
+      <site name="sensor_site" size="0.01"/>
+    </body>
+  </worldbody>
+  <sensor>
+    <framepos name="load_test_position" objtype="site" objname="sensor_site"/>
+    <plugin name="load_test_publisher"
+            plugin="MujocoRosUtils::SensorPublisher"
+            objtype="site"
+            objname="sensor_site">
+      <config key="sensor_name" value="load_test_position"/>
+      <config key="frame_id" value="world"/>
+      <config key="topic_name" value="/plugin_load_test/sensor"/>
+      <config key="publish_rate" value="10"/>
+    </plugin>
+  </sensor>
+</mujoco>

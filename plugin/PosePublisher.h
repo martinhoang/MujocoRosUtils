@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RosContextManager.hpp"
+
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
@@ -33,6 +35,9 @@ public:
 public:
   /** \brief Copy constructor. */
   PosePublisher(PosePublisher &&) = default;
+
+  /** \brief Destructor — releases the shared ROS context lease. */
+  ~PosePublisher();
 
   /** \brief Reset.
       \param m model
@@ -72,6 +77,8 @@ protected:
                 int reference_body_id = -1);
 
 protected:
+  RosContextLease ros_context_lease_;
+
   //! Sensor ID
   int sensor_id_ = -1;
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RosContextManager.hpp"
+
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/quaternion_stamped.hpp>
 #include <geometry_msgs/msg/vector3_stamped.hpp>
@@ -11,6 +13,7 @@
 #include <mujoco/mjvisualize.h>
 
 #include <mujoco_ros_utils/msg/scalar_stamped.hpp>
+#include <mujoco_ros_utils/mujoco_bindings.hpp>
 #include <string>
 
 namespace MujocoRosUtils
@@ -51,6 +54,9 @@ public:
   /** \brief Copy constructor. */
   SensorPublisher(SensorPublisher &&) = default;
 
+  /** \brief Destructor — releases the shared ROS context lease. */
+  ~SensorPublisher();
+
   /** \brief Reset.
       \param m model
       \param plugin_id plugin ID
@@ -83,8 +89,10 @@ protected:
                   mjtNum publish_rate);
 
 protected:
-  //! Sensor ID
-  int sensor_id_ = -1;
+  RosContextLease ros_context_lease_;
+
+  //! Cached transport-neutral MuJoCo sensor binding.
+  MujocoSensorBinding sensor_;
 
   //! Type of ROS message
   MessageType msg_type_;

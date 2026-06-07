@@ -1,55 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Velodyne VLP-16 rangefinder sensors + LidarPublisher plugin.
+  Velodyne VLP-16 LidarPublisher plugin configuration.
 
   Spec: 16 channels, ±15° vertical (2° step), 360° horizontal (0.2° step).
-  Each <rangefinder> is replicated by MuJoCo to match the replicated sites in
-  lidar_vlp16_sites.xml → vlp16_l00-0..1799, ..., vlp16_l15-0..1799.
-  Total: 16 layers × 1800 beams = 28,800 sensors.
+  The plugin casts all 28,800 rays directly from one origin site; individual
+  MuJoCo rangefinder sensors and replicated sites are not required.
 
   Include inside the <sensor> section of your model:
     <sensor>
       <include file="lidar_vlp16_sensors.xml"/>
     </sensor>
 
-  Adjust objname to match the body name in worldbody.
-  Adjust frame_id, topic_name, publish_rate, qos as needed.
+  The model must define a site named "lidar_origin". Adjust site_name, objname,
+  frame_id, topic_name, publish_rate, and qos as needed.
 -->
 <mujoco>
-  <rangefinder name="vlp16_l00" site="vlp16_l00"/>
-  <rangefinder name="vlp16_l01" site="vlp16_l01"/>
-  <rangefinder name="vlp16_l02" site="vlp16_l02"/>
-  <rangefinder name="vlp16_l03" site="vlp16_l03"/>
-  <rangefinder name="vlp16_l04" site="vlp16_l04"/>
-  <rangefinder name="vlp16_l05" site="vlp16_l05"/>
-  <rangefinder name="vlp16_l06" site="vlp16_l06"/>
-  <rangefinder name="vlp16_l07" site="vlp16_l07"/>
-  <rangefinder name="vlp16_l08" site="vlp16_l08"/>
-  <rangefinder name="vlp16_l09" site="vlp16_l09"/>
-  <rangefinder name="vlp16_l10" site="vlp16_l10"/>
-  <rangefinder name="vlp16_l11" site="vlp16_l11"/>
-  <rangefinder name="vlp16_l12" site="vlp16_l12"/>
-  <rangefinder name="vlp16_l13" site="vlp16_l13"/>
-  <rangefinder name="vlp16_l14" site="vlp16_l14"/>
-  <rangefinder name="vlp16_l15" site="vlp16_l15"/>
-
   <plugin name="vlp16_publisher" plugin="MujocoRosUtils::LidarPublisher" objtype="xbody" objname="lidar_body">
-    <!-- 16 layers, one prefix per layer -->
-    <config key="sensor_name_prefix_list" value="vlp16_l00,vlp16_l01,vlp16_l02,vlp16_l03,vlp16_l04,vlp16_l05,vlp16_l06,vlp16_l07,vlp16_l08,vlp16_l09,vlp16_l10,vlp16_l11,vlp16_l12,vlp16_l13,vlp16_l14,vlp16_l15"/>
+    <config key="site_name"             value="lidar_origin"/>
+    <config key="scan_pattern"          value="vlp16"/>
     <config key="frame_id"             value="lidar_frame"/>
     <config key="topic_name"           value="/lidar_points"/>
     <config key="publish_rate"         value="10"/>
-    <!-- Horizontal: 360°, 0.2° step → 1800 rays per ring -->
-    <!-- 1799 × 0.2° = 359.8° from -180° -->
-    <config key="min_angle"            value="-3.14159265"/>
-    <config key="max_angle"            value="3.13810645"/>  
-    <config key="angle_increment"      value="0.00349066"/>
-    
-    <!-- Vertical: -15° to +15°, 2° step (16 layers) -->
-    <config key="vertical_min_angle"   value="-0.26179939"/>
-    <config key="vertical_max_angle"   value="0.26179939"/>
     <config key="range_min"            value="0.1"/>
     <config key="range_max"            value="100.0"/>
+    <config key="body_exclude"         value="lidar_body"/>
     <config key="qos"                  value="best_effort;10"/>
     <config key="output_tf"            value="true"/>
     <config key="tf_parent_frame_id"   value="map"/>

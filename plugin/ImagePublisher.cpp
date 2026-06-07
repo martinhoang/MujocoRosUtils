@@ -4,6 +4,8 @@
 #include <GL/glext.h>
 #include <GLFW/glfw3.h>
 
+#include "RosContextManager.hpp"
+
 #include "ImagePublisher.h"
 #include "depth_conversions.hpp"
 #include "mujoco_utils.hpp"
@@ -627,6 +629,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
     , last_frame_time_(std::chrono::steady_clock::now())
     , last_color_log_(std::chrono::steady_clock::now())
 {
+  ros_context_lease_.acquire();
+
   // Set PBO usage based on readback mode
   if (readback_mode_ == ReadbackMode::Legacy)
   {
@@ -879,13 +883,6 @@ ImagePublisher::ImagePublisher(const mjModel *m,
 
   // Init ROS
   print_debug("[ImagePublisher] Constructor: Initializing ROS2\n");
-  int    argc = 0;
-  char **argv = nullptr;
-  if (!rclcpp::ok())
-  {
-    print_debug("[ImagePublisher] Constructor: Calling rclcpp::init()\n");
-    rclcpp::init(argc, argv);
-  }
   rclcpp::NodeOptions node_options;
 
   node_options.parameter_overrides({
@@ -1474,6 +1471,16 @@ bool ImagePublisher::shouldParallelizeRows(int rows) const
   (void)rows;
   return false;
 #endif
+}
+
+ImagePublisher::~ImagePublisher()
+{
+  stop_thread_ = true;
+  buffer_cv_.notify_all();
+  if(publish_thread_.joinable())
+  {
+    publish_thread_.join();
+  }
 }
 
 void ImagePublisher::free()

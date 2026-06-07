@@ -1,0 +1,116 @@
+<?xml version="1.0"?>
+<robot name="mujoco_ros_utils_interface_test">
+  <link name="world"/>
+  <link name="controlled_link"/>
+  <joint name="controlled_joint" type="revolute">
+    <parent link="world"/>
+    <child link="controlled_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.0" upper="2.0" effort="5.0" velocity="4.0"/>
+  </joint>
+
+  <ros2_control name="MujocoRoadmapSystem" type="system">
+    <hardware>
+      <plugin>mujoco_ros2_control/MujocoSystem</plugin>
+    </hardware>
+
+    <joint name="controlled_joint">
+      <param name="position_actuator">controlled_position</param>
+      <param name="velocity_actuator">controlled_velocity</param>
+      <param name="effort_actuator">controlled_effort</param>
+      <state_interface name="position">
+        <param name="initial_value">0.25</param>
+      </state_interface>
+      <state_interface name="velocity" initial_value="0.0"/>
+      <state_interface name="effort" initial_value="0.0"/>
+      <command_interface name="position" min="-2.0" max="2.0"/>
+      <command_interface name="velocity" min="-4.0" max="4.0"/>
+      <command_interface name="effort" min="-5.0" max="5.0"/>
+    </joint>
+
+    <sensor name="base_imu">
+      <param name="profile">imu</param>
+      <param name="orientation_sensor">base_quat</param>
+      <param name="angular_velocity_sensor">base_gyro</param>
+      <param name="linear_acceleration_sensor">base_accel</param>
+      <state_interface name="orientation.x"/>
+      <state_interface name="orientation.y"/>
+      <state_interface name="orientation.z"/>
+      <state_interface name="orientation.w"/>
+      <state_interface name="angular_velocity.x"/>
+      <state_interface name="angular_velocity.y"/>
+      <state_interface name="angular_velocity.z"/>
+      <state_interface name="linear_acceleration.x"/>
+      <state_interface name="linear_acceleration.y"/>
+      <state_interface name="linear_acceleration.z"/>
+    </sensor>
+
+    <sensor name="tool_wrench">
+      <param name="profile">force_torque</param>
+      <param name="force_sensor">tool_force</param>
+      <param name="torque_sensor">tool_torque</param>
+      <state_interface name="force.x"/>
+      <state_interface name="force.y"/>
+      <state_interface name="force.z"/>
+      <state_interface name="torque.x"/>
+      <state_interface name="torque.y"/>
+      <state_interface name="torque.z"/>
+    </sensor>
+
+    <sensor name="proximity">
+      <param name="profile">range</param>
+      <param name="range_sensor">proximity_range</param>
+      <state_interface name="range"/>
+    </sensor>
+
+    <sensor name="tool_pose">
+      <param name="profile">pose</param>
+      <param name="position_sensor">tracked_position</param>
+      <param name="orientation_sensor">tracked_orientation</param>
+      <state_interface name="position.x"/>
+      <state_interface name="position.y"/>
+      <state_interface name="position.z"/>
+      <state_interface name="orientation.x"/>
+      <state_interface name="orientation.y"/>
+      <state_interface name="orientation.z"/>
+      <state_interface name="orientation.w"/>
+    </sensor>
+
+    <sensor name="tool_feedback">
+      <param name="profile">generic</param>
+      <param name="state.temperature">mujoco_sensor:tool_temperature[0]</param>
+      <param name="state.contact_x">mujoco_sensor:tool_contact[0]</param>
+      <param name="state.contact_y">mujoco_sensor:tool_contact[1]</param>
+      <param name="state.contact_z">mujoco_sensor:tool_contact[2]</param>
+      <param name="scale.temperature">0.1</param>
+      <param name="offset.temperature">-20.0</param>
+      <state_interface name="temperature"/>
+      <state_interface name="contact_x"/>
+      <state_interface name="contact_y"/>
+      <state_interface name="contact_z"/>
+    </sensor>
+
+    <gpio name="input_only">
+      <param name="state.input_0">mujoco_sensor:digital_inputs[0]</param>
+      <param name="state.input_1">mujoco_sensor:digital_inputs[1]</param>
+      <state_interface name="input_0"/>
+      <state_interface name="input_1"/>
+    </gpio>
+
+    <gpio name="output_only">
+      <param name="command.level">mujoco_actuator:gpio_output</param>
+      <command_interface name="level" min="0.0" max="1.0" initial_value="0.0"/>
+    </gpio>
+
+    <gpio name="bidirectional">
+      <param name="state.pressure">mujoco_sensor:tool_temperature[0]</param>
+      <param name="state.commanded_level">mujoco_actuator:gpio_bidirectional</param>
+      <param name="command.level">mujoco_actuator:gpio_bidirectional</param>
+      <param name="scale.pressure">0.001</param>
+      <param name="offset.pressure">0.0</param>
+      <state_interface name="pressure" initial_value="0.0"/>
+      <state_interface name="commanded_level" initial_value="0.0"/>
+      <command_interface name="level" min="-1.0" max="1.0" initial_value="0.0"/>
+    </gpio>
+  </ros2_control>
+</robot>

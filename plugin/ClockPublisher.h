@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RosContextManager.hpp"
+
 #include <rclcpp/rclcpp.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
 
@@ -31,6 +33,9 @@ public:
   /** \brief Copy constructor. */
   ClockPublisher(ClockPublisher &&) = default;
 
+  /** \brief Destructor — releases the shared ROS context lease. */
+  ~ClockPublisher();
+
   /** \brief Reset.
       \param m model
       \param plugin_id plugin ID
@@ -55,6 +60,8 @@ protected:
   ClockPublisher(const mjModel * m, mjData * d, const std::string & topic_name, mjtNum publish_rate, bool use_sim_time);
 
 protected:
+  RosContextLease ros_context_lease_;
+
   //! Shared ROS node — static so it survives mj_recompile re-inits
   rclcpp::Node::SharedPtr nh_;
 

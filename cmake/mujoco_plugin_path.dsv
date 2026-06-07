@@ -1,0 +1,1 @@
+prepend-non-duplicate;MUJOCO_PLUGIN_PATH;lib/mujoco_ros_utils/plugins

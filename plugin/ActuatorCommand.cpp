@@ -1,4 +1,5 @@
 #include "ActuatorCommand.h"
+#include "RosContextManager.hpp"
 #include "mujoco_utils.hpp"
 
 #include <mujoco/mujoco.h>
@@ -211,7 +212,11 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
                                  double publish_rate)
 : model_(m), data_(d), publish_rate_(publish_rate)
 {
-  actuators_ = std::move(actuator_ids);
+  actuators_.reserve(actuator_ids.size());
+  for(const int actuator_id : actuator_ids)
+  {
+    actuators_.emplace_back(m, actuator_id);
+  }
 
   if(node_name.empty())
   {
@@ -226,8 +231,14 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
     char ** argv = nullptr;
 
     if(!rclcpp::ok())
-    { 
-      rclcpp::init(argc, argv);
+    {
+      ros_context_lease_.acquire(argc, argv);
+    }
+    else
+    {
+      // Context already initialised — still acquire a lease so our release()
+      // is balanced, but don't call init again.
+      ros_context_lease_.acquire(argc, argv);
     }
 
     rclcpp::NodeOptions node_options;
@@ -275,8 +286,9 @@ ActuatorCommand::ActuatorCommand(const mjModel * m,
   int number_of_actuators = static_cast<int>(actuators_.size());
   ctrl_.resize(number_of_actuators, std::numeric_limits<mjtNum>::quiet_NaN());
   print_debug("Number of actuators: %d\n", number_of_actuators);
-  for(const auto & actuator_id : actuators_)
+  for(const auto & actuator : actuators_)
   {
+    const int actuator_id = actuator.id();
     const char * joint_name_char = mj_id2name(m, mjOBJ_JOINT, m->actuator_trnid[2 * actuator_id]);
     std::string joint_name = joint_name_char ? std::string(joint_name_char) : "UNKNOWN";
     print_debug("- Actuator ID: %d\tJoint:%s\n", actuator_id, joint_name.c_str());
@@ -289,7 +301,6 @@ ActuatorCommand::~ActuatorCommand()
   if(nh_)
   {
     print_confirm("Shutting down ActuatorCommand plugin ROS node...\n");
-    rclcpp::shutdown();
     joint_cmd_array_sub_.reset();
     joint_trajectory_sub_.reset();
     joint_cmd_joint_state_sub_.reset();
@@ -331,7 +342,7 @@ void ActuatorCommand::compute(const mjModel *, // m
   {
     if(!std::isnan(ctrl_[i]))
     {
-      d->ctrl[actuators_[i]] = ctrl_[i];
+      actuators_[i].write(d, ctrl_[i]);
     }
   }
 
@@ -349,7 +360,7 @@ void ActuatorCommand::compute(const mjModel *, // m
 
       for(size_t i = 0; i < actuators_.size(); ++i)
       {
-        int joint_id = model_->actuator_trnid[2 * actuators_[i]];
+        int joint_id = model_->actuator_trnid[2 * actuators_[i].id()];
         int qpos_id = model_->jnt_qposadr[joint_id];
         joint_state_msg.position[i] = std::isnan(data_->qpos[qpos_id]) ? 0.0 : data_->qpos[qpos_id];
       }

@@ -1,4 +1,5 @@
 #include "RosControl.hpp"
+#include "RosContextManager.hpp"
 #include "mujoco_utils.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -293,15 +294,24 @@ bool Ros2Control::initialize()
     // simultaneously — rclcpp::init()/rcl_init() is NOT thread-safe, which corrupts
     // the RCL global context and can cause pluginlib factory lookups to fail
     // ("no factory exists") or trigger other non-deterministic errors.
+    //
+    // RosContextManager handles the serialisation and reference counting
+    // internally so that shutdown only occurs when every plugin has released
+    // its lease.
     {
       std::lock_guard<std::mutex> lock(rcl_global_args_mutex_);
-      if (!rclcpp::ok())
+      if(!ros_context_lease_.owns_lease() && !rclcpp::ok())
       {
         const char *argv[] = {RCL_ROS_ARGS_FLAG, RCL_PARAM_FILE_FLAG, config_file_path_.c_str()};
         int         argc   = sizeof(argv) / sizeof(argv[0]);
-        rclcpp::init(argc, argv);
+        ros_context_lease_.acquire(argc, const_cast<char **>(argv));
         RCLCPP_INFO(rclcpp::get_logger("Ros2Control"), "RCL re-initialized with config: %s",
                     config_file_path_.c_str());
+      }
+      else if(!ros_context_lease_.owns_lease())
+      {
+        // Context already ok — still acquire a lease for balanced release.
+        ros_context_lease_.acquire();
       }
     } // lock released — safe to create executor/node without holding mutex
 
@@ -501,8 +511,6 @@ bool Ros2Control::initialize()
       std::move(resource_manager), executor_, "controller_manager", node_->get_namespace(),
       cm_options));
 
-    executor_->add_node(controller_manager_);
-
     if (!controller_manager_->has_parameter("update_rate"))
     {
       mju_error("Missing parameter 'update_rate' in controller manager. "
@@ -517,24 +525,8 @@ bool Ros2Control::initialize()
     controller_manager_->set_parameter(
       rclcpp::Parameter("use_sim_time", rclcpp::ParameterValue(true)));
 
-    // Spin off the executor thread
-    stop_executor_thread_ = false;
-    auto spin             = [this]() {
-      while (rclcpp::ok() && !stop_executor_thread_)
-      {
-        executor_->spin_once(std::chrono::milliseconds(100));
-      }
-    };
-
-    executor_thread_ = std::thread(spin);
-
-    // Mark initialization as complete
-    initialized_ = true;
-    RCLCPP_INFO(node_->get_logger(), "Ros2Control initialization completed successfully");
-
-    // Register /reset_simulation service.
-    // Sets an atomic flag; the actual mj_resetData is applied inside compute()
-    // so it runs in the simulation thread rather than mid-step from a service callback.
+    // Register /reset_simulation before the executor thread starts so a failure
+    // cannot leave a partially initialized controller manager spinning.
     reset_service_ = node_->create_service<std_srvs::srv::Trigger>(
       "/reset_simulation", [this](const std_srvs::srv::Trigger::Request::SharedPtr,
                                   std_srvs::srv::Trigger::Response::SharedPtr res) {
@@ -543,6 +535,34 @@ bool Ros2Control::initialize()
         res->message     = "Simulation reset scheduled — will apply on next compute tick";
         RCLCPP_INFO(node_->get_logger(), "[RosControl] Simulation reset requested");
       });
+
+    // Spin off the executor thread
+    stop_executor_thread_ = false;
+    executor_->add_node(controller_manager_);
+    auto spin             = [this]() {
+      while (rclcpp::ok() && !stop_executor_thread_)
+      {
+        executor_->spin_once(std::chrono::milliseconds(100));
+      }
+    };
+
+    try
+    {
+      executor_thread_ = std::thread(spin);
+    }
+    catch(...)
+    {
+      stop_executor_thread_ = true;
+      executor_->remove_node(controller_manager_);
+      controller_manager_.reset();
+      reset_service_.reset();
+      throw;
+    }
+
+    // Mark initialization as complete
+    initialized_ = true;
+    RCLCPP_INFO(node_->get_logger(), "Ros2Control initialization completed successfully");
+
   }
 
   return initialized_;
@@ -594,12 +614,8 @@ Ros2Control::~Ros2Control()
     executor_.reset();
   }
 
-  // Always decrement the counter and potentially shut down ROS
+  // Always decrement the plugin instance counter.
   ros_control_instances_--;
-  if (ros_control_instances_ == 0 && rclcpp::ok())
-  {
-    rclcpp::shutdown();
-  }
 
   print_confirm("Ros2Control plugin destroyed successfully\n");
 }

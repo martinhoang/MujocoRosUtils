@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RosContextManager.hpp"
+
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/float64.hpp>
@@ -10,6 +12,7 @@
 #include <mujoco/mjmodel.h>
 #include <mujoco/mjtnum.h>
 #include <mujoco/mjvisualize.h>
+#include <mujoco_ros_utils/mujoco_bindings.hpp>
 
 #include <limits>
 #include <string>
@@ -91,9 +94,11 @@ protected:
   void jointCommandCallback(std::vector<std::string> & names, std::vector<double> & positions);
 
 protected:
+  RosContextLease ros_context_lease_;
+
   //! Actuator ID
   int actuator_id_ = -1;
-  std::vector<int> actuators_;
+  std::vector<MujocoActuatorBinding> actuators_;
   double publish_rate_ = 100.0; // Hz
   rclcpp::Time last_joint_state_publish_time_{0, 0, RCL_ROS_TIME};
   const mjModel * model_ = nullptr;

@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<robot name="mujoco_ros_utils_invalid_mapping_tests">
+  <link name="world"/>
+
+  <ros2_control name="MissingSensorSource" type="system">
+    <hardware><plugin>mujoco_ros2_control/MujocoSystem</plugin></hardware>
+    <sensor name="missing_source">
+      <param name="profile">generic</param>
+      <state_interface name="temperature"/>
+    </sensor>
+  </ros2_control>
+
+  <ros2_control name="UnknownSensor" type="system">
+    <hardware><plugin>mujoco_ros2_control/MujocoSystem</plugin></hardware>
+    <sensor name="unknown_sensor">
+      <param name="profile">generic</param>
+      <param name="state.value">mujoco_sensor:not_in_the_model[0]</param>
+      <state_interface name="value"/>
+    </sensor>
+  </ros2_control>
+
+  <ros2_control name="SensorIndexOutOfRange" type="system">
+    <hardware><plugin>mujoco_ros2_control/MujocoSystem</plugin></hardware>
+    <sensor name="bad_index">
+      <param name="profile">generic</param>
+      <param name="state.value">mujoco_sensor:tool_temperature[1]</param>
+      <state_interface name="value"/>
+    </sensor>
+  </ros2_control>
+
+  <ros2_control name="IncompleteImuProfile" type="system">
+    <hardware><plugin>mujoco_ros2_control/MujocoSystem</plugin></hardware>
+    <sensor name="incomplete_imu">
+      <param name="profile">imu</param>
+      <param name="orientation_sensor">base_quat</param>
+      <param name="angular_velocity_sensor">base_gyro</param>
+      <param name="linear_acceleration_sensor">base_accel</param>
+      <state_interface name="orientation.x"/>
+      <state_interface name="orientation.y"/>
+      <state_interface name="orientation.z"/>
+      <state_interface name="orientation.w"/>
+    </sensor>
+  </ros2_control>
+
+  <ros2_control name="MissingGpioMapping" type="system">
+    <hardware><plugin>mujoco_ros2_control/MujocoSystem</plugin></hardware>
+    <gpio name="unmapped_output">
+      <command_interface name="level"/>
+    </gpio>
+  </ros2_control>
+
+  <ros2_control name="DuplicateActuatorOwner" type="system">
+    <hardware><plugin>mujoco_ros2_control/MujocoSystem</plugin></hardware>
+    <gpio name="first_owner">
+      <param name="command.level">mujoco_actuator:gpio_output</param>
+      <command_interface name="level"/>
+    </gpio>
+    <gpio name="second_owner">
+      <param name="command.level">mujoco_actuator:gpio_output</param>
+      <command_interface name="level"/>
+    </gpio>
+  </ros2_control>
+
+  <ros2_control name="InvalidScale" type="system">
+    <hardware><plugin>mujoco_ros2_control/MujocoSystem</plugin></hardware>
+    <sensor name="bad_scale">
+      <param name="profile">generic</param>
+      <param name="state.value">mujoco_sensor:tool_temperature[0]</param>
+      <param name="scale.value">not-a-number</param>
+      <state_interface name="value"/>
+    </sensor>
+  </ros2_control>
+</robot>

@@ -1,0 +1,1207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MujocoRosUtils Development Roadmap</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #f3f6fa;
+      --surface: #ffffff;
+      --surface-alt: #eaf1f8;
+      --text: #172033;
+      --muted: #5e697c;
+      --border: #d5deea;
+      --accent: #1769aa;
+      --accent-soft: #e3f1fc;
+      --success: #176b45;
+      --success-soft: #e7f6ee;
+      --warning: #8a5700;
+      --warning-soft: #fff4d6;
+      --danger: #9b2c2c;
+      --danger-soft: #fdecec;
+      --code: #edf2f7;
+      --shadow: 0 4px 18px rgb(31 45 61 / 8%);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #0f141c;
+        --surface: #181f2a;
+        --surface-alt: #202a38;
+        --text: #e8edf5;
+        --muted: #abb6c8;
+        --border: #344052;
+        --accent: #75baf1;
+        --accent-soft: #173149;
+        --success: #73d5a7;
+        --success-soft: #17352a;
+        --warning: #f2c66d;
+        --warning-soft: #3b2e14;
+        --danger: #f49a9a;
+        --danger-soft: #3c2024;
+        --code: #222c3a;
+        --shadow: 0 4px 18px rgb(0 0 0 / 20%);
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font: 16px/1.58 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 32px auto 72px;
+    }
+
+    h1, h2, h3, h4 {
+      line-height: 1.22;
+      scroll-margin-top: 20px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(2rem, 5vw, 3.1rem);
+    }
+
+    h2 {
+      margin-top: 44px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    h3 { margin-top: 28px; }
+
+    a { color: var(--accent); }
+
+    code {
+      padding: 0.12em 0.36em;
+      border-radius: 4px;
+      background: var(--code);
+      font-size: 0.92em;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 14px 0;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--code);
+      line-height: 1.45;
+    }
+
+    pre code {
+      padding: 0;
+      background: transparent;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 22px;
+      background: var(--surface);
+      font-size: 0.94rem;
+    }
+
+    th, td {
+      padding: 11px 12px;
+      border: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th { background: var(--surface-alt); }
+
+    ul, ol { padding-left: 1.35rem; }
+    li + li { margin-top: 6px; }
+
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+
+    .metadata {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .badge {
+      padding: 4px 9px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+
+    .panel {
+      margin: 22px 0;
+      padding: 20px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .panel > :first-child { margin-top: 0; }
+    .panel > :last-child { margin-bottom: 0; }
+
+    .summary { border-left: 5px solid var(--accent); }
+    .success { border-left: 5px solid var(--success); background: var(--success-soft); }
+    .warning { border-left: 5px solid var(--warning); background: var(--warning-soft); }
+    .risk { border-left: 5px solid var(--danger); background: var(--danger-soft); }
+
+    .toc {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 24px;
+      margin: 12px 0 0;
+      padding-left: 1.25rem;
+    }
+
+    .roadmap {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin: 22px 0;
+    }
+
+    .iteration {
+      position: relative;
+      padding: 18px;
+      border: 1px solid var(--border);
+      border-top: 5px solid var(--accent);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .iteration h3 { margin: 4px 0 8px; }
+    .iteration p { margin-bottom: 0; color: var(--muted); }
+
+    .iteration-number {
+      color: var(--accent);
+      font-size: 0.82rem;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      align-items: center;
+      gap: 10px;
+      margin: 20px 0;
+    }
+
+    .flow-box {
+      min-height: 88px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      text-align: center;
+    }
+
+    .flow-box strong { display: block; margin-bottom: 4px; }
+    .arrow { color: var(--accent); font-size: 1.5rem; font-weight: bold; }
+
+    .dependency-map {
+      display: grid;
+      grid-template-columns: 1fr 1.2fr 1fr;
+      gap: 12px;
+      align-items: stretch;
+      margin: 18px 0;
+    }
+
+    .dependency-map > div {
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .dependency-map h4 { margin: 0 0 8px; }
+
+    .priority-critical { color: var(--danger); font-weight: 700; }
+    .priority-essential { color: var(--warning); font-weight: 700; }
+    .priority-good { color: var(--success); font-weight: 700; }
+
+    .checklist li::marker { color: var(--success); }
+
+    footer {
+      margin-top: 48px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 860px) {
+      .roadmap, .dependency-map { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); text-align: center; }
+    }
+
+    @media (max-width: 680px) {
+      main {
+        width: min(100% - 20px, 1180px);
+        margin-top: 18px;
+      }
+      .toc { grid-template-columns: 1fr; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>MujocoRosUtils Development Roadmap</h1>
+    <p class="subtitle">
+      Planned engineering iterations for modular plugin builds, ros2_control sensor and GPIO
+      interfaces, correctness, reliability, and performance.
+    </p>
+    <div class="metadata">
+      <span class="badge">Document date: 7 June 2026</span>
+      <span class="badge">ROS 2 targets: Humble and Jazzy</span>
+      <span class="badge">Default build: modular plugins</span>
+      <span class="badge">Initial I/O scope: numeric and semantic profiles</span>
+    </div>
+  </header>
+
+  <section class="panel summary">
+    <h2>Executive Summary</h2>
+    <p>
+      Development is divided into three ordered iterations. The first creates independently
+      buildable plugin libraries and a small shared runtime. The second adds ros2_control
+      <code>&lt;sensor&gt;</code> and <code>&lt;gpio&gt;</code> component support through reusable,
+      transport-neutral MuJoCo bindings. The third strengthens correctness, lifecycle behavior,
+      diagnostics, tests, portability, and simulation-loop performance.
+    </p>
+    <p>
+      The principal architectural rule is <strong>one MuJoCo data-access implementation per
+      concept</strong>. ROS publishers, ROS subscribers, ros2_control interfaces, recorders, and
+      in-process consumers must reuse shared bindings instead of independently resolving MuJoCo
+      objects or interpreting <code>mjData</code>.
+    </p>
+  </section>
+
+  <nav class="panel" aria-label="Table of contents">
+    <h2>Contents</h2>
+    <ol class="toc">
+      <li><a href="#goals">Goals and constraints</a></li>
+      <li><a href="#current-state">Current technical state</a></li>
+      <li><a href="#sequence">Iteration sequence</a></li>
+      <li><a href="#iteration-1">Iteration 1: modular builds</a></li>
+      <li><a href="#iteration-2">Iteration 2: sensor and GPIO</a></li>
+      <li><a href="#iteration-3">Iteration 3: quality and performance</a></li>
+      <li><a href="#testing">Test and CI strategy</a></li>
+      <li><a href="#compatibility">Compatibility policy</a></li>
+      <li><a href="#risks">Risks and mitigations</a></li>
+      <li><a href="#references">References</a></li>
+    </ol>
+  </nav>
+
+  <section id="goals">
+    <h2>Goals and Constraints</h2>
+    <ul>
+      <li>Rebuilding one MuJoCo plugin must not recompile or relink unrelated plugins.</li>
+      <li>Plugins with heavy optional dependencies must not impose those dependencies on lightweight plugins.</li>
+      <li>Existing MuJoCo plugin identifiers must remain stable.</li>
+      <li>ros2_control <code>&lt;sensor&gt;</code> and <code>&lt;gpio&gt;</code> components must be supported on Humble and Jazzy.</li>
+      <li>Existing publisher and command plugins must be reused through shared backends, not copied into the hardware interface.</li>
+      <li>The initial cross-distribution interface contract is scalar <code>double</code>; typed Jazzy interfaces are a later extension.</li>
+      <li>Simulation-step code must avoid repeated name lookup, unnecessary allocation, and unbounded logging.</li>
+      <li>A monolithic compatibility layout remains available for one release, but modular libraries become the default.</li>
+    </ul>
+  </section>
+
+  <section id="current-state">
+    <h2>Implementation Status</h2>
+    <p>
+      This section records the implementation state as of 7 June 2026. The detailed sections
+      below remain the design contract and acceptance criteria.
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Area</th>
+          <th>Status</th>
+          <th>Implemented behavior</th>
+          <th>Remaining work</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Iteration 1: modular builds</td>
+          <td class="priority-good">Complete</td>
+          <td>Shared core runtime, one registration unit per plugin, modular default, monolithic compatibility, per-plugin build flags, conditional dependency discovery, and cross-layout CI.</td>
+          <td>Generate a machine-readable plugin manifest.</td>
+        </tr>
+        <tr>
+          <td>Iteration 2: sensor and GPIO</td>
+          <td class="priority-good">Complete</td>
+          <td>Shared sensor and actuator bindings, five semantic sensor profiles, generic mappings, GPIO state and command interfaces, scale/offset handling, validation, reset behavior, and Humble/Jazzy compatibility.</td>
+          <td><code>MujocoObjectBinding</code> remains optional and is not implemented.</td>
+        </tr>
+        <tr>
+          <td>Iteration 3: control correctness</td>
+          <td class="priority-good">Complete</td>
+          <td>Explicit actuator mappings with warned compatibility fallback, command-mode switching, actuator effort state, command clamping, reset correctness, and lifecycle-gated writes.</td>
+          <td>Service-driven and viewer-driven reset integration tests.</td>
+        </tr>
+        <tr>
+          <td>Iteration 3: runtime ownership</td>
+          <td class="priority-good">Complete</td>
+          <td>One out-of-line reference-counted default ROS context manager, RAII leases, bounded executor teardown, and isolated context retention where required.</td>
+          <td>Broader stress testing with many simultaneous plugin instances.</td>
+        </tr>
+        <tr>
+          <td>Iteration 3: diagnostics and performance</td>
+          <td class="priority-essential">Partial</td>
+          <td>Opt-in read/write timing snapshots, counters for resets, invalid commands and period overruns, non-finite command rejection, and a manually invoked read/write microbenchmark.</td>
+          <td>Controller-manager timing, real-time-factor reporting, camera/lidar benchmarks, and long-duration performance baselines.</td>
+        </tr>
+        <tr>
+          <td>Iteration 3: portability</td>
+          <td class="priority-essential">Partial</td>
+          <td>Imported HDF5 target, package-owned plugin directory, relocatable local RPATH, <code>MUJOCO_PLUGIN_PATH</code> environment hook, and explicit CUDA selection.</td>
+          <td>System or pre-vendored ImGui/ImPlot selection and installed-tree relocation tests.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="panel success">
+      <strong>Current baseline:</strong> Iterations 1 and 2 are implemented. Iteration 3 has completed
+      its critical correctness and ownership work; remaining work is concentrated in broader
+      diagnostics, performance coverage, and dependency portability.
+    </div>
+  </section>
+
+  <section id="sequence">
+    <h2>Iteration Sequence</h2>
+    <div class="roadmap">
+      <article class="iteration">
+        <span class="iteration-number">Iteration 1</span>
+        <h3>Modular Build Architecture</h3>
+        <p>Separate plugin DSOs, shared runtime, conditional dependencies, and compatibility packaging.</p>
+      </article>
+      <article class="iteration">
+        <span class="iteration-number">Iteration 2</span>
+        <h3>Sensor and GPIO Interfaces</h3>
+        <p>Reusable bindings, semantic profiles, portable mappings, validation, and ros2_control exports.</p>
+      </article>
+      <article class="iteration">
+        <span class="iteration-number">Iteration 3</span>
+        <h3>Quality and Performance</h3>
+        <p>Explicit mappings, mode switching, lifecycle safety, diagnostics, optimization, and expanded CI.</p>
+      </article>
+    </div>
+
+    <div class="panel warning">
+      <strong>Ordering constraint:</strong> the shared runtime and transport-neutral bindings begin
+      in Iteration 1. Sensor and GPIO support must not be implemented directly inside
+      <code>MujocoSystem</code> before those reusable foundations exist.
+    </div>
+  </section>
+
+  <section id="iteration-1">
+    <h2>Iteration 1: Modular Plugin Builds</h2>
+
+    <h3>Objective</h3>
+    <p>
+      Produce independently compiled and linked MuJoCo plugin libraries while preserving shared
+      process-wide behavior and the existing plugin names used in MJCF.
+    </p>
+
+    <h3>Target architecture</h3>
+    <div class="dependency-map" aria-label="Target modular architecture">
+      <div>
+        <h4>Core runtime</h4>
+        <ul>
+          <li>ROS context manager</li>
+          <li>Logging/config helpers</li>
+          <li>Sensor bindings</li>
+          <li>Actuator bindings</li>
+          <li>Data registry</li>
+          <li>Between-step coordination</li>
+        </ul>
+      </div>
+      <div>
+        <h4>Independent plugin DSOs</h4>
+        <p>
+          One shared target and one MuJoCo registration entry point per plugin. Each target links
+          only the core runtime and its own direct dependencies.
+        </p>
+      </div>
+      <div>
+        <h4>Optional feature libraries</h4>
+        <ul>
+          <li>Rendering/depth</li>
+          <li>Recording</li>
+          <li>Plotting UI</li>
+          <li>Scene recompilation</li>
+          <li>ros2_control</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>Core runtime boundary</h3>
+    <p>
+      Introduce a small shared library, provisionally named
+      <code>mujoco_ros_utils_core</code>. It must contain only facilities that require a single
+      process-wide identity or are reused by multiple plugins:
+    </p>
+    <ul>
+      <li>A reference-counted ROS context manager that serializes initialization and prevents one plugin from shutting down contexts owned by another.</li>
+      <li>Common plugin configuration parsing, error reporting, and throttled logging helpers.</li>
+      <li>Out-of-line storage for <code>SimDataRegistry</code>; its singleton must not be duplicated in every plugin DSO.</li>
+      <li>Transport-neutral MuJoCo sensor and actuator binding classes.</li>
+      <li>Between-step registration and state needed by scene-management hooks.</li>
+    </ul>
+
+    <h3>Plugin targets</h3>
+    <p>
+      Create one shared target for every registered MuJoCo plugin. Each target contains its
+      implementation and a small registration translation unit using <code>mjPLUGIN_LIB_INIT</code>.
+      Target and output names should be predictable, for example:
+    </p>
+    <pre><code>mujoco_ros_utils_clock_publisher
+mujoco_ros_utils_pose_publisher
+mujoco_ros_utils_image_publisher
+mujoco_ros_utils_actuator_command
+mujoco_ros_utils_external_force
+mujoco_ros_utils_sensor_publisher
+mujoco_ros_utils_lidar_publisher
+mujoco_ros_utils_mimic_joint
+mujoco_ros_utils_pose_randomizer
+mujoco_ros_utils_ros_control
+mujoco_ros_utils_sim_data_aggregator
+mujoco_ros_utils_sim_plotter
+mujoco_ros_utils_scene_manager</code></pre>
+
+    <p>
+      The registered identifiers, such as <code>MujocoRosUtils::SensorPublisher</code>, do not
+      change. The library filename is an installation detail and must not leak into model
+      configuration.
+    </p>
+
+    <h3>CMake interface</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Option</th>
+          <th>Default</th>
+          <th>Behavior</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>MUJOCO_ROS_UTILS_PLUGIN_LAYOUT</code></td>
+          <td><code>MODULAR</code></td>
+          <td>Accepts <code>MODULAR</code> or <code>MONOLITHIC</code>. The two layouts are mutually exclusive in one install tree.</td>
+        </tr>
+        <tr>
+          <td><code>MUJOCO_ROS_UTILS_BUILD_&lt;PLUGIN&gt;</code></td>
+          <td><code>ON</code></td>
+          <td>Controls each plugin target and its dependency discovery.</td>
+        </tr>
+        <tr>
+          <td><code>MUJOCO_ROS_UTILS_ENABLE_CUDA</code></td>
+          <td><code>AUTO</code></td>
+          <td>Controls the image plugin's optional CUDA backend without affecting other plugins.</td>
+        </tr>
+        <tr>
+          <td><code>MUJOCO_ROS_UTILS_BUILD_TESTING</code></td>
+          <td>Follows <code>BUILD_TESTING</code></td>
+          <td>Builds registered unit and integration tests.</td>
+        </tr>
+        <tr>
+          <td><code>MUJOCO_ROS_UTILS_BUILD_BENCHMARKS</code></td>
+          <td><code>OFF</code></td>
+          <td>Builds manually invoked performance fixtures without adding them to the pass/fail test suite.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Conditional dependencies</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>Dependencies</th>
+          <th>Discovery rule</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Image publisher</td>
+          <td>OpenGL, GLFW, OpenCV/cv_bridge, image transport, optional CUDA</td>
+          <td>Only when the image plugin is enabled</td>
+        </tr>
+        <tr>
+          <td>Plotter</td>
+          <td>SDL2, X11, ImGui, ImPlot</td>
+          <td>Only when the plotter plugin is enabled</td>
+        </tr>
+        <tr>
+          <td>Recording</td>
+          <td>HDF5, rosbag2, ament index</td>
+          <td>Only when aggregator recording support is enabled</td>
+        </tr>
+        <tr>
+          <td>ROS control</td>
+          <td>hardware_interface, controller_manager, pluginlib, control_toolbox, joint_limits, URDF</td>
+          <td>Only when the ROS control plugin is enabled</td>
+        </tr>
+        <tr>
+          <td>Lidar</td>
+          <td>OpenMP when available</td>
+          <td>Optional optimization, not a package-wide requirement</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Compatibility transition</h3>
+    <ul>
+      <li>Modular mode becomes the default.</li>
+      <li>Monolithic mode remains buildable for one release and emits a deprecation notice.</li>
+      <li>Both modes register the same plugin names and accept the same MJCF configuration.</li>
+      <li>Installing both modes into the same plugin directory is rejected because duplicate registration order would be ambiguous.</li>
+      <li>The following release removes monolithic mode after downstream compatibility testing.</li>
+    </ul>
+
+    <h3>Deliverables</h3>
+    <ul class="checklist">
+      <li>Core runtime target with exported headers and stable link interface.</li>
+      <li>Reusable CMake helper for declaring and installing one MuJoCo plugin target.</li>
+      <li>One registration entry point per modular plugin.</li>
+      <li>Per-plugin feature flags and conditional dependency discovery.</li>
+      <li>Compatibility monolithic target behind an explicit layout option.</li>
+      <li>Build documentation listing targets, options, dependencies, and install behavior.</li>
+    </ul>
+
+    <h3>Acceptance criteria</h3>
+    <ul>
+      <li>Touching <code>SensorPublisher.cpp</code> rebuilds the sensor plugin and any directly changed core target, but does not relink image, lidar, plotter, scene, or control plugins.</li>
+      <li>Every plugin library loads independently in a minimal MuJoCo model.</li>
+      <li>A build with only clock and pose plugins enabled does not search for HDF5, SDL2, ImGui, ImPlot, CUDA, or ros2_control.</li>
+      <li>Modular and monolithic test models expose identical plugin names and attributes.</li>
+      <li>Shared registries and ROS context ownership remain process-wide across multiple plugin DSOs.</li>
+    </ul>
+  </section>
+
+  <section id="iteration-2">
+    <h2>Iteration 2: ros2_control Sensor and GPIO Support</h2>
+
+    <h3>Objective</h3>
+    <p>
+      Export ros2_control state and command interfaces from
+      <code>&lt;sensor&gt;</code> and <code>&lt;gpio&gt;</code> groups while reusing the same MuJoCo
+      bindings as the existing publisher and actuator-command plugins.
+    </p>
+
+    <h3>Reuse architecture</h3>
+    <div class="flow" aria-label="Shared sensor and actuator binding flow">
+      <div class="flow-box">
+        <strong>MuJoCo bindings</strong>
+        Resolve names once, validate dimensions, read sensor data, write actuator controls
+      </div>
+      <div class="arrow" aria-hidden="true">&rarr;</div>
+      <div class="flow-box">
+        <strong>Consumers</strong>
+        SensorPublisher, ActuatorCommand, MujocoSystem, recorder, diagnostics
+      </div>
+      <div class="arrow" aria-hidden="true">&rarr;</div>
+      <div class="flow-box">
+        <strong>External interfaces</strong>
+        ROS topics, ros2_control state/command handles, process-local snapshots
+      </div>
+    </div>
+
+    <h3>Shared binding APIs</h3>
+    <p>
+      Add transport-neutral value objects to the core runtime. They must not create ROS nodes,
+      publishers, subscriptions, or controller interfaces.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Binding</th>
+          <th>Responsibilities</th>
+          <th>Non-responsibilities</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>MujocoSensorBinding</code></td>
+          <td>Resolve a MuJoCo sensor, cache address and dimension, validate an element index, and read scalar or contiguous values.</td>
+          <td>ROS message construction, publishing rate, semantic interpretation</td>
+        </tr>
+        <tr>
+          <td><code>MujocoActuatorBinding</code></td>
+          <td>Resolve an actuator, cache its ID, validate command range, read control/force state, and write <code>mjData::ctrl</code>.</td>
+          <td>ROS subscriptions, controller ownership, trajectory interpretation</td>
+        </tr>
+        <tr>
+          <td><code>MujocoObjectBinding</code></td>
+          <td>Optional shared base for model identity, object names, IDs, and validation diagnostics.</td>
+          <td>Generic runtime polymorphism unless it removes concrete duplication</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Cross-distribution strategy</h3>
+    <ul>
+      <li>Build and test against both ROS 2 Humble and Jazzy.</li>
+      <li>Use configure-time feature checks to select the applicable <code>SystemInterface::on_init</code> signature and interface construction API.</li>
+      <li>Generate one private compatibility header; distribution checks must not be scattered through business logic.</li>
+      <li>The portable first milestone supports scalar <code>double</code> interfaces on both distributions.</li>
+      <li>Jazzy typed handles, arrays, and additional data types are deferred to a separate additive milestone.</li>
+    </ul>
+
+    <h3>Sensor profiles</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Profile</th>
+          <th>ros2_control interfaces</th>
+          <th>MuJoCo sources</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>imu</code></td>
+          <td><code>orientation.{x,y,z,w}</code>, <code>angular_velocity.{x,y,z}</code>, <code>linear_acceleration.{x,y,z}</code></td>
+          <td>Frame quaternion, gyro, and accelerometer sensors</td>
+        </tr>
+        <tr>
+          <td><code>force_torque</code></td>
+          <td><code>force.{x,y,z}</code>, <code>torque.{x,y,z}</code></td>
+          <td>Force and torque sensors</td>
+        </tr>
+        <tr>
+          <td><code>range</code></td>
+          <td><code>range</code></td>
+          <td>Rangefinder or another scalar MuJoCo sensor</td>
+        </tr>
+        <tr>
+          <td><code>pose</code></td>
+          <td><code>position.{x,y,z}</code>, <code>orientation.{x,y,z,w}</code></td>
+          <td>Frame position and frame quaternion sensors</td>
+        </tr>
+        <tr>
+          <td><code>generic</code></td>
+          <td>Arbitrary scalar state-interface names</td>
+          <td>Explicit sensor name and element index for every interface</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Portable configuration contract</h3>
+    <p>
+      Component-level parameters are used because they parse consistently on Humble and Jazzy.
+      Interface names remain standard ros2_control names; mappings identify the MuJoCo backing
+      source.
+    </p>
+
+    <h4>Generic sensor example</h4>
+    <pre><code>&lt;sensor name="tool_feedback"&gt;
+  &lt;param name="profile"&gt;generic&lt;/param&gt;
+  &lt;param name="state.temperature"&gt;mujoco_sensor:tool_temperature[0]&lt;/param&gt;
+  &lt;param name="state.contact_x"&gt;mujoco_sensor:tool_contact[0]&lt;/param&gt;
+  &lt;param name="state.contact_y"&gt;mujoco_sensor:tool_contact[1]&lt;/param&gt;
+  &lt;param name="state.contact_z"&gt;mujoco_sensor:tool_contact[2]&lt;/param&gt;
+  &lt;state_interface name="temperature"/&gt;
+  &lt;state_interface name="contact_x"/&gt;
+  &lt;state_interface name="contact_y"/&gt;
+  &lt;state_interface name="contact_z"/&gt;
+&lt;/sensor&gt;</code></pre>
+
+    <h4>IMU example</h4>
+    <pre><code>&lt;sensor name="base_imu"&gt;
+  &lt;param name="profile"&gt;imu&lt;/param&gt;
+  &lt;param name="orientation_sensor"&gt;base_quat&lt;/param&gt;
+  &lt;param name="angular_velocity_sensor"&gt;base_gyro&lt;/param&gt;
+  &lt;param name="linear_acceleration_sensor"&gt;base_accel&lt;/param&gt;
+  &lt;state_interface name="orientation.x"/&gt;
+  &lt;state_interface name="orientation.y"/&gt;
+  &lt;state_interface name="orientation.z"/&gt;
+  &lt;state_interface name="orientation.w"/&gt;
+  &lt;state_interface name="angular_velocity.x"/&gt;
+  &lt;state_interface name="angular_velocity.y"/&gt;
+  &lt;state_interface name="angular_velocity.z"/&gt;
+  &lt;state_interface name="linear_acceleration.x"/&gt;
+  &lt;state_interface name="linear_acceleration.y"/&gt;
+  &lt;state_interface name="linear_acceleration.z"/&gt;
+&lt;/sensor&gt;</code></pre>
+
+    <h4>GPIO example</h4>
+    <pre><code>&lt;gpio name="vacuum_io"&gt;
+  &lt;param name="state.pressure"&gt;mujoco_sensor:vacuum_pressure[0]&lt;/param&gt;
+  &lt;param name="state.commanded_level"&gt;mujoco_actuator:vacuum_actuator&lt;/param&gt;
+  &lt;param name="command.level"&gt;mujoco_actuator:vacuum_actuator&lt;/param&gt;
+  &lt;param name="scale.pressure"&gt;0.001&lt;/param&gt;
+  &lt;param name="offset.pressure"&gt;0.0&lt;/param&gt;
+  &lt;state_interface name="pressure"/&gt;
+  &lt;state_interface name="commanded_level"/&gt;
+  &lt;command_interface name="level" min="0.0" max="1.0"/&gt;
+&lt;/gpio&gt;</code></pre>
+
+    <h3>Mapping grammar</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Expression</th>
+          <th>Meaning</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>mujoco_sensor:&lt;name&gt;[&lt;index&gt;]</code></td>
+          <td>Read one element from a named MuJoCo sensor. Index is mandatory for generic mappings and zero-based.</td>
+        </tr>
+        <tr>
+          <td><code>mujoco_actuator:&lt;name&gt;</code> as state</td>
+          <td>Read the current actuator control value. A later explicit source selector may add actuator force feedback.</td>
+        </tr>
+        <tr>
+          <td><code>mujoco_actuator:&lt;name&gt;</code> as command</td>
+          <td>Write the exported command value to the named actuator's <code>ctrl</code> entry.</td>
+        </tr>
+        <tr>
+          <td><code>scale.&lt;interface&gt;</code></td>
+          <td>Optional multiplicative conversion applied after reading and before exposing state.</td>
+        </tr>
+        <tr>
+          <td><code>offset.&lt;interface&gt;</code></td>
+          <td>Optional additive conversion applied after scaling.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Hardware-interface data flow</h3>
+    <ul>
+      <li><code>initialize()</code> registers joints, sensors, and GPIOs before any interface vectors are exported.</li>
+      <li>Registration resolves all MuJoCo names and indices once and stores stable backing values for interface handles.</li>
+      <li><code>read()</code> refreshes joint, sensor, and GPIO state values from cached bindings.</li>
+      <li><code>write()</code> validates and applies joint and GPIO commands through cached actuator bindings.</li>
+      <li><code>reset()</code> restores configured initial states and commands for all component groups.</li>
+    </ul>
+
+    <h3>Validation rules</h3>
+    <ul>
+      <li>Every exported sensor state interface must have exactly one profile-derived or explicit source.</li>
+      <li>Every GPIO state or command interface must have an explicit mapping.</li>
+      <li>Referenced MuJoCo sensors and actuators must exist during initialization.</li>
+      <li>Sensor indices must be within <code>sensor_dim</code>.</li>
+      <li>Semantic profiles must receive the exact required interface set and source dimensions.</li>
+      <li>Duplicate destination mappings and duplicate command ownership are errors.</li>
+      <li>Only <code>double</code> scalar interfaces are accepted in the first cross-distribution milestone.</li>
+      <li>Invalid numeric limits, scales, offsets, and initial values fail initialization with component and interface names in the diagnostic.</li>
+    </ul>
+
+    <h3>Reuse requirements</h3>
+    <ul>
+      <li><code>SensorPublisher</code> must delegate MuJoCo sensor lookup and reads to <code>MujocoSensorBinding</code>.</li>
+      <li><code>ActuatorCommand</code> and <code>MujocoSystem</code> must delegate named actuator resolution and writes to <code>MujocoActuatorBinding</code>.</li>
+      <li>Semantic sensor mappings may compose multiple bindings but must not duplicate address calculation.</li>
+      <li>ROS message conversion remains in publisher plugins; ros2_control handle creation remains in the hardware interface.</li>
+      <li>Images and point clouds remain owned by <code>ImagePublisher</code> and the process-local registry rather than being forced into scalar ros2_control interfaces.</li>
+    </ul>
+
+    <h3>Deliverables</h3>
+    <ul class="checklist">
+      <li>Shared sensor and actuator binding APIs with unit tests.</li>
+      <li>Humble/Jazzy compatibility header selected by CMake feature checks.</li>
+      <li>Sensor and GPIO registration, export, read, write, and reset support in <code>MujocoSystem</code>.</li>
+      <li>Semantic profile mapper for IMU, force-torque, range, and pose.</li>
+      <li>Generic scalar mapping parser with scale and offset support.</li>
+      <li>Refactored existing publisher and command plugins using the shared bindings.</li>
+      <li>Example URDF and MJCF pairs for every profile and GPIO direction.</li>
+    </ul>
+
+    <h3>Acceptance criteria</h3>
+    <ul>
+      <li>ros2_control lists every configured sensor and GPIO interface using the expected <code>component/interface</code> name.</li>
+      <li>IMU, force-torque, range, and pose interfaces match ros2_control semantic component naming.</li>
+      <li>GPIO commands update the configured <code>mjData::ctrl</code> values and honor command limits.</li>
+      <li>Sensor and GPIO states update on each hardware <code>read()</code>.</li>
+      <li>A publisher plugin and a ros2_control interface backed by the same sensor report identical values.</li>
+      <li>Invalid mappings fail at initialization, before controllers become active.</li>
+      <li>The complete behavior passes on Humble and Jazzy.</li>
+    </ul>
+
+    <h3>Deferred I/O features</h3>
+    <ul>
+      <li>Jazzy-native <code>bool</code>, integer, and array handles.</li>
+      <li>Images, point clouds, matrices, strings, and other non-scalar payloads.</li>
+      <li>Dynamic addition or removal of ros2_control interfaces after hardware initialization.</li>
+      <li>Automatic inference of arbitrary semantic profiles from sensor names alone.</li>
+    </ul>
+  </section>
+
+  <section id="iteration-3">
+    <h2>Iteration 3: Correctness, Reliability, and Performance</h2>
+
+    <h3>Priority classification</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Priority</th>
+          <th>Work</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="priority-critical">Critical</td>
+          <td>Explicit actuator mappings, command-mode switching, ROS context ownership, reset correctness, mimic-index correction</td>
+          <td>Prevents ambiguous commands, process-wide failures, stale control, and invalid indexing</td>
+        </tr>
+        <tr>
+          <td class="priority-essential">Essential</td>
+          <td>Effort semantics, lifecycle enforcement, registered tests, portable dependencies, diagnostics</td>
+          <td>Makes behavior inspectable, repeatable, and portable</td>
+        </tr>
+        <tr>
+          <td class="priority-good">Good to have</td>
+          <td>Typed Jazzy GPIO, profiling tools, plugin authoring helpers, generated configuration validation</td>
+          <td>Improves scale and developer experience after the contract is stable</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Explicit actuator mappings</h3>
+    <p>
+      Replace actuator-name and gain/bias heuristics with explicit joint parameters:
+    </p>
+    <pre><code>&lt;joint name="shoulder_joint"&gt;
+  &lt;param name="position_actuator"&gt;shoulder_position&lt;/param&gt;
+  &lt;param name="velocity_actuator"&gt;shoulder_velocity&lt;/param&gt;
+  &lt;param name="effort_actuator"&gt;shoulder_effort&lt;/param&gt;
+  ...
+&lt;/joint&gt;</code></pre>
+    <ul>
+      <li>Validate that each configured actuator targets the expected joint transmission.</li>
+      <li>Keep heuristic mapping as a deprecated fallback for one release.</li>
+      <li>Emit one initialization warning describing the inferred mapping and the explicit replacement.</li>
+      <li>Reject one actuator being assigned to incompatible command interfaces unless explicitly supported.</li>
+    </ul>
+
+    <h3>Command-mode switching</h3>
+    <ul>
+      <li>Implement <code>prepare_command_mode_switch()</code> to reject conflicting position, velocity, and effort claims per joint.</li>
+      <li>Implement <code>perform_command_mode_switch()</code> to activate only the selected actuator path.</li>
+      <li>Initialize newly activated commands from current simulated state to avoid discontinuities.</li>
+      <li>Stop writing inactive interfaces even if their command storage still contains values.</li>
+      <li>Define GPIO command ownership through ordinary ros2_control interface claims.</li>
+    </ul>
+
+    <h3>State correctness</h3>
+    <ul>
+      <li>Report actuator-generated effort from <code>qfrc_actuator</code> when the interface represents simulated actuator effort; reserve <code>qfrc_applied</code> for externally applied forces.</li>
+      <li>Store both MuJoCo object IDs and internal component indices explicitly.</li>
+      <li>Resolve mimic targets to internal vector indices and validate ordering independently of MuJoCo joint IDs.</li>
+      <li>Support mimic offset in addition to multiplier where the ros2_control API provides it.</li>
+      <li>Apply configured min/max constraints consistently to direct and PID-driven commands.</li>
+    </ul>
+
+    <h3>ROS context and lifecycle</h3>
+    <ul>
+      <li>Move default-context initialization and shutdown into the core runtime.</li>
+      <li>Use reference-counted leases so plugin destruction cannot shut down ROS while another plugin remains active.</li>
+      <li>Allow isolated contexts only for plugins with a documented need, such as independent scene-service lifecycles.</li>
+      <li>Make executor shutdown bounded and join every worker thread before releasing nodes or MuJoCo data pointers.</li>
+      <li>Honor hardware lifecycle states: read while configured, write commands only while active, and clear resources on cleanup.</li>
+    </ul>
+
+    <h3>Reset behavior</h3>
+    <ul>
+      <li>Perform all <code>mjData</code> mutations on the simulation thread.</li>
+      <li>Restore MuJoCo derived state after an in-step reset before physics continues.</li>
+      <li>Reset joint, sensor, and GPIO backing values to configured initial values.</li>
+      <li>Clear stale actuator commands and PID integrator/history state.</li>
+      <li>Reset controller timing when simulation time moves backward.</li>
+      <li>Test service-driven, viewer-driven, and direct MuJoCo resets.</li>
+    </ul>
+
+    <h3>Performance and scale</h3>
+    <ul>
+      <li>Resolve object names, sensor addresses, joint addresses, and actuator IDs only during initialization or model recompilation.</li>
+      <li>Preallocate state, command, message, and diagnostic storage before the update loop.</li>
+      <li>Avoid per-step string streams and message-vector resizing.</li>
+      <li>Publish debug command topics only when enabled by configuration.</li>
+      <li>Keep camera frame copies sequence-gated and make process-local callbacks execute outside registry locks.</li>
+      <li>Measure controller update duration, read/write duration, missed periods, and simulation real-time factor.</li>
+      <li>Use throttled diagnostics and compile-time or runtime disabled fast paths.</li>
+    </ul>
+
+    <h3>Portability and packaging</h3>
+    <ul>
+      <li>Replace hard-coded HDF5 paths with imported CMake or pkg-config targets.</li>
+      <li>Permit system-provided or vendored ImGui/ImPlot without mandatory network access during every clean configure.</li>
+      <li>Install plugin libraries to a package-owned directory and provide an environment hook extending <code>MUJOCO_PLUGIN_PATH</code>.</li>
+      <li>Set relocatable RPATH values and test installation outside the MuJoCo source or binary tree.</li>
+      <li>Generate a machine-readable plugin manifest containing library names, registered plugins, dependencies, and build options.</li>
+    </ul>
+
+    <h3>Diagnostics</h3>
+    <ul>
+      <li>Publish or expose initialization status, active interface modes, and mapping summaries.</li>
+      <li>Report read, update, and write durations with configurable thresholds.</li>
+      <li>Count missed controller updates, late callbacks, invalid commands, and reset events.</li>
+      <li>Include component and interface names in all validation failures.</li>
+      <li>Keep diagnostics disabled or allocation-free in the hot path when not requested.</li>
+    </ul>
+    <p>
+      The first diagnostics increment is implemented through
+      <code>MujocoSystemInterface::diagnostics()</code>. Set the ros2_control hardware parameter
+      <code>diagnostics_enabled</code> to <code>true</code> to collect monotonic read and write
+      durations. Operation, reset, invalid-command, and missed-period counters are exposed in the
+      same snapshot. Timing clock calls are skipped when diagnostics are disabled.
+    </p>
+
+    <h3>Benchmark fixture</h3>
+    <p>
+      Configure with <code>-DMUJOCO_ROS_UTILS_BUILD_BENCHMARKS=ON</code> to build the standalone
+      read/write benchmark. It is intentionally excluded from CTest because throughput thresholds
+      depend on the host, build type, middleware, and system load. Record the build type, iteration
+      count, CPU, MuJoCo version, and ROS distribution with every result.
+    </p>
+
+    <h3>Good-to-have follow-up features</h3>
+    <ul>
+      <li>Jazzy typed GPIO handles for Boolean and integer I/O while preserving the portable double contract on Humble.</li>
+      <li>A plugin-authoring CMake template and registration helper.</li>
+      <li>A configuration linter that checks URDF mappings against an MJCF model without starting a simulation.</li>
+      <li>Benchmark fixtures for large joint counts, high-rate lidar, multiple cameras, and multiple controller managers.</li>
+      <li>Generated reference pages for plugin attributes and ros2_control mapping parameters.</li>
+    </ul>
+  </section>
+
+  <section id="testing">
+    <h2>Test and CI Strategy</h2>
+
+    <h3>Test layers</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Layer</th>
+          <th>Coverage</th>
+          <th>Framework</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Unit</td>
+          <td>Mapping grammar, binding lookup, dimensions, limits, scale/offset, profile validation, context leases</td>
+          <td><code>ament_cmake_gtest</code></td>
+        </tr>
+        <tr>
+          <td>Plugin load</td>
+          <td>Each independent DSO, registered name, attributes, create/reset/destroy lifecycle</td>
+          <td>MuJoCo model fixtures plus GTest</td>
+        </tr>
+        <tr>
+          <td>Hardware integration</td>
+          <td>Joint, sensor, and GPIO exports; read/write; command claims; resets</td>
+          <td>Controller manager and pluginlib tests</td>
+        </tr>
+        <tr>
+          <td>ROS integration</td>
+          <td>Topic parity, controllers, services, multiple instances, namespaces</td>
+          <td><code>launch_testing</code> and <code>ament_cmake_pytest</code></td>
+        </tr>
+        <tr>
+          <td>Build behavior</td>
+          <td>Incremental rebuild isolation, optional dependency absence, modular/monolithic parity</td>
+          <td>CI shell tests using build logs and target timestamps</td>
+        </tr>
+        <tr>
+          <td>Performance</td>
+          <td>Update latency, allocations, real-time factor, camera copy rates, multi-instance scaling</td>
+          <td>Repeatable benchmark executables</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Required scenarios</h3>
+    <ul>
+      <li>Humble and Jazzy builds in modular mode.</li>
+      <li>Humble and Jazzy builds in monolithic compatibility mode.</li>
+      <li>Minimal clock-only build without optional graphics, recording, plotting, or control dependencies.</li>
+      <li>Every sensor semantic profile with valid and invalid dimensions.</li>
+      <li>GPIO input-only, output-only, and bidirectional components.</li>
+      <li>Conflicting controller command modes and successful mode transitions.</li>
+      <li>Multiple plugin and controller-manager instances in one process.</li>
+      <li>Reset during active control with no stale command reapplication.</li>
+      <li>AddressSanitizer, UndefinedBehaviorSanitizer, and ThreadSanitizer jobs where supported.</li>
+      <li>Installed-tree plugin discovery with no source-tree paths.</li>
+    </ul>
+  </section>
+
+  <section id="compatibility">
+    <h2>Compatibility and Release Policy</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Area</th>
+          <th>Policy</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>MuJoCo plugin names</td>
+          <td>Stable across modular and monolithic layouts.</td>
+        </tr>
+        <tr>
+          <td>MJCF attributes</td>
+          <td>Existing attributes remain valid; new attributes are additive unless explicitly deprecated.</td>
+        </tr>
+        <tr>
+          <td>ros2_control configuration</td>
+          <td>Joint behavior remains compatible. Sensor and GPIO groups are additive.</td>
+        </tr>
+        <tr>
+          <td>ROS distributions</td>
+          <td>Humble and Jazzy are continuously tested. Compatibility code is isolated behind a private adapter.</td>
+        </tr>
+        <tr>
+          <td>Monolithic build</td>
+          <td>Deprecated compatibility option for one release, then removed.</td>
+        </tr>
+        <tr>
+          <td>Heuristic actuator mapping</td>
+          <td>Deprecated fallback for one release after explicit mapping becomes available.</td>
+        </tr>
+        <tr>
+          <td>Typed GPIO</td>
+          <td>Additive Jazzy enhancement after scalar double behavior is stable on both distributions.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="risks">
+    <h2>Risks and Mitigations</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Risk</th>
+          <th>Impact</th>
+          <th>Mitigation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Singleton duplication across plugin DSOs</td>
+          <td>Registries and context ownership diverge by library</td>
+          <td>Move state to an out-of-line core shared library and test cross-DSO identity</td>
+        </tr>
+        <tr>
+          <td>Duplicate plugin registration</td>
+          <td>Undefined library-load behavior</td>
+          <td>Make modular and monolithic install layouts mutually exclusive</td>
+        </tr>
+        <tr>
+          <td>Humble/Jazzy API drift</td>
+          <td>Conditional code spreads through the hardware implementation</td>
+          <td>Use configure-time feature checks and one compatibility adapter</td>
+        </tr>
+        <tr>
+          <td>Sensor naming ambiguity</td>
+          <td>Incorrect semantic values</td>
+          <td>Require explicit profile sources or explicit generic mappings and validate dimensions</td>
+        </tr>
+        <tr>
+          <td>Multiple writers to one actuator</td>
+          <td>Last-write-wins commands and unstable simulation</td>
+          <td>Validate ownership and enforce ros2_control command-mode claims</td>
+        </tr>
+        <tr>
+          <td>ROS shutdown from one plugin</td>
+          <td>Other plugins lose nodes, services, and executors</td>
+          <td>Reference-counted core context manager and isolated contexts only where necessary</td>
+        </tr>
+        <tr>
+          <td>Modular build increases installation complexity</td>
+          <td>Plugin paths and RPATH become fragile</td>
+          <td>Package-owned install directory, environment hook, relocatable RPATH, installed-tree tests</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel success">
+    <h2>Definition of Done</h2>
+    <p>The roadmap is complete when all of the following hold:</p>
+    <ul>
+      <li>Plugins build and load independently, with optional dependencies isolated.</li>
+      <li>The shared runtime provides one ROS lifecycle and one process-local registry identity.</li>
+      <li>Joint, sensor, and GPIO ros2_control interfaces operate on Humble and Jazzy.</li>
+      <li>Existing ROS plugins and ros2_control reuse the same MuJoCo binding code.</li>
+      <li>Actuator mapping and command ownership are explicit and validated.</li>
+      <li>Reset, lifecycle, and multi-instance behavior are covered by automated tests.</li>
+      <li>Hot paths avoid repeated lookups, unnecessary allocation, and uncontrolled logging.</li>
+      <li>The installed package is relocatable and does not rely on hard-coded system paths.</li>
+    </ul>
+  </section>
+
+  <section id="references">
+    <h2>References</h2>
+
+    <h3>Local implementation sources</h3>
+    <ul>
+      <li><a href="../CMakeLists.txt"><code>../CMakeLists.txt</code></a></li>
+      <li><a href="../plugin/CMakeLists.txt"><code>../plugin/CMakeLists.txt</code></a></li>
+      <li><a href="../plugin/Plugin.cpp"><code>../plugin/Plugin.cpp</code></a></li>
+      <li><a href="../include/mujoco_system.hpp"><code>../include/mujoco_system.hpp</code></a></li>
+      <li><a href="../src/mujoco_system.cpp"><code>../src/mujoco_system.cpp</code></a></li>
+      <li><a href="../plugin/SensorPublisher.cpp"><code>../plugin/SensorPublisher.cpp</code></a></li>
+      <li><a href="../plugin/ActuatorCommand.cpp"><code>../plugin/ActuatorCommand.cpp</code></a></li>
+      <li><a href="../plugin/SimDataRegistry.hpp"><code>../plugin/SimDataRegistry.hpp</code></a></li>
+      <li><a href="../plugin/RosControl.cpp"><code>../plugin/RosControl.cpp</code></a></li>
+      <li><a href="../test/CMakeLists.txt"><code>../test/CMakeLists.txt</code></a></li>
+    </ul>
+
+    <h3>External specifications</h3>
+    <ul>
+      <li>
+        <a href="https://control.ros.org/humble/doc/ros2_control/hardware_interface/doc/hardware_interface_types_userdoc.html">
+          ros2_control Humble hardware interface types
+        </a>
+      </li>
+      <li>
+        <a href="https://control.ros.org/jazzy/doc/ros2_control/hardware_interface/doc/hardware_interface_types_userdoc.html">
+          ros2_control Jazzy hardware interface types
+        </a>
+      </li>
+      <li>
+        <a href="https://mujoco.readthedocs.io/en/stable/programming/extension.html">
+          MuJoCo extension and plugin documentation
+        </a>
+      </li>
+    </ul>
+  </section>
+
+  <footer>
+    This roadmap defines intended development behavior and acceptance criteria. Concrete API names
+    may be refined during implementation, but the reuse, compatibility, validation, and modularity
+    requirements are normative.
+  </footer>
+</main>
+</body>
+</html>

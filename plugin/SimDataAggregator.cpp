@@ -1,4 +1,5 @@
 #include "SimDataAggregator.h"
+#include "RosContextManager.hpp"
 #include "SimDataRegistry.hpp"
 #include "mujoco_utils.hpp"
 
@@ -131,11 +132,10 @@ SimDataAggregator::SimDataAggregator(std::string              instance_name,
     reg.registerCameraConsumer(ns);
 
   // ── ROS 2 node + services ──────────────────────────────────────────────────
-  if (!rclcpp::ok())
   {
     int    argc = 0;
     char **argv = nullptr;
-    rclcpp::init(argc, argv);
+    ros_context_lease_.acquire(argc, argv);
   }
 
   rclcpp::NodeOptions opts;
@@ -247,9 +247,26 @@ SimDataAggregator::~SimDataAggregator()
   // Stop recording if active.
   if (recorder_ && recorder_->isRecording())
   {
-    int    f;
-    double d;
-    recorder_->stop(f, d, /*discard=*/false);
+    try
+    {
+      int    f;
+      double d;
+      recorder_->stop(f, d, /*discard=*/false);
+    }
+    catch(const std::exception & e)
+    {
+      if(node_)
+      {
+        RCLCPP_ERROR(node_->get_logger(), "Failed to stop recorder during shutdown: %s", e.what());
+      }
+    }
+    catch(...)
+    {
+      if(node_)
+      {
+        RCLCPP_ERROR(node_->get_logger(), "Failed to stop recorder during shutdown");
+      }
+    }
   }
 
   // Shut down executor.
@@ -261,6 +278,7 @@ SimDataAggregator::~SimDataAggregator()
   auto & reg = SimDataRegistry::instance();
   for (const auto & ns : camera_namespaces_)
     reg.unregisterCameraConsumer(ns);
+
 }
 
 // ── reset ──────────────────────────────────────────────────────────────────────

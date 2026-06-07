@@ -1,4 +1,5 @@
 #include "ExternalForce.h"
+#include "RosContextManager.hpp"
 
 #include <mujoco/mujoco.h>
 
@@ -126,10 +127,7 @@ ExternalForce::ExternalForce(const mjModel * m,
 
   int argc = 0;
   char ** argv = nullptr;
-  if(!rclcpp::ok())
-  {
-    rclcpp::init(argc, argv);
-  }
+  ros_context_lease_.acquire(argc, argv);
   rclcpp::NodeOptions node_options;
 
   std::string body_name = std::string(mj_id2name(m, mjOBJ_BODY, body_id_));
@@ -139,6 +137,10 @@ ExternalForce::ExternalForce(const mjModel * m,
   // Use a dedicated queue so as not to call callbacks of other modules
   executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
   executor_->add_node(nh_);
+}
+
+ExternalForce::~ExternalForce()
+{
 }
 
 void ExternalForce::reset(const mjModel *, // m

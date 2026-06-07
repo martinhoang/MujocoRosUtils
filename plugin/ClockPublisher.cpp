@@ -1,4 +1,5 @@
 #include "ClockPublisher.h"
+#include "RosContextManager.hpp"
 
 #include <mujoco/mujoco.h>
 
@@ -132,10 +133,7 @@ ClockPublisher::ClockPublisher(const mjModel * m,
 
   int argc = 0;
   char ** argv = nullptr;
-  if(!rclcpp::ok())
-  {
-    rclcpp::init(argc, argv);
-  }
+  ros_context_lease_.acquire(argc, argv);
 
   // Reuse the node across mj_recompile re-inits to avoid duplicate-node crashes.
   nh_ = s_node_.lock();
@@ -147,6 +145,10 @@ ClockPublisher::ClockPublisher(const mjModel * m,
   }
 
   pub_ = nh_->create_publisher<rosgraph_msgs::msg::Clock>(topic_name_, 1);
+}
+
+ClockPublisher::~ClockPublisher()
+{
 }
 
 void ClockPublisher::reset(const mjModel *, // m

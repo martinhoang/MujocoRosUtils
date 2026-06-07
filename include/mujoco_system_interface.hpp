@@ -4,8 +4,24 @@
 #include <mujoco/mujoco.h>
 #include <rclcpp/rclcpp.hpp>
 
+#include <cstdint>
+
 namespace mujoco_ros2_control
 {
+
+struct MujocoSystemDiagnostics
+{
+  bool enabled = false;
+  std::uint64_t read_count = 0;
+  std::uint64_t write_count = 0;
+  std::uint64_t reset_count = 0;
+  std::uint64_t invalid_command_count = 0;
+  std::uint64_t missed_period_count = 0;
+  std::uint64_t last_read_duration_ns = 0;
+  std::uint64_t max_read_duration_ns = 0;
+  std::uint64_t last_write_duration_ns = 0;
+  std::uint64_t max_write_duration_ns = 0;
+};
 
 /**
  * @brief This class is the base public interface for MujocoSystem
@@ -27,6 +43,8 @@ public:
   virtual bool initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mjData *d,
                           const hardware_interface::HardwareInfo &info)
     = 0;
+
+  virtual MujocoSystemDiagnostics diagnostics() const = 0;
 
 protected:
   rclcpp::Node::SharedPtr node_;

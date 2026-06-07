@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RosContextManager.hpp"
+
 #include <rclcpp/rclcpp.hpp>
 
 #include <mujoco/mjdata.h>
@@ -30,6 +32,9 @@ public:
 public:
   /** \brief Copy constructor. */
   ExternalForce(ExternalForce &&) = default;
+
+  /** \brief Destructor — releases the shared ROS context lease. */
+  ~ExternalForce();
 
   /** \brief Reset.
       \param m model
@@ -69,6 +74,8 @@ protected:
   void callback(const mujoco_ros_utils::msg::ExternalForce::SharedPtr msg);
 
 protected:
+  RosContextLease ros_context_lease_;
+
   //! ROS node handle
   rclcpp::Node::SharedPtr nh_;
 

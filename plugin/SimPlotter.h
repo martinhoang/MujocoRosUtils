@@ -1,5 +1,6 @@
 #pragma once
 
+#include "RosContextManager.hpp"
 #include "mujoco_ros_utils/srv/plot_command.hpp"
 
 #include <mujoco/mjdata.h>
@@ -218,6 +219,8 @@ public:
   void compute(const mjModel * m, mjData * d, int plugin_id);
 
 private:
+  RosContextLease ros_context_lease_;
+
   SimPlotter(std::vector<PlotConfig> plots,
              int update_every, int win_w, int win_h,
              std::string node_name,

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Velodyne VLP-16 Puck lidar sites.
+  Legacy Velodyne VLP-16 ray-visualization sites.
 
   Spec:
     Channels:            16
@@ -11,7 +11,9 @@
   Quaternion per layer: θ = 90° − e, quat = [cos(θ/2), 0, sin(θ/2), 0]
   (pure R_y rotation, tilts site -Z to point radially outward at elevation e)
 
-  Include inside a <body> in worldbody:
+  LidarPublisher now casts rays directly and does not require these sites.
+  This file remains available only for models that visualize or inspect the
+  historical site layout. Include inside a <body> in worldbody:
     <body name="lidar_body" pos="...">
       <geom .../>
       <include file="lidar_vlp16_sites.xml"/>

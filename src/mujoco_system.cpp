@@ -1,30 +1,226 @@
 #include "mujoco_system.hpp"
 
-#include "hardware_interface/types/hardware_component_interface_params.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
+#include "mujoco_ros_utils/mujoco_bindings.hpp"
 
 #include <sensor_msgs/msg/joint_state.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <deque>
+#include <limits>
+#include <optional>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace mujoco_ros2_control
 {
 
+namespace
+{
+
+constexpr std::size_t INVALID_INDEX = std::numeric_limits<std::size_t>::max();
+
+double parse_number(const std::string & text, const std::string & description)
+{
+  try
+  {
+    std::size_t parsed = 0;
+    const double value = std::stod(text, &parsed);
+    if(parsed != text.size() || !std::isfinite(value))
+    {
+      throw std::invalid_argument("not a finite number");
+    }
+    return value;
+  }
+  catch(const std::exception & e)
+  {
+    throw std::invalid_argument(
+        "Invalid " + description + " value '" + text + "': " + e.what());
+  }
+}
+
+double parse_optional_number(
+    const std::unordered_map<std::string, std::string> & parameters,
+    const std::string & key, double default_value, const std::string & component)
+{
+  const auto it = parameters.find(key);
+  if(it == parameters.end())
+  {
+    return default_value;
+  }
+  return parse_number(it->second, "'" + key + "' for component '" + component + "'");
+}
+
+bool parse_optional_bool(
+    const std::unordered_map<std::string, std::string> & parameters,
+    const std::string & key, bool default_value, const std::string & component)
+{
+  const auto it = parameters.find(key);
+  if(it == parameters.end())
+  {
+    return default_value;
+  }
+  std::string value = it->second;
+  std::transform(
+      value.begin(), value.end(), value.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if(value == "true" || value == "1" || value == "yes" || value == "on")
+  {
+    return true;
+  }
+  if(value == "false" || value == "0" || value == "no" || value == "off")
+  {
+    return false;
+  }
+  throw std::invalid_argument(
+      "Invalid '" + key + "' value '" + it->second + "' for component '" + component + "'");
+}
+
+std::string required_parameter(
+    const hardware_interface::ComponentInfo & component, const std::string & key)
+{
+  const auto it = component.parameters.find(key);
+  if(it == component.parameters.end() || it->second.empty())
+  {
+    throw std::invalid_argument(
+        "Component '" + component.name + "' requires parameter '" + key + "'");
+  }
+  return it->second;
+}
+
+struct SensorSource
+{
+  std::string name;
+  std::size_t index = 0;
+};
+
+SensorSource parse_sensor_source(const std::string & expression, const std::string & context)
+{
+  constexpr char prefix[] = "mujoco_sensor:";
+  if(expression.rfind(prefix, 0) != 0)
+  {
+    throw std::invalid_argument(
+        context + " must use mujoco_sensor:<name>[<index>], got '" + expression + "'");
+  }
+  const std::string value = expression.substr(sizeof(prefix) - 1);
+  const std::size_t open = value.rfind('[');
+  const std::size_t close = value.rfind(']');
+  if(open == std::string::npos || close != value.size() - 1 || open == 0 || close <= open + 1)
+  {
+    throw std::invalid_argument(
+        context + " must include a zero-based sensor index, got '" + expression + "'");
+  }
+  const std::string index_text = value.substr(open + 1, close - open - 1);
+  if(!std::all_of(index_text.begin(), index_text.end(), [](unsigned char c) { return std::isdigit(c); }))
+  {
+    throw std::invalid_argument(context + " has an invalid sensor index in '" + expression + "'");
+  }
+  return {value.substr(0, open), static_cast<std::size_t>(std::stoull(index_text))};
+}
+
+std::string parse_actuator_source(const std::string & expression, const std::string & context)
+{
+  constexpr char prefix[] = "mujoco_actuator:";
+  if(expression.rfind(prefix, 0) != 0 || expression.size() == sizeof(prefix) - 1)
+  {
+    throw std::invalid_argument(
+        context + " must use mujoco_actuator:<name>, got '" + expression + "'");
+  }
+  return expression.substr(sizeof(prefix) - 1);
+}
+
+enum class ScalarStateSource
+{
+  SENSOR,
+  ACTUATOR_CONTROL
+};
+
+struct ScalarState
+{
+  std::string component;
+  std::string interface;
+  ScalarStateSource source = ScalarStateSource::SENSOR;
+  MujocoRosUtils::MujocoSensorBinding sensor;
+  MujocoRosUtils::MujocoActuatorBinding actuator;
+  std::size_t sensor_index = 0;
+  double scale = 1.0;
+  double offset = 0.0;
+  double value = 0.0;
+  double initial_value = 0.0;
+
+  void update(const mjData * data)
+  {
+    const double raw = source == ScalarStateSource::SENSOR
+                         ? sensor.read(data, sensor_index)
+                         : actuator.read_control(data);
+    value = raw * scale + offset;
+  }
+};
+
+struct ScalarCommand
+{
+  std::string component;
+  std::string interface;
+  MujocoRosUtils::MujocoActuatorBinding actuator;
+  double value = 0.0;
+  double initial_value = 0.0;
+  double minimum = std::numeric_limits<double>::lowest();
+  double maximum = std::numeric_limits<double>::max();
+};
+
+double interface_initial_value(
+    const hardware_interface::InterfaceInfo & interface, const std::string & component)
+{
+  return interface.initial_value.empty()
+           ? 0.0
+           : parse_number(
+               interface.initial_value,
+               "initial value for '" + component + "/" + interface.name + "'");
+}
+
+void validate_double_interface(
+    const hardware_interface::InterfaceInfo & interface, const std::string & component)
+{
+  if(!MujocoRosUtils::ros2_control_compat::is_scalar_double(interface))
+  {
+    throw std::invalid_argument(
+        "Interface '" + component + "/" + interface.name
+        + "' must use scalar double data");
+  }
+}
+
+} // namespace
+
 struct Joint
 {
+  enum class CommandMode
+  {
+    NONE,
+    POSITION,
+    VELOCITY,
+    EFFORT
+  };
+
   std::size_t id;   // id of the joint in the Mujoco model
   std::string name; // Name of the joint
 
   // States
-  double position;
-  double initial_position;
-  double velocity;
-  double initial_velocity;
-  double effort;
-  double initial_effort;
+  double position = 0.0;
+  double initial_position = 0.0;
+  double velocity = 0.0;
+  double initial_velocity = 0.0;
+  double effort = 0.0;
+  double initial_effort = 0.0;
 
   // Commands
-  double position_cmd;
-  double velocity_cmd;
-  double effort_cmd;
+  double position_cmd = 0.0;
+  double velocity_cmd = 0.0;
+  double effort_cmd = 0.0;
 
   // Command limits
   double min_position_cmd = -std::numeric_limits<double>::max();
@@ -38,6 +234,8 @@ struct Joint
   control_toolbox::Pid position_pid;
   control_toolbox::Pid velocity_pid;
   bool is_pid_enabled = false;
+  bool position_pid_enabled = false;
+  bool velocity_pid_enabled = false;
 
   // Joint limits
   joint_limits::JointLimits joint_limits;
@@ -51,11 +249,12 @@ struct Joint
   bool has_position_cmd = false;
   bool has_velocity_cmd = false;
   bool has_effort_cmd   = false;
+  CommandMode active_command_mode = CommandMode::NONE;
 
   // Mimic support
   bool        is_mimic   = false;
   double      multiplier = 1.0;
-  std::size_t mimicked_joint_id;
+  std::size_t mimicked_joint_index = INVALID_INDEX;
 };
 
 class MujocoSystemPrivate
@@ -81,20 +280,65 @@ public:
   /// \brief Joint States
   std::vector<Joint> joints_;
 
+  /// \brief Scalar sensor and GPIO state storage. deque keeps exported pointers stable.
+  std::deque<ScalarState> scalar_states_;
+
+  /// \brief Scalar GPIO command storage. deque keeps exported pointers stable.
+  std::deque<ScalarCommand> scalar_commands_;
+
+  /// \brief Actuators with one command owner across joints and GPIOs.
+  std::set<int> commanded_actuators_;
+
+  /// \brief Validated command modes waiting for perform_command_mode_switch().
+  std::optional<std::vector<Joint::CommandMode>> pending_command_modes_;
+
+  /// \brief Lifecycle state is enforced after the first lifecycle callback.
+  bool lifecycle_state_known_{false};
+  bool active_{false};
+
+  bool diagnostics_enabled_{false};
+  std::atomic<std::uint64_t> read_count_{0};
+  std::atomic<std::uint64_t> write_count_{0};
+  std::atomic<std::uint64_t> reset_count_{0};
+  std::atomic<std::uint64_t> invalid_command_count_{0};
+  std::atomic<std::uint64_t> missed_period_count_{0};
+  std::atomic<std::uint64_t> last_read_duration_ns_{0};
+  std::atomic<std::uint64_t> max_read_duration_ns_{0};
+  std::atomic<std::uint64_t> last_write_duration_ns_{0};
+  std::atomic<std::uint64_t> max_write_duration_ns_{0};
+
   /// \brief Joint command publisher
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_cmd_publisher_;
 };
+
+MujocoSystem::MujocoSystem() = default;
+MujocoSystem::~MujocoSystem() = default;
 
 bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mjData *d,
                               const hardware_interface::HardwareInfo &hardware_info)
 {
   if (!node || !m || !d)
   {
-    RCLCPP_ERROR(node->get_logger(), "Failed to initialize MujocoSystem: null pointer provided.");
+    if(node)
+    {
+      RCLCPP_ERROR(node->get_logger(), "Failed to initialize MujocoSystem: null pointer provided.");
+    }
     return false;
   }
   node_ = node;
   impl_ = std::make_unique<MujocoSystemPrivate>(m, d);
+  try
+  {
+    impl_->diagnostics_enabled_ = parse_optional_bool(
+        hardware_info.hardware_parameters, "diagnostics_enabled", false, hardware_info.name);
+  }
+  catch(const std::exception & e)
+  {
+    RCLCPP_ERROR(
+        node_->get_logger(), "Failed to initialize MujocoSystem for '%s': %s",
+        hardware_info.name.c_str(), e.what());
+    return false;
+  }
 
   impl_->joint_cmd_publisher_
     = node_->create_publisher<sensor_msgs::msg::JointState>("joint_commands", rclcpp::QoS(10));
@@ -104,6 +348,8 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
   try
   {
     register_joints(hardware_info, m);
+    register_sensors(hardware_info);
+    register_gpios(hardware_info);
   }
   catch (const std::exception &e)
   {
@@ -117,6 +363,7 @@ bool MujocoSystem::initialize(rclcpp::Node::SharedPtr node, const mjModel *m, mj
 
 void MujocoSystem::reset(void)
 {
+  ++impl_->reset_count_;
   std::stringstream ss;
   for (auto &joint : impl_->joints_)
   {
@@ -141,13 +388,13 @@ void MujocoSystem::reset(void)
     const int dof_idx                       = impl_->model_->jnt_dofadr[joint.id];
     impl_->data_->qpos[qpos_idx]            = joint.initial_position;
     impl_->data_->qvel[dof_idx]             = joint.initial_velocity;
-    impl_->data_->qfrc_applied[dof_idx]     = joint.initial_effort;
-
     // ── MuJoCo actuator commands ─────────────────────────────────────────────
     if (joint.has_position_cmd && joint.position_actuator_id != static_cast<std::size_t>(-1))
-      impl_->data_->ctrl[joint.position_actuator_id] = joint.initial_position;
+      impl_->data_->ctrl[joint.position_actuator_id] =
+          joint.position_pid_enabled ? 0.0 : joint.initial_position;
     if (joint.has_velocity_cmd && joint.velocity_actuator_id != static_cast<std::size_t>(-1))
-      impl_->data_->ctrl[joint.velocity_actuator_id] = joint.initial_velocity;
+      impl_->data_->ctrl[joint.velocity_actuator_id] =
+          joint.velocity_pid_enabled ? 0.0 : joint.initial_velocity;
     if (joint.has_effort_cmd && joint.effort_actuator_id != static_cast<std::size_t>(-1))
       impl_->data_->ctrl[joint.effort_actuator_id] = joint.initial_effort;
 
@@ -157,6 +404,17 @@ void MujocoSystem::reset(void)
       joint.position_pid.reset();
       joint.velocity_pid.reset();
     }
+  }
+
+  for(auto & state : impl_->scalar_states_)
+  {
+    state.value = state.initial_value;
+  }
+  for(auto & command : impl_->scalar_commands_)
+  {
+    command.value = command.initial_value;
+    command.actuator.write(
+        impl_->data_, command.initial_value, command.minimum, command.maximum);
   }
 
   if (!ss.str().empty())
@@ -213,8 +471,25 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
 
     if (mimicked_joint_it != joint_info.parameters.end())
     {
-      last_joint.is_mimic          = true;
-      last_joint.mimicked_joint_id = mj_name2id(m, mjOBJ_JOINT, mimicked_joint_it->second.c_str());
+      const auto target_it = std::find_if(
+          hardware_info.joints.begin(), hardware_info.joints.end(),
+          [&mimicked_joint_it](const hardware_interface::ComponentInfo & candidate)
+          {
+            return candidate.name == mimicked_joint_it->second;
+          });
+      if(target_it == hardware_info.joints.end())
+      {
+        throw std::invalid_argument(
+            "Mimic joint '" + joint_info.name + "' references unknown ros2_control joint '"
+            + mimicked_joint_it->second + "'");
+      }
+      last_joint.is_mimic = true;
+      last_joint.mimicked_joint_index =
+          static_cast<std::size_t>(std::distance(hardware_info.joints.begin(), target_it));
+      if(last_joint.mimicked_joint_index == i)
+      {
+        throw std::invalid_argument("Joint '" + joint_info.name + "' cannot mimic itself");
+      }
       auto param_it                = joint_info.parameters.find("multiplier");
       if (param_it != joint_info.parameters.end())
       {
@@ -319,8 +594,6 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
         {
           last_joint.initial_effort                         = initial_effort;
           last_joint.effort                                 = initial_effort;
-          int joint_data_id_in_qvel                         = impl_->model_->jnt_dofadr[joint_id];
-          impl_->data_->qfrc_applied[joint_data_id_in_qvel] = initial_effort;
         }
       }
     }
@@ -410,6 +683,10 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
       if (cmd_if.name.find("_pid") != std::string::npos)
       {
         last_joint.is_pid_enabled = true;
+        last_joint.position_pid_enabled |=
+            cmd_if.name.find(hardware_interface::HW_IF_POSITION) != std::string::npos;
+        last_joint.velocity_pid_enabled |=
+            cmd_if.name.find(hardware_interface::HW_IF_VELOCITY) != std::string::npos;
       }
     }
 
@@ -420,77 +697,158 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
       last_joint.velocity_pid = get_pid_gains(joint_info, hardware_interface::HW_IF_VELOCITY);
     }
 
-    // Map MuJoCo actuators to this joint's command interfaces
+    // Map MuJoCo actuators to this joint's command interfaces.
     {
-      for (int idx = 0; idx < static_cast<int>(m->nu); ++idx)
+      const auto resolve_explicit_actuator =
+          [this, m, joint_id, &joint_info](
+              const char *parameter, bool required) -> std::optional<int>
       {
-        // Only actuators that target this joint
-        if (m->actuator_trnid[2 * idx] != joint_id)
+        const auto parameter_it = joint_info.parameters.find(parameter);
+        if(parameter_it == joint_info.parameters.end() || parameter_it->second.empty())
+        {
+          if(required)
+          {
+            RCLCPP_WARN(
+                node_->get_logger(),
+                "Joint '%s' has no '%s' parameter; using legacy actuator inference",
+                joint_info.name.c_str(), parameter);
+          }
+          return std::nullopt;
+        }
+
+        const int actuator_id =
+            mj_name2id(m, mjOBJ_ACTUATOR, parameter_it->second.c_str());
+        if(actuator_id < 0)
+        {
+          throw std::invalid_argument(
+              "Joint '" + joint_info.name + "' maps '" + parameter + "' to unknown actuator '"
+              + parameter_it->second + "'");
+        }
+        if(m->actuator_trntype[actuator_id] != mjTRN_JOINT
+           || m->actuator_trnid[2 * actuator_id] != joint_id)
+        {
+          throw std::invalid_argument(
+              "Actuator '" + parameter_it->second + "' mapped by joint '" + joint_info.name
+              + "' does not transmit to that joint");
+        }
+        return actuator_id;
+      };
+
+      const auto position_id =
+          resolve_explicit_actuator("position_actuator", last_joint.has_position_cmd);
+      const auto velocity_id =
+          resolve_explicit_actuator("velocity_actuator", last_joint.has_velocity_cmd);
+      const auto effort_id =
+          resolve_explicit_actuator("effort_actuator", last_joint.has_effort_cmd);
+
+      if(position_id)
+      {
+        last_joint.position_actuator_id = static_cast<std::size_t>(*position_id);
+      }
+      if(velocity_id)
+      {
+        last_joint.velocity_actuator_id = static_cast<std::size_t>(*velocity_id);
+      }
+      if(effort_id)
+      {
+        last_joint.effort_actuator_id = static_cast<std::size_t>(*effort_id);
+      }
+
+      for(int idx = 0; idx < static_cast<int>(m->nu); ++idx)
+      {
+        if(m->actuator_trntype[idx] != mjTRN_JOINT
+           || m->actuator_trnid[2 * idx] != joint_id)
         {
           continue;
         }
 
-        const int         dyn_type  = m->actuator_dyntype[idx];
-        const int         gain_type = m->actuator_gaintype[idx];
-        const int         bias_type = m->actuator_biastype[idx];
-        const char       *aname     = mj_id2name(m, mjOBJ_ACTUATOR, idx);
-        const std::string an        = aname ? std::string(aname) : std::string();
-        RCLCPP_INFO(node_->get_logger(), "Actuator %d: name='%s' dyn=%d gain=%d bias=%d trn=%d\n", idx, aname ? aname : "unnamed", dyn_type, gain_type, bias_type, m->actuator_trnid[2 * idx]);
-
-        // Heuristics:
-        // - Firstly, look for name hints _position/_velocity
-        // - position servos: dyntype (none | filterexact), gaintype (fixed), biastype (affine)
-        // - velocity servos: dyntype (none), gaintype (fixed), biastype (none)
-        
-        bool looks_position = (an.find("position") != std::string::npos);
-        bool looks_velocity = (an.find("velocity") != std::string::npos);
-
-        if (!looks_velocity)
+        const char *actuator_name = mj_id2name(m, mjOBJ_ACTUATOR, idx);
+        const std::string name = actuator_name ? actuator_name : "";
+        bool looks_position = name.find("position") != std::string::npos;
+        bool looks_velocity = name.find("velocity") != std::string::npos;
+        if(!looks_velocity)
         {
-          looks_position |= (dyn_type == mjDYN_NONE || dyn_type == mjDYN_FILTEREXACT) && (gain_type == mjGAIN_FIXED) && (bias_type == mjBIAS_AFFINE);
+          looks_position |=
+              (m->actuator_dyntype[idx] == mjDYN_NONE
+               || m->actuator_dyntype[idx] == mjDYN_FILTEREXACT)
+              && m->actuator_gaintype[idx] == mjGAIN_FIXED
+              && m->actuator_biastype[idx] == mjBIAS_AFFINE;
         }
-        
-        if (!looks_position)
+        if(!looks_position)
         {
-          looks_velocity |= (dyn_type == mjDYN_NONE) && (gain_type  == mjGAIN_FIXED) && (bias_type == mjBIAS_AFFINE);
+          looks_velocity |=
+              m->actuator_dyntype[idx] == mjDYN_NONE
+              && m->actuator_gaintype[idx] == mjGAIN_FIXED
+              && m->actuator_biastype[idx] == mjBIAS_AFFINE;
         }
-          
-        if (looks_position && last_joint.position_actuator_id == static_cast<std::size_t>(-1))
+
+        if(last_joint.has_position_cmd && !position_id && looks_position
+           && last_joint.position_actuator_id == static_cast<std::size_t>(-1))
         {
           last_joint.position_actuator_id = static_cast<std::size_t>(idx);
-          if (!std::isnan(initial_position) && last_joint.has_position_cmd)
-          {
-            impl_->data_->ctrl[last_joint.position_actuator_id] = initial_position;
-          }
           continue;
         }
-
-        if (looks_velocity && last_joint.velocity_actuator_id == static_cast<std::size_t>(-1))
+        if(last_joint.has_velocity_cmd && !velocity_id && looks_velocity
+           && last_joint.velocity_actuator_id == static_cast<std::size_t>(-1))
         {
           last_joint.velocity_actuator_id = static_cast<std::size_t>(idx);
-          if (!std::isnan(initial_velocity) && last_joint.has_velocity_cmd)
-          {
-            impl_->data_->ctrl[last_joint.velocity_actuator_id] = initial_velocity;
-          }
           continue;
         }
-
-        // Fallback: if effort command requested but not mapped yet, bind first remaining actuator
-        if (last_joint.has_effort_cmd
-            && last_joint.effort_actuator_id == static_cast<std::size_t>(-1))
+        if(last_joint.has_effort_cmd && !effort_id && !looks_position && !looks_velocity
+           && last_joint.effort_actuator_id == static_cast<std::size_t>(-1))
         {
           last_joint.effort_actuator_id = static_cast<std::size_t>(idx);
-          if (!std::isnan(initial_effort))
-          {
-            impl_->data_->ctrl[last_joint.effort_actuator_id] = initial_effort;
-          }
         }
       }
 
-      RCLCPP_INFO(node_->get_logger(), "Joint '%s' actuators: pos=%ld vel=%ld eff=%ld",
-                  last_joint.name.c_str(), static_cast<long>(last_joint.position_actuator_id),
-                  static_cast<long>(last_joint.velocity_actuator_id),
-                  static_cast<long>(last_joint.effort_actuator_id));
+      const auto register_mapping =
+          [this, &last_joint](
+              bool has_command, std::size_t actuator_id, const char *interface,
+              double initial_value)
+      {
+        if(!has_command)
+        {
+          return;
+        }
+        if(actuator_id == static_cast<std::size_t>(-1))
+        {
+          throw std::invalid_argument(
+              "Joint '" + last_joint.name + "' has a '" + interface
+              + "' command interface but no matching MuJoCo actuator");
+        }
+        if(!impl_->commanded_actuators_.insert(static_cast<int>(actuator_id)).second)
+        {
+          const char *actuator_name =
+              mj_id2name(impl_->model_, mjOBJ_ACTUATOR, static_cast<int>(actuator_id));
+          throw std::invalid_argument(
+              "MuJoCo actuator '" + std::string(actuator_name ? actuator_name : "unnamed")
+              + "' has more than one command owner");
+        }
+        impl_->data_->ctrl[actuator_id] = initial_value;
+      };
+
+      register_mapping(
+          last_joint.has_position_cmd, last_joint.position_actuator_id, "position",
+          last_joint.position_pid_enabled ? 0.0 : last_joint.position_cmd);
+      register_mapping(
+          last_joint.has_velocity_cmd, last_joint.velocity_actuator_id, "velocity",
+          last_joint.velocity_pid_enabled ? 0.0 : last_joint.velocity_cmd);
+      register_mapping(
+          last_joint.has_effort_cmd, last_joint.effort_actuator_id, "effort",
+          last_joint.effort_cmd);
+
+      if(last_joint.has_position_cmd)
+      {
+        last_joint.active_command_mode = Joint::CommandMode::POSITION;
+      }
+      else if(last_joint.has_velocity_cmd)
+      {
+        last_joint.active_command_mode = Joint::CommandMode::VELOCITY;
+      }
+      else if(last_joint.has_effort_cmd)
+      {
+        last_joint.active_command_mode = Joint::CommandMode::EFFORT;
+      }
     }
 
     RCLCPP_INFO(node_->get_logger(), "Registered joint '%s' id %d\n", joint_info.name.c_str(),
@@ -498,9 +856,282 @@ void MujocoSystem::register_joints(const hardware_interface::HardwareInfo &hardw
   }
 }
 
+void MujocoSystem::register_sensors(const hardware_interface::HardwareInfo & hardware_info)
+{
+  struct ProfileEntry
+  {
+    const char * interface;
+    const char * parameter;
+    std::size_t index;
+    int dimension;
+    int sensor_type;
+  };
+
+  const std::unordered_map<std::string, std::vector<ProfileEntry>> profiles = {
+      {"imu",
+       {{"orientation.x", "orientation_sensor", 1, 4, mjSENS_FRAMEQUAT},
+        {"orientation.y", "orientation_sensor", 2, 4, mjSENS_FRAMEQUAT},
+        {"orientation.z", "orientation_sensor", 3, 4, mjSENS_FRAMEQUAT},
+        {"orientation.w", "orientation_sensor", 0, 4, mjSENS_FRAMEQUAT},
+        {"angular_velocity.x", "angular_velocity_sensor", 0, 3, mjSENS_GYRO},
+        {"angular_velocity.y", "angular_velocity_sensor", 1, 3, mjSENS_GYRO},
+        {"angular_velocity.z", "angular_velocity_sensor", 2, 3, mjSENS_GYRO},
+        {"linear_acceleration.x", "linear_acceleration_sensor", 0, 3, mjSENS_ACCELEROMETER},
+        {"linear_acceleration.y", "linear_acceleration_sensor", 1, 3, mjSENS_ACCELEROMETER},
+        {"linear_acceleration.z", "linear_acceleration_sensor", 2, 3, mjSENS_ACCELEROMETER}}},
+      {"force_torque",
+       {{"force.x", "force_sensor", 0, 3, mjSENS_FORCE},
+        {"force.y", "force_sensor", 1, 3, mjSENS_FORCE},
+        {"force.z", "force_sensor", 2, 3, mjSENS_FORCE},
+        {"torque.x", "torque_sensor", 0, 3, mjSENS_TORQUE},
+        {"torque.y", "torque_sensor", 1, 3, mjSENS_TORQUE},
+        {"torque.z", "torque_sensor", 2, 3, mjSENS_TORQUE}}},
+      {"range", {{"range", "range_sensor", 0, 1, -1}}},
+      {"pose",
+       {{"position.x", "position_sensor", 0, 3, mjSENS_FRAMEPOS},
+        {"position.y", "position_sensor", 1, 3, mjSENS_FRAMEPOS},
+        {"position.z", "position_sensor", 2, 3, mjSENS_FRAMEPOS},
+        {"orientation.x", "orientation_sensor", 1, 4, mjSENS_FRAMEQUAT},
+        {"orientation.y", "orientation_sensor", 2, 4, mjSENS_FRAMEQUAT},
+        {"orientation.z", "orientation_sensor", 3, 4, mjSENS_FRAMEQUAT},
+        {"orientation.w", "orientation_sensor", 0, 4, mjSENS_FRAMEQUAT}}}};
+
+  for(const auto & component : hardware_info.sensors)
+  {
+    const std::string profile = required_parameter(component, "profile");
+    std::unordered_map<std::string, SensorSource> mappings;
+
+    if(profile == "generic")
+    {
+      for(const auto & interface : component.state_interfaces)
+      {
+        const std::string key = "state." + interface.name;
+        mappings.emplace(
+            interface.name,
+            parse_sensor_source(required_parameter(component, key),
+                                "Sensor interface '" + component.name + "/" + interface.name + "'"));
+      }
+    }
+    else
+    {
+      const auto profile_it = profiles.find(profile);
+      if(profile_it == profiles.end())
+      {
+        throw std::invalid_argument(
+            "Sensor '" + component.name + "' has unsupported profile '" + profile + "'");
+      }
+
+      std::unordered_set<std::string> configured_interfaces;
+      for(const auto & interface : component.state_interfaces)
+      {
+        if(!configured_interfaces.insert(interface.name).second)
+        {
+          throw std::invalid_argument(
+              "Sensor '" + component.name + "' declares duplicate interface '" + interface.name + "'");
+        }
+      }
+      if(configured_interfaces.size() != profile_it->second.size())
+      {
+        throw std::invalid_argument(
+            "Sensor '" + component.name + "' profile '" + profile
+            + "' requires exactly " + std::to_string(profile_it->second.size())
+            + " state interfaces");
+      }
+
+      std::unordered_map<std::string, MujocoRosUtils::MujocoSensorBinding> sources;
+      for(const auto & entry : profile_it->second)
+      {
+        if(configured_interfaces.count(entry.interface) == 0)
+        {
+          throw std::invalid_argument(
+              "Sensor '" + component.name + "' profile '" + profile
+              + "' requires state interface '" + entry.interface + "'");
+        }
+        auto source_it = sources.find(entry.parameter);
+        if(source_it == sources.end())
+        {
+          const std::string sensor_name = required_parameter(component, entry.parameter);
+          source_it = sources.emplace(
+              entry.parameter,
+              MujocoRosUtils::MujocoSensorBinding(impl_->model_, sensor_name)).first;
+        }
+        if(source_it->second.dimension() != entry.dimension)
+        {
+          throw std::invalid_argument(
+              "MuJoCo sensor '" + source_it->second.name() + "' for '" + component.name
+              + "' must have dimension " + std::to_string(entry.dimension));
+        }
+        if(entry.sensor_type >= 0 && source_it->second.type() != entry.sensor_type)
+        {
+          throw std::invalid_argument(
+              "MuJoCo sensor '" + source_it->second.name() + "' has the wrong type for '"
+              + component.name + "/" + entry.interface + "'");
+        }
+        mappings.emplace(
+            entry.interface, SensorSource{source_it->second.name(), entry.index});
+      }
+    }
+
+    std::unordered_set<std::string> destinations;
+    for(const auto & interface : component.state_interfaces)
+    {
+      validate_double_interface(interface, component.name);
+      if(!destinations.insert(interface.name).second)
+      {
+        throw std::invalid_argument(
+            "Sensor '" + component.name + "' declares duplicate interface '" + interface.name + "'");
+      }
+      const auto mapping_it = mappings.find(interface.name);
+      if(mapping_it == mappings.end())
+      {
+        throw std::invalid_argument(
+            "Sensor interface '" + component.name + "/" + interface.name + "' has no mapping");
+      }
+
+      ScalarState state;
+      state.component = component.name;
+      state.interface = interface.name;
+      state.sensor = MujocoRosUtils::MujocoSensorBinding(impl_->model_, mapping_it->second.name);
+      state.sensor_index = mapping_it->second.index;
+      if(state.sensor_index >= static_cast<std::size_t>(state.sensor.dimension()))
+      {
+        throw std::invalid_argument(
+            "Sensor interface '" + component.name + "/" + interface.name
+            + "' references element " + std::to_string(state.sensor_index)
+            + " of dimension " + std::to_string(state.sensor.dimension()));
+      }
+      state.scale = parse_optional_number(
+          component.parameters, "scale." + interface.name, 1.0, component.name);
+      state.offset = parse_optional_number(
+          component.parameters, "offset." + interface.name, 0.0, component.name);
+      state.initial_value = interface_initial_value(interface, component.name);
+      state.value = state.initial_value;
+      impl_->scalar_states_.push_back(std::move(state));
+      auto & stored = impl_->scalar_states_.back();
+      impl_->state_interfaces_.emplace_back(
+          stored.component, stored.interface, &stored.value);
+    }
+  }
+}
+
+void MujocoSystem::register_gpios(const hardware_interface::HardwareInfo & hardware_info)
+{
+  for(const auto & component : hardware_info.gpios)
+  {
+    std::unordered_set<std::string> state_destinations;
+    for(const auto & interface : component.state_interfaces)
+    {
+      validate_double_interface(interface, component.name);
+      if(!state_destinations.insert(interface.name).second)
+      {
+        throw std::invalid_argument(
+            "GPIO '" + component.name + "' declares duplicate state interface '" + interface.name + "'");
+      }
+
+      const std::string key = "state." + interface.name;
+      const std::string expression = required_parameter(component, key);
+      ScalarState state;
+      state.component = component.name;
+      state.interface = interface.name;
+      if(expression.rfind("mujoco_sensor:", 0) == 0)
+      {
+        const SensorSource source = parse_sensor_source(
+            expression, "GPIO state interface '" + component.name + "/" + interface.name + "'");
+        state.source = ScalarStateSource::SENSOR;
+        state.sensor = MujocoRosUtils::MujocoSensorBinding(impl_->model_, source.name);
+        state.sensor_index = source.index;
+        if(state.sensor_index >= static_cast<std::size_t>(state.sensor.dimension()))
+        {
+          throw std::invalid_argument(
+              "GPIO state interface '" + component.name + "/" + interface.name
+              + "' references element " + std::to_string(state.sensor_index)
+              + " of dimension " + std::to_string(state.sensor.dimension()));
+        }
+      }
+      else
+      {
+        state.source = ScalarStateSource::ACTUATOR_CONTROL;
+        state.actuator = MujocoRosUtils::MujocoActuatorBinding(
+            impl_->model_,
+            parse_actuator_source(
+                expression,
+                "GPIO state interface '" + component.name + "/" + interface.name + "'"));
+      }
+      state.scale = parse_optional_number(
+          component.parameters, "scale." + interface.name, 1.0, component.name);
+      state.offset = parse_optional_number(
+          component.parameters, "offset." + interface.name, 0.0, component.name);
+      state.initial_value = interface_initial_value(interface, component.name);
+      state.value = state.initial_value;
+      impl_->scalar_states_.push_back(std::move(state));
+      auto & stored = impl_->scalar_states_.back();
+      impl_->state_interfaces_.emplace_back(
+          stored.component, stored.interface, &stored.value);
+    }
+
+    std::unordered_set<std::string> command_destinations;
+    for(const auto & interface : component.command_interfaces)
+    {
+      validate_double_interface(interface, component.name);
+      if(!command_destinations.insert(interface.name).second)
+      {
+        throw std::invalid_argument(
+            "GPIO '" + component.name + "' declares duplicate command interface '"
+            + interface.name + "'");
+      }
+
+      ScalarCommand command;
+      command.component = component.name;
+      command.interface = interface.name;
+      command.actuator = MujocoRosUtils::MujocoActuatorBinding(
+          impl_->model_,
+          parse_actuator_source(
+              required_parameter(component, "command." + interface.name),
+              "GPIO command interface '" + component.name + "/" + interface.name + "'"));
+      if(!impl_->commanded_actuators_.insert(command.actuator.id()).second)
+      {
+        throw std::invalid_argument(
+            "MuJoCo actuator '" + command.actuator.name()
+            + "' has more than one command owner");
+      }
+      command.minimum = interface.min.empty()
+                          ? std::numeric_limits<double>::lowest()
+                          : parse_number(
+                              interface.min,
+                              "minimum for '" + component.name + "/" + interface.name + "'");
+      command.maximum = interface.max.empty()
+                          ? std::numeric_limits<double>::max()
+                          : parse_number(
+                              interface.max,
+                              "maximum for '" + component.name + "/" + interface.name + "'");
+      if(command.minimum > command.maximum)
+      {
+        throw std::invalid_argument(
+            "GPIO command interface '" + component.name + "/" + interface.name
+            + "' has minimum greater than maximum");
+      }
+      command.initial_value = interface_initial_value(interface, component.name);
+      const double validated_initial = command.actuator.clamp(
+          command.initial_value, command.minimum, command.maximum);
+      if(validated_initial != command.initial_value)
+      {
+        throw std::invalid_argument(
+            "Initial value for GPIO command interface '" + component.name + "/"
+            + interface.name + "' is outside its command range");
+      }
+      command.value = command.initial_value;
+      impl_->scalar_commands_.push_back(std::move(command));
+      auto & stored = impl_->scalar_commands_.back();
+      impl_->command_interfaces_.emplace_back(
+          stored.component, stored.interface, &stored.value);
+    }
+  }
+}
+
 CallbackReturn MujocoSystem::on_activate(const State &previous_state)
 {
-  // Activate the hardware power
+  impl_->lifecycle_state_known_ = true;
+  impl_->active_ = true;
   RCLCPP_INFO(node_->get_logger(), "Activating 'MujocoSystem' from previous state: %s\n",
               previous_state.label().c_str());
   return CallbackReturn::SUCCESS;
@@ -508,13 +1139,16 @@ CallbackReturn MujocoSystem::on_activate(const State &previous_state)
 
 CallbackReturn MujocoSystem::on_deactivate(const State &previous_state)
 {
-  // Turn off the hardware power
+  impl_->lifecycle_state_known_ = true;
+  impl_->active_ = false;
   RCLCPP_INFO(node_->get_logger(), "Deactivating 'MujocoSystem' from previous state: %s\n",
               previous_state.label().c_str());
   return CallbackReturn::SUCCESS;
 }
 
-CallbackReturn MujocoSystem::on_init(const hardware_interface::HardwareComponentInterfaceParams &params)
+#if MUJOCO_ROS_UTILS_HAS_HARDWARE_COMPONENT_INTERFACE_PARAMS
+CallbackReturn MujocoSystem::on_init(
+    const hardware_interface::HardwareComponentInterfaceParams & params)
 {
   if (hardware_interface::SystemInterface::on_init(params) != CallbackReturn::SUCCESS)
   {
@@ -522,6 +1156,16 @@ CallbackReturn MujocoSystem::on_init(const hardware_interface::HardwareComponent
   }
   return CallbackReturn::SUCCESS;
 }
+#else
+CallbackReturn MujocoSystem::on_init(const hardware_interface::HardwareInfo & hardware_info)
+{
+  if(hardware_interface::SystemInterface::on_init(hardware_info) != CallbackReturn::SUCCESS)
+  {
+    return CallbackReturn::ERROR;
+  }
+  return CallbackReturn::SUCCESS;
+}
+#endif
 
 std::vector<StateInterface> MujocoSystem::export_state_interfaces()
 {
@@ -537,8 +1181,159 @@ std::vector<CommandInterface> MujocoSystem::export_command_interfaces()
   return std::move(impl_->command_interfaces_);
 }
 
+namespace
+{
+
+std::optional<Joint::CommandMode> command_mode_for_interface(const std::string &interface)
+{
+  if(interface == hardware_interface::HW_IF_POSITION || interface == "position_pid")
+  {
+    return Joint::CommandMode::POSITION;
+  }
+  if(interface == hardware_interface::HW_IF_VELOCITY || interface == "velocity_pid")
+  {
+    return Joint::CommandMode::VELOCITY;
+  }
+  if(interface == hardware_interface::HW_IF_EFFORT)
+  {
+    return Joint::CommandMode::EFFORT;
+  }
+  return std::nullopt;
+}
+
+bool joint_supports_mode(const Joint &joint, Joint::CommandMode mode)
+{
+  switch(mode)
+  {
+    case Joint::CommandMode::POSITION:
+      return joint.has_position_cmd;
+    case Joint::CommandMode::VELOCITY:
+      return joint.has_velocity_cmd;
+    case Joint::CommandMode::EFFORT:
+      return joint.has_effort_cmd;
+    case Joint::CommandMode::NONE:
+      return true;
+  }
+  return false;
+}
+
+} // namespace
+
+return_type MujocoSystem::prepare_command_mode_switch(
+    const std::vector<std::string> &start_interfaces,
+    const std::vector<std::string> &stop_interfaces)
+{
+  std::vector<Joint::CommandMode> proposed_modes;
+  proposed_modes.reserve(impl_->joints_.size());
+  for(const auto &joint : impl_->joints_)
+  {
+    proposed_modes.push_back(joint.active_command_mode);
+  }
+
+  const auto apply_interfaces =
+      [this, &proposed_modes](
+          const std::vector<std::string> &interfaces, bool starting) -> bool
+  {
+    for(const auto &key : interfaces)
+    {
+      const std::size_t separator = key.rfind('/');
+      if(separator == std::string::npos)
+      {
+        continue;
+      }
+      const std::string joint_name = key.substr(0, separator);
+      const auto joint_it = std::find_if(
+          impl_->joints_.begin(), impl_->joints_.end(),
+          [&joint_name](const Joint &joint) { return joint.name == joint_name; });
+      if(joint_it == impl_->joints_.end())
+      {
+        continue;
+      }
+
+      const auto requested_mode = command_mode_for_interface(key.substr(separator + 1));
+      if(!requested_mode || !joint_supports_mode(*joint_it, *requested_mode))
+      {
+        RCLCPP_ERROR(node_->get_logger(), "Unsupported command interface '%s'", key.c_str());
+        return false;
+      }
+
+      const std::size_t joint_index =
+          static_cast<std::size_t>(std::distance(impl_->joints_.begin(), joint_it));
+      auto &proposed_mode = proposed_modes[joint_index];
+      if(starting)
+      {
+        if(proposed_mode != Joint::CommandMode::NONE && proposed_mode != *requested_mode)
+        {
+          RCLCPP_ERROR(
+              node_->get_logger(), "Joint '%s' cannot activate multiple command modes",
+              joint_name.c_str());
+          return false;
+        }
+        proposed_mode = *requested_mode;
+      }
+      else if(proposed_mode == *requested_mode)
+      {
+        proposed_mode = Joint::CommandMode::NONE;
+      }
+    }
+    return true;
+  };
+
+  if(!apply_interfaces(stop_interfaces, false) || !apply_interfaces(start_interfaces, true))
+  {
+    impl_->pending_command_modes_.reset();
+    return return_type::ERROR;
+  }
+
+  impl_->pending_command_modes_ = std::move(proposed_modes);
+  return return_type::OK;
+}
+
+return_type MujocoSystem::perform_command_mode_switch(
+    const std::vector<std::string> &start_interfaces,
+    const std::vector<std::string> &stop_interfaces)
+{
+  if(!impl_->pending_command_modes_
+     && prepare_command_mode_switch(start_interfaces, stop_interfaces) != return_type::OK)
+  {
+    return return_type::ERROR;
+  }
+
+  for(std::size_t index = 0; index < impl_->joints_.size(); ++index)
+  {
+    auto &joint = impl_->joints_[index];
+    const auto next_mode = (*impl_->pending_command_modes_)[index];
+    if(next_mode == joint.active_command_mode)
+    {
+      continue;
+    }
+    joint.active_command_mode = next_mode;
+    switch(next_mode)
+    {
+      case Joint::CommandMode::POSITION:
+        joint.position_cmd = joint.position;
+        break;
+      case Joint::CommandMode::VELOCITY:
+        joint.velocity_cmd = joint.velocity;
+        break;
+      case Joint::CommandMode::EFFORT:
+        joint.effort_cmd = 0.0;
+        break;
+      case Joint::CommandMode::NONE:
+        break;
+    }
+    joint.position_pid.reset();
+    joint.velocity_pid.reset();
+  }
+  impl_->pending_command_modes_.reset();
+  return return_type::OK;
+}
+
 return_type MujocoSystem::read(const rclcpp::Time &time, const rclcpp::Duration &period)
 {
+  const auto started = impl_->diagnostics_enabled_
+                         ? std::chrono::steady_clock::now()
+                         : std::chrono::steady_clock::time_point{};
   for (unsigned int i = 0; i < impl_->joints_.size(); ++i)
   {
     auto &joint = impl_->joints_[i];
@@ -550,18 +1345,108 @@ return_type MujocoSystem::read(const rclcpp::Time &time, const rclcpp::Duration 
     joint.position            = impl_->data_->qpos[joint_data_id_in_qpos];
     int joint_data_id_in_qvel = impl_->model_->jnt_dofadr[joint.id];
     joint.velocity            = impl_->data_->qvel[joint_data_id_in_qvel];
-    joint.effort              = impl_->data_->qfrc_applied[joint_data_id_in_qvel];
+    joint.effort              = impl_->data_->qfrc_actuator[joint_data_id_in_qvel];
+  }
+  for(auto & state : impl_->scalar_states_)
+  {
+    state.update(impl_->data_);
+  }
+  ++impl_->read_count_;
+  if(impl_->diagnostics_enabled_)
+  {
+    const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - started);
+    const auto duration_ns = static_cast<std::uint64_t>(duration.count());
+    impl_->last_read_duration_ns_ = duration_ns;
+    auto maximum = impl_->max_read_duration_ns_.load();
+    while(maximum < duration_ns
+          && !impl_->max_read_duration_ns_.compare_exchange_weak(maximum, duration_ns))
+    {
+    }
+    if(period.nanoseconds() > 0
+       && duration_ns > static_cast<std::uint64_t>(period.nanoseconds()))
+    {
+      ++impl_->missed_period_count_;
+    }
   }
   return return_type::OK;
 }
 
 return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration &period)
 {
+  const auto started = impl_->diagnostics_enabled_
+                         ? std::chrono::steady_clock::now()
+                         : std::chrono::steady_clock::time_point{};
+  const auto finish_diagnostics = [this, &period, started]()
+  {
+    ++impl_->write_count_;
+    if(!impl_->diagnostics_enabled_)
+    {
+      return;
+    }
+    const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - started);
+    const auto duration_ns = static_cast<std::uint64_t>(duration.count());
+    impl_->last_write_duration_ns_ = duration_ns;
+    auto maximum = impl_->max_write_duration_ns_.load();
+    while(maximum < duration_ns
+          && !impl_->max_write_duration_ns_.compare_exchange_weak(maximum, duration_ns))
+    {
+    }
+    if(period.nanoseconds() > 0
+       && duration_ns > static_cast<std::uint64_t>(period.nanoseconds()))
+    {
+      ++impl_->missed_period_count_;
+    }
+  };
 
   // * If sim is reset
   if (period.seconds() <= 0)
   {
     reset();
+    finish_diagnostics();
+    return return_type::OK;
+  }
+
+  if(impl_->lifecycle_state_known_ && !impl_->active_)
+  {
+    finish_diagnostics();
+    return return_type::OK;
+  }
+
+  const auto valid_command = [this](double value, const std::string & name)
+  {
+    if(std::isfinite(value))
+    {
+      return true;
+    }
+    ++impl_->invalid_command_count_;
+    RCLCPP_ERROR(node_->get_logger(), "Command '%s' is not finite", name.c_str());
+    return false;
+  };
+  for(const auto & command : impl_->scalar_commands_)
+  {
+    if(!valid_command(command.value, command.component + "/" + command.interface))
+    {
+      finish_diagnostics();
+      return return_type::ERROR;
+    }
+  }
+  for(const auto & joint : impl_->joints_)
+  {
+    const bool valid =
+        joint.active_command_mode == Joint::CommandMode::NONE
+        || (joint.active_command_mode == Joint::CommandMode::POSITION
+            && valid_command(joint.position_cmd, joint.name + "/position"))
+        || (joint.active_command_mode == Joint::CommandMode::VELOCITY
+            && valid_command(joint.velocity_cmd, joint.name + "/velocity"))
+        || (joint.active_command_mode == Joint::CommandMode::EFFORT
+            && valid_command(joint.effort_cmd, joint.name + "/effort"));
+    if(!valid)
+    {
+      finish_diagnostics();
+      return return_type::ERROR;
+    }
   }
 
   // * Update mimic joints command
@@ -570,10 +1455,29 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
     auto &joint = impl_->joints_[i];
     if (joint.is_mimic)
     {
-      joint.position_cmd = joint.multiplier * impl_->joints_[joint.mimicked_joint_id].position_cmd;
-      joint.velocity_cmd = joint.multiplier * impl_->joints_[joint.mimicked_joint_id].velocity_cmd;
-      joint.effort_cmd = joint.multiplier * impl_->joints_[joint.mimicked_joint_id].effort_cmd;
+      joint.position_cmd =
+          joint.multiplier * impl_->joints_[joint.mimicked_joint_index].position_cmd;
+      joint.velocity_cmd =
+          joint.multiplier * impl_->joints_[joint.mimicked_joint_index].velocity_cmd;
+      joint.effort_cmd =
+          joint.multiplier * impl_->joints_[joint.mimicked_joint_index].effort_cmd;
     }
+  }
+
+  try
+  {
+    for(const auto & command : impl_->scalar_commands_)
+    {
+      command.actuator.write(
+          impl_->data_, command.value, command.minimum, command.maximum);
+    }
+  }
+  catch(const std::exception & e)
+  {
+    RCLCPP_ERROR(node_->get_logger(), "Failed to write GPIO command: %s", e.what());
+    ++impl_->invalid_command_count_;
+    finish_diagnostics();
+    return return_type::ERROR;
   }
 
   // * Update joints command
@@ -591,10 +1495,6 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
     if (joint.is_mimic)
     {
       // Control mimicking joint follows mimicked joint's position with the multiplier
-      // impl_->data_->qpos[joint.id]
-      //   = joint.multiplier * impl_->data_->qpos[joint.mimicked_joint_id];
-      // impl_->data_->ctrl[joint.actuator_id]
-      //   = joint.multiplier * impl_->data_->qpos[joint.mimicked_joint_id];
       continue; // logic of mimic joints is already in the MimicJoint plugin
     }
     else
@@ -602,12 +1502,13 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
       int joint_data_id_in_qpos = impl_->model_->jnt_qposadr[joint.id];
       int joint_data_id_in_qvel = impl_->model_->jnt_dofadr[joint.id];
 
-      // Support multiple controllers per joint: write all available commands
-      if (joint.has_position_cmd && joint.position_actuator_id != static_cast<std::size_t>(-1))
+      if (joint.active_command_mode == Joint::CommandMode::POSITION
+          && joint.has_position_cmd
+          && joint.position_actuator_id != static_cast<std::size_t>(-1))
       {
         ss << "Joint '" << joint.name.c_str() << "' pos_cmd: " << joint.position_cmd << std::endl;
         
-        if (joint.is_pid_enabled)
+        if (joint.position_pid_enabled)
         {
           // Use PID control
           double error = joint.position_cmd - impl_->data_->qpos[joint_data_id_in_qpos];
@@ -619,17 +1520,27 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
           double max_eff = joint.joint_limits.has_effort_limits ? joint.joint_limits.max_effort : std::numeric_limits<double>::max();
           max_eff = std::min(max_eff, joint.max_effort_cmd);
           
-          impl_->data_->qfrc_applied[joint_data_id_in_qvel] = clamp(effort, min_eff, max_eff);
+          impl_->data_->ctrl[joint.position_actuator_id] = clamp(effort, min_eff, max_eff);
         }
         else
         {
           // Direct position control
-          impl_->data_->ctrl[joint.position_actuator_id] = joint.position_cmd;
+          double minimum = joint.min_position_cmd;
+          double maximum = joint.max_position_cmd;
+          if(joint.joint_limits.has_position_limits)
+          {
+            minimum = std::max(minimum, joint.joint_limits.min_position);
+            maximum = std::min(maximum, joint.joint_limits.max_position);
+          }
+          impl_->data_->ctrl[joint.position_actuator_id] =
+              clamp(joint.position_cmd, minimum, maximum);
         }
       }
-      if (joint.has_velocity_cmd && joint.velocity_actuator_id != static_cast<std::size_t>(-1))
+      if (joint.active_command_mode == Joint::CommandMode::VELOCITY
+          && joint.has_velocity_cmd
+          && joint.velocity_actuator_id != static_cast<std::size_t>(-1))
       {
-        if (joint.is_pid_enabled)
+        if (joint.velocity_pid_enabled)
         {
           // Use PID control
           double error = joint.velocity_cmd - impl_->data_->qvel[joint_data_id_in_qvel];
@@ -641,15 +1552,25 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
           double max_eff = joint.joint_limits.has_effort_limits ? joint.joint_limits.max_effort : std::numeric_limits<double>::max();
           max_eff = std::min(max_eff, joint.max_effort_cmd);
           
-          impl_->data_->qfrc_applied[joint_data_id_in_qvel] = clamp(effort, min_eff, max_eff);
+          impl_->data_->ctrl[joint.velocity_actuator_id] = clamp(effort, min_eff, max_eff);
         }
         else
         {
           // Direct velocity control
-          impl_->data_->ctrl[joint.velocity_actuator_id] = joint.velocity_cmd;
+          double minimum = joint.min_velocity_cmd;
+          double maximum = joint.max_velocity_cmd;
+          if(joint.joint_limits.has_velocity_limits)
+          {
+            minimum = std::max(minimum, -joint.joint_limits.max_velocity);
+            maximum = std::min(maximum, joint.joint_limits.max_velocity);
+          }
+          impl_->data_->ctrl[joint.velocity_actuator_id] =
+              clamp(joint.velocity_cmd, minimum, maximum);
         }
       }
-      if (joint.has_effort_cmd && joint.effort_actuator_id != static_cast<std::size_t>(-1))
+      if (joint.active_command_mode == Joint::CommandMode::EFFORT
+          && joint.has_effort_cmd
+          && joint.effort_actuator_id != static_cast<std::size_t>(-1))
       {
         // Apply effort limits
         double min_eff = joint.joint_limits.has_effort_limits ? -joint.joint_limits.max_effort : std::numeric_limits<double>::lowest();
@@ -667,14 +1588,28 @@ return_type MujocoSystem::write(const rclcpp::Time &time, const rclcpp::Duration
     joint_state_msg.header.stamp = time;
     impl_->joint_cmd_publisher_->publish(joint_state_msg);
   }
-  static rclcpp::Time previous_update_time{(uint64_t)0, RCL_ROS_TIME};
-
-  double update_freq   = 1 / (time - previous_update_time).seconds();
-  previous_update_time = time;
-
-  // RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, "Joint
-  // commands:\n%s\nUpdate frequency: %.4f", ss.str().c_str(), update_freq);
+  finish_diagnostics();
   return return_type::OK;
+}
+
+MujocoSystemDiagnostics MujocoSystem::diagnostics() const
+{
+  MujocoSystemDiagnostics result;
+  if(!impl_)
+  {
+    return result;
+  }
+  result.enabled = impl_->diagnostics_enabled_;
+  result.read_count = impl_->read_count_.load();
+  result.write_count = impl_->write_count_.load();
+  result.reset_count = impl_->reset_count_.load();
+  result.invalid_command_count = impl_->invalid_command_count_.load();
+  result.missed_period_count = impl_->missed_period_count_.load();
+  result.last_read_duration_ns = impl_->last_read_duration_ns_.load();
+  result.max_read_duration_ns = impl_->max_read_duration_ns_.load();
+  result.last_write_duration_ns = impl_->last_write_duration_ns_.load();
+  result.max_write_duration_ns = impl_->max_write_duration_ns_.load();
+  return result;
 }
 
 void MujocoSystem::get_joint_limits(urdf::JointConstSharedPtr urdf_joint, 

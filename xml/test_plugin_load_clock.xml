@@ -1,0 +1,12 @@
+<mujoco model="clock_plugin_load_test">
+  <extension>
+    <plugin plugin="MujocoRosUtils::ClockPublisher"/>
+  </extension>
+  <worldbody>
+    <plugin plugin="MujocoRosUtils::ClockPublisher">
+      <config key="topic_name" value="/plugin_load_test/clock"/>
+      <config key="publish_rate" value="10"/>
+      <config key="use_sim_time" value="true"/>
+    </plugin>
+  </worldbody>
+</mujoco>
