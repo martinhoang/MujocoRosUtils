@@ -316,7 +316,11 @@ SimRecorder::bagMsg(rclcpp::SerializedMessage & ser,
 
   auto bag = std::make_shared<rosbag2_storage::SerializedBagMessage>();
   bag->topic_name      = topic;
+#if IS_ROS_JAZZY_AND_ABOVE
   bag->send_timestamp      = static_cast<rcutils_time_point_value_t>(ts_ns);
+#else
+  bag->time_stamp          = static_cast<rcutils_time_point_value_t>(ts_ns);
+#endif
   bag->serialized_data = std::shared_ptr<rcutils_uint8_array_t>(arr,
       [](rcutils_uint8_array_t * p) {
         if (p->buffer && p->allocator.deallocate)

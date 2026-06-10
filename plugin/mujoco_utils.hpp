@@ -7,6 +7,9 @@
 #include <type_traits> // Required for std::is_arithmetic_v
 #include <vector>
 
+#define IS_ROS_JAZZY_AND_ABOVE (RCLCPP_VERSION_MAJOR >= 28)
+#define IS_ROS_HUMBLE (RCLCPP_VERSION_MAJOR == 16)
+
 // Define color codes
 #define RESET "\033[0m"
 #define RED "\033[31m"

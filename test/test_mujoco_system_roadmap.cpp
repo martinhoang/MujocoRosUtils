@@ -23,6 +23,13 @@ using hardware_interface::return_type;
 using mujoco_ros2_control::MujocoSystemInterface;
 using mujoco_ros_utils::test::MujocoModel;
 
+// set_value returns bool in Jazzy+ (RCLCPP >= 28) but void in Humble
+#if RCLCPP_VERSION_MAJOR >= 28
+#define EXPECT_SET_VALUE(cmd, val) ASSERT_TRUE((cmd)->set_value(val))
+#else
+#define EXPECT_SET_VALUE(cmd, val) (cmd)->set_value(val)
+#endif
+
 template<typename Interface>
 std::unordered_map<std::string, Interface *> by_name(std::vector<Interface> &interfaces)
 {
@@ -126,8 +133,8 @@ TEST_F(MujocoSystemRoadmapTest, WritesAndClampsGpioCommands)
   ASSERT_TRUE(initialize());
   auto command_interfaces = system_->export_command_interfaces();
   const auto commands = by_name(command_interfaces);
-  ASSERT_TRUE(commands.at("output_only/level")->set_value(2.0));
-  ASSERT_TRUE(commands.at("bidirectional/level")->set_value(-0.4));
+  EXPECT_SET_VALUE(commands.at("output_only/level"), 2.0);
+  EXPECT_SET_VALUE(commands.at("bidirectional/level"), -0.4);
 
   ASSERT_EQ(
     system_->write(rclcpp::Time(1, 0), rclcpp::Duration::from_seconds(0.001)),
@@ -144,8 +151,8 @@ TEST_F(MujocoSystemRoadmapTest, ResetClearsCommandsAndRestoresInitialValues)
   ASSERT_TRUE(initialize());
   auto command_interfaces = system_->export_command_interfaces();
   const auto commands = by_name(command_interfaces);
-  ASSERT_TRUE(commands.at("controlled_joint/position")->set_value(1.5));
-  ASSERT_TRUE(commands.at("output_only/level")->set_value(0.8));
+  EXPECT_SET_VALUE(commands.at("controlled_joint/position"), 1.5);
+  EXPECT_SET_VALUE(commands.at("output_only/level"), 0.8);
   ASSERT_EQ(
     system_->write(rclcpp::Time(1, 0), rclcpp::Duration::from_seconds(0.001)),
     return_type::OK);
@@ -189,8 +196,8 @@ TEST_F(MujocoSystemRoadmapTest, WritesOnlyTheActiveExplicitlyMappedActuator)
   ASSERT_GE(position_id, 0);
   ASSERT_GE(velocity_id, 0);
 
-  ASSERT_TRUE(commands.at("controlled_joint/position")->set_value(1.25));
-  ASSERT_TRUE(commands.at("controlled_joint/velocity")->set_value(2.0));
+  EXPECT_SET_VALUE(commands.at("controlled_joint/position"), 1.25);
+  EXPECT_SET_VALUE(commands.at("controlled_joint/velocity"), 2.0);
   ASSERT_EQ(
     system_->write(rclcpp::Time(1, 0), rclcpp::Duration::from_seconds(0.001)),
     return_type::OK);
@@ -201,7 +208,7 @@ TEST_F(MujocoSystemRoadmapTest, WritesOnlyTheActiveExplicitlyMappedActuator)
   const std::vector<std::string> stop = {"controlled_joint/position"};
   ASSERT_EQ(system_->prepare_command_mode_switch(start, stop), return_type::OK);
   ASSERT_EQ(system_->perform_command_mode_switch(start, stop), return_type::OK);
-  ASSERT_TRUE(commands.at("controlled_joint/velocity")->set_value(2.0));
+  EXPECT_SET_VALUE(commands.at("controlled_joint/velocity"), 2.0);
   ASSERT_EQ(
     system_->write(rclcpp::Time(2, 0), rclcpp::Duration::from_seconds(0.001)),
     return_type::OK);
@@ -222,7 +229,7 @@ TEST_F(MujocoSystemRoadmapTest, LifecycleAllowsReadsAndGatesWrites)
   ASSERT_GE(position_id, 0);
   ASSERT_GE(joint_id, 0);
 
-  ASSERT_TRUE(commands.at("controlled_joint/position")->set_value(1.0));
+  EXPECT_SET_VALUE(commands.at("controlled_joint/position"), 1.0);
   ASSERT_EQ(
     system_->on_deactivate(rclcpp_lifecycle::State(3, "active")),
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS);
@@ -278,8 +285,8 @@ TEST_F(MujocoSystemRoadmapTest, RejectsAndCountsNonFiniteCommands)
   ASSERT_TRUE(initialize());
   auto command_interfaces = system_->export_command_interfaces();
   const auto commands = by_name(command_interfaces);
-  ASSERT_TRUE(commands.at("controlled_joint/position")->set_value(
-      std::numeric_limits<double>::quiet_NaN()));
+  EXPECT_SET_VALUE(commands.at("controlled_joint/position"),
+      std::numeric_limits<double>::quiet_NaN());
 
   EXPECT_EQ(
     system_->write(rclcpp::Time(1, 0), rclcpp::Duration::from_seconds(0.001)),

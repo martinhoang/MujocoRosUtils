@@ -12,3 +12,7 @@ GTAGS
 plugin/lib
 
 MUJOCO_LOG.TXT
+
+log
+install
+build

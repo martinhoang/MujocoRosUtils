@@ -5,7 +5,11 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <hardware_interface/component_parser.hpp>
 #include <hardware_interface/resource_manager.hpp>
+#if IS_ROS_JAZZY_AND_ABOVE
 #include <hardware_interface/types/hardware_component_params.hpp>
+#else
+#include <hardware_interface/hardware_component_info.hpp>
+#endif
 #include <mujoco/mujoco.h>
 
 constexpr char ATTR_NODE_NAME[]        = "node_name";
@@ -17,6 +21,7 @@ constexpr char ATTR_NAMESPACE[]        = "namespace";
 
 using namespace std::chrono_literals;
 
+#if IS_ROS_JAZZY_AND_ABOVE
 // ResourceManager subclass that overrides load_and_initialize_components() so that
 // the ControllerManager's robot_description topic callback loads MuJoCo hardware
 // (with access to mjModel*/mjData*) instead of trying to instantiate it via pluginlib
@@ -105,6 +110,7 @@ private:
   std::shared_ptr<pluginlib::ClassLoader<mujoco_ros2_control::MujocoSystemInterface>>
     mujoco_system_loader_;
 };
+#endif  // IS_ROS_JAZZY_AND_ABOVE
 
 namespace MujocoRosUtils
 {
@@ -489,6 +495,7 @@ bool Ros2Control::initialize()
       }
     } // rcl_global_args_mutex_ released here
 
+#if IS_ROS_JAZZY_AND_ABOVE
     // MujocoResourceManager overrides load_and_initialize_components() so the
     // ControllerManager's /robot_description topic callback loads hardware with
     // MuJoCo model/data pointers. Hardware is NOT pre-loaded here — the CM
@@ -496,6 +503,63 @@ bool Ros2Control::initialize()
     // means robot_state_publisher's cached message is delivered immediately).
     auto resource_manager = std::make_unique<MujocoResourceManager>(
       node_, model_, data_, mujoco_system_loader_);
+#else
+    // Humble: ResourceManager constructor takes a URDF string, and load_urdf() is
+    // not virtual.  We must pre-load MuJoCo hardware into a default-constructed
+    // ResourceManager before passing it to the ControllerManager.
+    std::vector<hardware_interface::HardwareInfo> control_hardware_info;
+    try
+    {
+      control_hardware_info =
+        hardware_interface::parse_control_resources_from_urdf(urdf_string);
+    }
+    catch (const std::runtime_error & ex)
+    {
+      RCLCPP_ERROR(node_->get_logger(), "Failed to parse control hardware info: %s", ex.what());
+      return false;
+    }
+
+    RCLCPP_INFO(node_->get_logger(), "Got the control hardware info from URDF with length: %zu",
+                control_hardware_info.size());
+
+    auto resource_manager = std::make_unique<hardware_interface::ResourceManager>();
+    for (const auto & hardware_info : control_hardware_info)
+    {
+      RCLCPP_INFO(node_->get_logger(), "Hardware system: %s (class: %s)",
+                  hardware_info.name.c_str(), hardware_info.hardware_class_type.c_str());
+
+      std::unique_ptr<mujoco_ros2_control::MujocoSystemInterface> mujoco_system;
+      try
+      {
+        mujoco_system.reset(
+          mujoco_system_loader_->createUnmanagedInstance(hardware_info.hardware_class_type));
+      }
+      catch (pluginlib::PluginlibException & ex)
+      {
+        RCLCPP_ERROR(node_->get_logger(),
+                     "Failed to create MujocoSystem instance for '%s': %s",
+                     hardware_info.name.c_str(), ex.what());
+        return false;
+      }
+
+      if (!mujoco_system->initialize(node_, model_, data_, hardware_info))
+      {
+        RCLCPP_ERROR(node_->get_logger(), "Failed to initialize MujocoSystem for '%s'",
+                     hardware_info.name.c_str());
+        return false;
+      }
+      print_confirm("MujocoSystem initialized successfully for '%s'\n",
+                    hardware_info.name.c_str());
+
+      resource_manager->import_component(std::move(mujoco_system), hardware_info);
+    }
+
+    // Register URDF without loading components (already imported above).
+    // This sets is_urdf_loaded__ so the CM's robot_description callback won't
+    // re-process.  validate_interfaces=false avoids throwing on our custom
+    // hardware_class_type that the RM's own pluginlib loader doesn't know about.
+    resource_manager->load_urdf(urdf_string, false, false);
+#endif
 
     // Loading controller manager
     RCLCPP_INFO(node_->get_logger(), "Loading controller manager\n");
