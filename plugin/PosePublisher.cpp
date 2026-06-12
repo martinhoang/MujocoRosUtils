@@ -220,7 +220,10 @@ PosePublisher::PosePublisher(const mjModel * m,
   node_options.parameter_overrides({
     {"use_sim_time", true}, // Force use simulation time
   });
-  std::string node_name = body_name + "_pose_publisher";
+  // Sanitize body_name for use as a ROS2 node name: replace '/' with '_'
+  std::string sanitized_name = body_name;
+  std::replace(sanitized_name.begin(), sanitized_name.end(), '/', '_');
+  std::string node_name = sanitized_name + "_pose_publisher";
   nh_ = rclcpp::Node::make_shared(node_name, node_options);
   
   if(output_tf_)

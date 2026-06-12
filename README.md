@@ -234,21 +234,22 @@ Example declaration:
 </extension>
 ```
 
-The available service types are `SpawnEntity`, `DespawnEntity`,
+The available service types are `SpawnEntity`, `DeleteEntity`,
 `ListEntities`, `SetBodyPose`, `SetGeomProperties`, `SetEqualityActive`,
 `GetBodyPose`, `GetGeomProperties`, and `GetModelInfo`.
 
 Scene recompilation must run between simulation steps. The repository includes
-`libmujoco_step_hook.so` for stock MuJoCo `simulate` binaries:
+an installed `simulate` wrapper that preloads `libmujoco_step_hook.so` into the
+stock MuJoCo executable:
 
 ```bash
-PACKAGE_PREFIX="$(ros2 pkg prefix mujoco_ros_utils)"
-export LD_PRELOAD="$PACKAGE_PREFIX/lib/mujoco_ros_utils/plugins/libmujoco_step_hook.so"
-"$MUJOCO_ROOT_DIR/bin/simulate" \
+simulate \
   "$(ros2 pkg prefix mujoco_ros_utils)/share/mujoco_ros_utils/xml/test_scene_manager_world.xml"
 ```
 
-A custom simulator can instead call the between-step hook directly. See
+The package environment hook puts this wrapper on `PATH`; direct execution of
+`$MUJOCO_PATH/bin/simulate` bypasses it. A custom simulator can instead call
+the between-step hook directly. See
 [`launch/test_scene_manager.launch.py`](launch/test_scene_manager.launch.py)
 for a complete launch pattern.
 
@@ -351,7 +352,7 @@ Services:
 
 - `StartRecording`, `StopRecording`
 - `PlotCommand`
-- `SpawnEntity`, `DespawnEntity`, `ListEntities`
+- `SpawnEntity`, `DeleteEntity`, `ListEntities`
 - `SetBodyPose`, `GetBodyPose`
 - `SetGeomProperties`, `GetGeomProperties`
 - `GetModelInfo`

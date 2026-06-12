@@ -1,0 +1,15 @@
+# SetJointPositions.srv — teleport individual joint positions at runtime
+#
+# Each entry in joint_names maps to the corresponding entry in positions (1:1).
+# For 1-DOF joints (hinge, slide), positions[i] is the angle/displacement in radians/metres.
+# For multi-DOF joints (ball, free), use SetBodyPose instead — this service
+# only supports joints with exactly 1 position coordinate.
+#
+# Joint positions are written to d->qpos and take effect immediately on the
+# next simulation step.  No recompile is needed.
+
+string[]  joint_names   # list of joint names (exact, case-sensitive)
+float64[] positions      # desired positions, same order as joint_names
+---
+bool    success
+string  message

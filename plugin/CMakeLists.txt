@@ -252,16 +252,32 @@ if(MUJOCO_ROS_UTILS_BUILD_SIM_PLOTTER)
 endif()
 
 if(MUJOCO_ROS_UTILS_BUILD_SCENE_MANAGER)
+  find_package(std_srvs REQUIRED)
   mujoco_ros_utils_add_plugin(
     SceneManager
     USE_INTERFACES
     SOURCE SceneManager.cpp
     REGISTRATION registrations/SceneManagerRegistration.cpp
-    AMENT_DEPENDENCIES rclcpp)
+    AMENT_DEPENDENCIES rclcpp std_srvs)
 endif()
 
 get_property(
   plugin_targets GLOBAL PROPERTY MUJOCO_ROS_UTILS_PLUGIN_TARGETS)
+
+# ── Plugin aggregator (thin .so that pulls in all modular plugins) ────────
+# When MODULAR, each plugin has its own .so with an mjPLUGIN_LIB_INIT
+# constructor.  This aggregator link-depends on all of them so that a single
+# .so in MuJoCo's mujoco_plugin/ directory transitively loads every plugin.
+# The aggregator source never changes — editing one plugin only recompiles
+# that plugin's .so; this target only re-links (no source compilation).
+add_library(MujocoRosUtilsPlugins SHARED PluginAggregator.cpp)
+mujoco_ros_utils_configure_library(MujocoRosUtilsPlugins)
+target_link_libraries(MujocoRosUtilsPlugins ${plugin_targets})
+# Force retention of all plugin .so NEEDED entries even though no symbols
+# are directly referenced (each plugin self-registers via its constructor).
+# --no-as-needed keeps the DT_NEEDED so the dynamic linker loads them.
+target_link_options(MujocoRosUtilsPlugins PRIVATE "LINKER:--no-as-needed")
+list(APPEND plugin_targets MujocoRosUtilsPlugins)
 
 if(MUJOCO_ROS_UTILS_PLUGIN_LAYOUT STREQUAL "MONOLITHIC")
   get_property(
@@ -331,10 +347,20 @@ set_target_properties(
   PROPERTIES INSTALL_RPATH "$ORIGIN"
              INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-mujoco_ros_utils_install_plugin_targets(
-  MujocoRosUtilsCore
-  ${plugin_targets}
-  mujoco_step_hook)
+# Install modular plugins to the package plugins directory.
+set(_modular_targets ${plugin_targets})
+list(REMOVE_ITEM _modular_targets MujocoRosUtilsPlugins)
+mujoco_ros_utils_install_plugin_targets(${_modular_targets})
+
+# Keep Core and the step hook in the package prefix for the workspace-provided
+# simulate wrapper.  Their $ORIGIN RPATH lets the preloaded hook resolve Core.
+install(TARGETS MujocoRosUtilsCore mujoco_step_hook
+        LIBRARY DESTINATION lib/mujoco_ros_utils/plugins)
+
+# MuJoCo also scans this directory directly for the plugin aggregator.
+set(MUJOCO_PLUGIN_DEST "$ENV{MUJOCO_PATH}/bin/mujoco_plugin")
+install(TARGETS MujocoRosUtilsCore MujocoRosUtilsPlugins mujoco_step_hook
+        LIBRARY DESTINATION "${MUJOCO_PLUGIN_DEST}")
 
 message(
   STATUS

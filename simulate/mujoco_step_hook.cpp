@@ -15,6 +15,7 @@
 // The library links directly against libMujocoRosUtils.so so that the hook
 // registry globals are shared with the plugin (single .so instance in process).
 
+#include <cstdio>
 #include <dlfcn.h>
 #include <mujoco/mujoco.h>
 #include "between_step_hook.h"
@@ -22,13 +23,22 @@
 namespace {
 // Lazily resolved pointer to the real mj_step in libmujoco.so
 static void (*real_mj_step)(const mjModel*, mjData*) = nullptr;
+static bool s_first_call = true;
 }
 
 // Override mj_step — runs BEFORE any scratch allocations in the step.
 // Safe to call mj_recompile here because d->arena is in a clean state.
 extern "C" void mj_step(const mjModel* m, mjData* d) {
+  if (s_first_call) {
+    fprintf(stderr, "[step_hook] mj_step intercepted OK (LD_PRELOAD working)\n");
+    s_first_call = false;
+  }
+
   // Fire any pending between-step hook (e.g., mj_recompile for spawn/despawn).
-  mujoco_ros_utils::CheckBetweenStepHook(const_cast<mjModel*>(m), d);
+  bool had_hook = mujoco_ros_utils::CheckBetweenStepHook(const_cast<mjModel*>(m), d);
+  if (had_hook) {
+    fprintf(stderr, "[step_hook] between-step hook fired and executed\n");
+  }
 
   // Call the real mj_step from libmujoco.so.
   if (!real_mj_step) {

@@ -5,14 +5,32 @@
 #include <mujoco/mujoco.h>
 #include <mujoco/mjplugin.h>
 
+#include <cctype>
 #include <cmath>
+#include <execinfo.h>
 #include <filesystem>
 #include <fstream>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 #include <unistd.h>
 #include <vector>
+
+// Wraps every std::regex construction: prints the pattern and any error + backtrace.
+#define MAKE_REGEX(var, pat_expr) \
+  std::regex var; \
+  do { \
+    const std::string _pat_str_ = (pat_expr); \
+    try { var = std::regex(_pat_str_); } \
+    catch (const std::regex_error & _e_) { \
+      fprintf(stderr, "[SceneManager][regex] %s:%d '" #var "' ERROR on pattern: %s\n  what(): %s\n", \
+              __FILE__, __LINE__, _pat_str_.c_str(), _e_.what()); \
+      void * _bt_[64]; int _nb_ = backtrace(_bt_, 64); \
+      backtrace_symbols_fd(_bt_, _nb_, fileno(stderr)); \
+      throw; \
+    } \
+  } while (0)
 
 namespace fs = std::filesystem;
 
@@ -98,15 +116,18 @@ SceneManager * SceneManager::Create(const mjModel * m, mjData * d, int plugin_id
 void SceneManager::SharedState::initialize(const std::string & node_name,
                                            const std::string & node_namespace)
 {
-  using SpawnSrv         = mujoco_ros_utils::srv::SpawnEntity;
-  using DespawnSrv       = mujoco_ros_utils::srv::DespawnEntity;
-  using ListSrv          = mujoco_ros_utils::srv::ListEntities;
-  using SetBodyPoseSrv   = mujoco_ros_utils::srv::SetBodyPose;
-  using SetGeomPropsSrv  = mujoco_ros_utils::srv::SetGeomProperties;
-  using SetEqActiveSrv   = mujoco_ros_utils::srv::SetEqualityActive;
-  using GetBodyPoseSrv   = mujoco_ros_utils::srv::GetBodyPose;
-  using GetGeomPropsSrv  = mujoco_ros_utils::srv::GetGeomProperties;
-  using GetModelInfoSrv  = mujoco_ros_utils::srv::GetModelInfo;
+  using SpawnSrv           = mujoco_ros_utils::srv::SpawnEntity;
+  using DeleteSrv         = mujoco_ros_utils::srv::DeleteEntity;
+  using ListSrv            = mujoco_ros_utils::srv::ListEntities;
+  using SetBodyPoseSrv     = mujoco_ros_utils::srv::SetBodyPose;
+  using SetGeomPropsSrv    = mujoco_ros_utils::srv::SetGeomProperties;
+  using SetEqActiveSrv     = mujoco_ros_utils::srv::SetEqualityActive;
+  using SetJointPositionsSrv = mujoco_ros_utils::srv::SetJointPositions;
+  using ApplyBodyWrenchSrv   = mujoco_ros_utils::srv::ApplyBodyWrench;
+  using GetBodyPoseSrv     = mujoco_ros_utils::srv::GetBodyPose;
+  using GetGeomPropsSrv    = mujoco_ros_utils::srv::GetGeomProperties;
+  using GetJointStateSrv   = mujoco_ros_utils::srv::GetJointState;
+  using GetModelInfoSrv    = mujoco_ros_utils::srv::GetModelInfo;
 
   // Create an isolated ROS2 context so that rclcpp::shutdown() called by
   // RosControl (when ros_control_instances_ drops to 0 during mj_recompile)
@@ -139,6 +160,23 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
     return op->state.load(std::memory_order_acquire) != 0;
   };
 
+  // ── reset_simulation ─────────────────────────────────────────────────────
+  reset_simulation_srv = node->create_service<std_srvs::srv::Trigger>(
+    "~/reset_simulation",
+    [ss, wait_op](const std_srvs::srv::Trigger::Request::SharedPtr  /*req*/,
+         std_srvs::srv::Trigger::Response::SharedPtr         res) {
+      auto op  = std::make_shared<PendingOp>();
+      op->type = OpType::RESET_SIMULATION;
+      { std::lock_guard<std::mutex> lk(ss->pending_mutex); ss->pending_ops.push(op); }
+      ss->ops_pending.store(true);
+      if (wait_op(op, 5)) {
+        res->success = (op->state.load() == 1);
+        res->message = op->result_msg;
+      } else {
+        res->success = false;
+        res->message = "Timeout: reset_simulation within 5 s.";
+      }
+    });
 
   spawn_srv = node->create_service<SpawnSrv>(
     "~/spawn_entity",
@@ -161,13 +199,16 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
       }
 
       std::string xml;
+      std::string source_directory;
       if (!req->xml_content.empty())
         xml = req->xml_content;
       else if (!req->xml_path.empty())
       {
-        std::ifstream f(req->xml_path);
+        const fs::path xml_path = fs::absolute(req->xml_path);
+        std::ifstream f(xml_path);
         if (!f) { res->success = false; res->message = "Cannot open xml_path: " + req->xml_path; return; }
         xml = std::string((std::istreambuf_iterator<char>(f)), {});
+        source_directory = xml_path.parent_path().string();
       }
       else
       {
@@ -180,6 +221,7 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
       op->type       = OpType::SPAWN;
       op->name       = req->name;
       op->xml        = xml;
+      op->source_directory = source_directory;
       op->attach_to  = req->attach_to.empty() || req->attach_to == "worldbody"
                          ? "world" : req->attach_to;
       op->pos[0]     = req->pos_x; op->pos[1] = req->pos_y; op->pos[2] = req->pos_z;
@@ -210,10 +252,10 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
     });
 
   // ── despawn_entity ───────────────────────────────────────────────────────
-  despawn_srv = node->create_service<DespawnSrv>(
+  despawn_srv = node->create_service<DeleteSrv>(
     "~/despawn_entity",
-    [ss, wait_op](const DespawnSrv::Request::SharedPtr  req,
-         DespawnSrv::Response::SharedPtr        res) {
+    [ss, wait_op](const DeleteSrv::Request::SharedPtr  req,
+         DeleteSrv::Response::SharedPtr        res) {
       {
         std::lock_guard<std::mutex> lk(ss->pending_mutex);
         if (!ss->spawned_entities.count(req->name))
@@ -302,6 +344,44 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
       else { res->success = false; res->message = "Timeout: set_equality_active within 5 s."; }
     });
 
+  // ── set_joint_positions ──────────────────────────────────────────────────
+  set_joint_positions_srv = node->create_service<SetJointPositionsSrv>(
+    "~/set_joint_positions",
+    [ss, wait_op](const SetJointPositionsSrv::Request::SharedPtr  req,
+         SetJointPositionsSrv::Response::SharedPtr        res) {
+      if (req->joint_names.empty())
+      { res->success = false; res->message = "joint_names must not be empty."; return; }
+      if (req->joint_names.size() != req->positions.size())
+      { res->success = false; res->message = "joint_names and positions must have the same length."; return; }
+      auto op = std::make_shared<PendingOp>();
+      op->type           = OpType::SET_JOINT_POSITIONS;
+      op->joint_names    = req->joint_names;
+      op->joint_positions = req->positions;
+      { std::lock_guard<std::mutex> lk(ss->pending_mutex); ss->pending_ops.push(op); }
+      ss->ops_pending.store(true);
+      if (wait_op(op, 5)) { res->success = (op->state.load() == 1); res->message = op->result_msg; }
+      else { res->success = false; res->message = "Timeout: set_joint_positions within 5 s."; }
+    });
+
+  // ── apply_body_wrench ────────────────────────────────────────────────────
+  apply_body_wrench_srv = node->create_service<ApplyBodyWrenchSrv>(
+    "~/apply_body_wrench",
+    [ss, wait_op](const ApplyBodyWrenchSrv::Request::SharedPtr  req,
+         ApplyBodyWrenchSrv::Response::SharedPtr        res) {
+      if (req->body_name.empty())
+      { res->success = false; res->message = "body_name must not be empty."; return; }
+      auto op = std::make_shared<PendingOp>();
+      op->type            = OpType::APPLY_BODY_WRENCH;
+      op->name            = req->body_name;
+      op->reference_frame = req->reference_frame.empty() ? "body" : req->reference_frame;
+      op->force[0] = req->force_x;  op->force[1] = req->force_y;  op->force[2] = req->force_z;
+      op->torque[0] = req->torque_x; op->torque[1] = req->torque_y; op->torque[2] = req->torque_z;
+      { std::lock_guard<std::mutex> lk(ss->pending_mutex); ss->pending_ops.push(op); }
+      ss->ops_pending.store(true);
+      if (wait_op(op, 5)) { res->success = (op->state.load() == 1); res->message = op->result_msg; }
+      else { res->success = false; res->message = "Timeout: apply_body_wrench within 5 s."; }
+    });
+
   // ── get_body_pose ────────────────────────────────────────────────────────
   get_body_pose_srv = node->create_service<GetBodyPoseSrv>(
     "~/get_body_pose",
@@ -320,6 +400,8 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
           res->pos_x = r.pos[0]; res->pos_y = r.pos[1]; res->pos_z = r.pos[2];
           res->rot_qw = r.quat[0]; res->rot_qx = r.quat[1];
           res->rot_qy = r.quat[2]; res->rot_qz = r.quat[3];
+          res->angular_vel_x = r.angular_vel[0]; res->angular_vel_y = r.angular_vel[1]; res->angular_vel_z = r.angular_vel[2];
+          res->linear_vel_x  = r.linear_vel[0];  res->linear_vel_y  = r.linear_vel[1];  res->linear_vel_z  = r.linear_vel[2];
           res->parent_body = r.parent_body; res->is_dynamic = r.is_dynamic;
         }
       } else { res->success = false; res->message = "Timeout: get_body_pose within 5 s."; }
@@ -346,6 +428,33 @@ void SceneManager::SharedState::initialize(const std::string & node_name,
           res->geom_type = geomTypeToString(r.type); res->parent_body = r.parent_body;
         }
       } else { res->success = false; res->message = "Timeout: get_geom_properties within 5 s."; }
+    });
+
+  // ── get_joint_state ──────────────────────────────────────────────────────
+  get_joint_state_srv = node->create_service<GetJointStateSrv>(
+    "~/get_joint_state",
+    [ss, wait_op](const GetJointStateSrv::Request::SharedPtr  req,
+         GetJointStateSrv::Response::SharedPtr        res) {
+      auto op             = std::make_shared<PendingOp>();
+      op->type            = OpType::GET_JOINT_STATE;
+      op->joint_names     = req->joint_names;   // empty = query all
+      op->joint_state_data = std::make_shared<JointStateData>();
+      { std::lock_guard<std::mutex> lk(ss->pending_mutex); ss->pending_ops.push(op); }
+      ss->ops_pending.store(true);
+      if (wait_op(op, 5)) {
+        res->success = (op->state.load() == 1); res->message = op->result_msg;
+        if (res->success) {
+          const auto & r = *op->joint_state_data;
+          res->joint_names_out = r.joint_names;
+          res->pos_starts  = r.pos_starts;
+          res->pos_lengths = r.pos_lengths;
+          res->vel_starts  = r.vel_starts;
+          res->vel_lengths = r.vel_lengths;
+          res->positions   = r.positions;
+          res->velocities  = r.velocities;
+          res->efforts     = r.efforts;
+        }
+      } else { res->success = false; res->message = "Timeout: get_joint_state within 5 s."; }
     });
 
   // ── get_model_info ───────────────────────────────────────────────────────
@@ -495,6 +604,32 @@ void SceneManager::applyPendingOps(mjModel * m, mjData * d)
     //      between physics steps (while sim.mtx is held, no concurrent step)
     //   3. Put any remaining recompile ops back in the queue so the next step
     //      picks them up after the hook fires.
+    if (op->type == OpType::RESET_SIMULATION)
+    {
+      // Like SPAWN/DESPAWN, mj_resetData must fire between steps.
+      auto op_captured = op;
+      auto shared_cap  = shared;
+      mujoco_ros_utils::RegisterBetweenStepHook(
+        [op_captured, shared_cap](mjModel * bm, mjData * bd) {
+          mj_resetData(bm, bd);
+          op_captured->state.store(1, std::memory_order_release);
+          print_confirm("[SceneManager] Simulation data reset (mj_resetData).\n");
+        });
+      // Put remaining ops back so next compute() picks them up
+      if (!to_process.empty())
+      {
+        std::lock_guard<std::mutex> lk(shared->pending_mutex);
+        std::queue<std::shared_ptr<PendingOp>> merged;
+        while (!to_process.empty()) {
+          merged.push(to_process.front()); to_process.pop(); }
+        while (!shared->pending_ops.empty()) {
+          merged.push(shared->pending_ops.front()); shared->pending_ops.pop(); }
+        shared->pending_ops = std::move(merged);
+        shared->ops_pending.store(true);
+      }
+      return;
+    }
+
     if (op->type == OpType::SPAWN || op->type == OpType::DESPAWN)
     {
       std::string spawned_body;
@@ -594,17 +729,25 @@ void SceneManager::applyPendingOps(mjModel * m, mjData * d)
       ok = applySetGeomProperties(m, d, *op, err);
     else if (op->type == OpType::SET_EQUALITY_ACTIVE)
       ok = applySetEqualityActive(m, d, *op, err);
+    else if (op->type == OpType::SET_JOINT_POSITIONS)
+      ok = applySetJointPositions(m, d, *op, err);
+    else if (op->type == OpType::APPLY_BODY_WRENCH)
+      ok = applyBodyWrench(m, d, *op, err);
     else if (op->type == OpType::GET_BODY_POSE)
       ok = applyGetBodyPose(m, d, *op, err);
     else if (op->type == OpType::GET_GEOM_PROPERTIES)
       ok = applyGetGeomProperties(m, *op, err);
+    else if (op->type == OpType::GET_JOINT_STATE)
+      ok = applyGetJointState(m, d, *op, err);
     else if (op->type == OpType::GET_MODEL_INFO)
       ok = applyGetModelInfo(m, *op);
 
     op->result_msg = ok
-      ? (op->type == OpType::SET_BODY_POSE        ? "Body pose updated: " + op->name
+      ? (op->type == OpType::SET_BODY_POSE      ? "Body pose updated: " + op->name
          : op->type == OpType::SET_GEOM_PROPERTIES ? "Geom properties updated: " + op->name
          : op->type == OpType::SET_EQUALITY_ACTIVE ? (std::string("Equality ") + (op->eq_active ? "activated" : "deactivated") + ": " + op->name)
+         : op->type == OpType::SET_JOINT_POSITIONS ? "Joint positions updated"
+         : op->type == OpType::APPLY_BODY_WRENCH   ? "Wrench applied: " + op->name
          : "ok")
       : err;
     op->state.store(ok ? 1 : 2, std::memory_order_release);
@@ -615,127 +758,375 @@ void SceneManager::applyPendingOps(mjModel * m, mjData * d)
 // Builds and returns a ready-to-recompile mjSpec for spawn.  The actual
 // mj_recompile call happens in the between-step hook registered by applyPendingOps.
 //
-// Strategy: serialize current model → XML, inject the child body XML (prefixed
-// + positioned + freejoint) into the worldbody section, reparse the merged XML.
-// This avoids the C-API mjs_attach + freejoint "top level" limitation entirely.
+// Strategy: serialize current model -> XML, inject the child body XML, then
+// reparse the merged document. The launched world must already contain any
+// global assets referenced by the spawned body.
 
 namespace {
 
-// Extract the content between <worldbody> and </worldbody>.
 std::string extractWorldbodyContent(const std::string & xml)
 {
-  static const std::string OPEN  = "<worldbody>";
+  static const std::string OPEN = "<worldbody>";
   static const std::string CLOSE = "</worldbody>";
-  size_t s = xml.find(OPEN);
-  size_t e = xml.rfind(CLOSE);
-  if (s == std::string::npos || e == std::string::npos || e < s)
+  const size_t start = xml.find(OPEN);
+  const size_t end = xml.rfind(CLOSE);
+  if (start == std::string::npos || end == std::string::npos || end < start)
     return "";
-  return xml.substr(s + OPEN.size(), e - (s + OPEN.size()));
+  return xml.substr(start + OPEN.size(), end - start - OPEN.size());
 }
 
-// Apply a name prefix to every name="…" attribute in an XML fragment.
-// Simple string replacement — handles the vast majority of MJCF cases.
-std::string applyNamePrefix(const std::string & xml, const std::string & prefix)
+std::vector<std::string> extractSectionContents(
+  const std::string & xml, const std::string & section)
+{
+  const std::string open = "<" + section;
+  const std::string close = "</" + section + ">";
+  std::vector<std::string> contents;
+  size_t search = 0;
+
+  auto find_open = [&](size_t from) {
+    size_t position = from;
+    while ((position = xml.find(open, position)) != std::string::npos)
+    {
+      const size_t after_name = position + open.size();
+      if (after_name < xml.size() &&
+          (xml[after_name] == '>' ||
+           std::isspace(static_cast<unsigned char>(xml[after_name]))))
+        return position;
+      position = after_name;
+    }
+    return std::string::npos;
+  };
+
+  while (search < xml.size())
+  {
+    const size_t opening = find_open(search);
+    if (opening == std::string::npos)
+      break;
+
+    const size_t opening_end = xml.find('>', opening + open.size());
+    if (opening_end == std::string::npos)
+      return {};
+    const size_t content_start = opening_end + 1;
+    int depth = 1;
+    size_t scan = content_start;
+    while (depth > 0)
+    {
+      const size_t next_open = find_open(scan);
+      const size_t next_close = xml.find(close, scan);
+      if (next_close == std::string::npos)
+        return {};
+
+      if (next_open != std::string::npos && next_open < next_close)
+      {
+        const size_t nested_end = xml.find('>', next_open + open.size());
+        if (nested_end == std::string::npos)
+          return {};
+        ++depth;
+        scan = nested_end + 1;
+      }
+      else
+      {
+        --depth;
+        if (depth == 0)
+        {
+          contents.push_back(
+            xml.substr(content_start, next_close - content_start));
+          search = next_close + close.size();
+        }
+        scan = next_close + close.size();
+      }
+    }
+  }
+  return contents;
+}
+
+std::string joinSectionContents(
+  const std::string & xml, const std::string & section)
 {
   std::string result;
-  result.reserve(xml.size() + prefix.size() * 16);
-  size_t pos = 0;
-  while (pos < xml.size())
+  for (const auto & content : extractSectionContents(xml, section))
   {
-    // Look for next name= attribute.
-    size_t attr_pos = xml.find("name=", pos);
-    if (attr_pos == std::string::npos) { result += xml.substr(pos); break; }
-
-    // Append everything up to and including "name=".
-    result += xml.substr(pos, attr_pos + 5 - pos);
-    pos = attr_pos + 5;
-    if (pos >= xml.size()) break;
-
-    // Get the quote char.
-    char q = xml[pos];
-    if (q != '"' && q != '\'') { result += q; ++pos; continue; }
-
-    // Append opening quote + prefix + original value + closing quote.
-    result += q;
-    result += prefix;
-    ++pos;
-    size_t end = xml.find(q, pos);
-    if (end == std::string::npos) { result += xml.substr(pos); break; }
-    result += xml.substr(pos, end - pos);
-    result += q;
-    pos = end + 1;
+    if (!result.empty())
+      result += "\n";
+    result += content;
   }
   return result;
 }
 
-// Set pos (and optionally quat) on the FIRST <body tag in the XML fragment.
+std::string extractFirstBodyElement(const std::string & xml)
+{
+  const size_t body_start = xml.find("<body");
+  if (body_start == std::string::npos)
+    return "";
+  const size_t opening_end = xml.find('>', body_start);
+  if (opening_end == std::string::npos)
+    return "";
+  if (opening_end > body_start && xml[opening_end - 1] == '/')
+    return xml.substr(body_start, opening_end - body_start + 1);
+
+  int depth = 1;
+  size_t scan = opening_end + 1;
+  while (depth > 0)
+  {
+    const size_t next_open = xml.find("<body", scan);
+    const size_t next_close = xml.find("</body>", scan);
+    if (next_close == std::string::npos)
+      return "";
+    if (next_open != std::string::npos && next_open < next_close)
+    {
+      const size_t next_open_end = xml.find('>', next_open);
+      if (next_open_end == std::string::npos)
+        return "";
+      if (xml[next_open_end - 1] != '/')
+        ++depth;
+      scan = next_open_end + 1;
+    }
+    else
+    {
+      --depth;
+      scan = next_close + 7;
+    }
+  }
+  return xml.substr(body_start, scan - body_start);
+}
+
+std::string extractElementName(const std::string & element)
+{
+  const size_t opening_end = element.find('>');
+  if (opening_end == std::string::npos)
+    return "";
+  const std::string opening_tag = element.substr(0, opening_end + 1);
+  MAKE_REGEX(name_pattern, std::string(R"(\sname\s*=\s*["']([^"']+)["'])"));
+  std::smatch match;
+  return std::regex_search(opening_tag, match, name_pattern)
+           ? match.str(1)
+           : "";
+}
+
+std::string applyNamePrefix(const std::string & xml, const std::string & prefix)
+{
+  std::string result;
+  size_t pos = 0;
+  while (pos < xml.size())
+  {
+    const size_t attr = xml.find("name=", pos);
+    if (attr == std::string::npos) {
+      result += xml.substr(pos);
+      break;
+    }
+    result += xml.substr(pos, attr + 5 - pos);
+    pos = attr + 5;
+    if (pos >= xml.size())
+      break;
+    const char quote = xml[pos];
+    if (quote != '"' && quote != '\'') {
+      result += quote;
+      ++pos;
+      continue;
+    }
+    result += quote;
+    result += prefix;
+    const size_t value_start = ++pos;
+    const size_t value_end = xml.find(quote, value_start);
+    if (value_end == std::string::npos) {
+      result += xml.substr(value_start);
+      break;
+    }
+    result += xml.substr(value_start, value_end - value_start);
+    result += quote;
+    pos = value_end + 1;
+  }
+  return result;
+}
+
+std::string applyReferencePrefix(
+  const std::string & xml, const std::string & prefix)
+{
+  static const std::vector<std::string> attributes = {
+    "body", "body1", "body2", "geom", "geom1", "geom2", "joint",
+    "joint1", "joint2", "material", "mesh", "site", "target",
+    "tendon", "texture", "objname", "class", "childclass"
+  };
+
+  std::string result = xml;
+  for (const auto & attribute : attributes)
+  {
+    const std::string _pat_attr =
+      "(\\s" + attribute + "\\s*=\\s*[\"'])([^\"']+)([\"'])";
+    MAKE_REGEX(pattern, _pat_attr);
+    std::string replaced;
+    size_t previous = 0;
+    for (std::sregex_iterator it(result.begin(), result.end(), pattern), end;
+         it != end; ++it)
+    {
+      const auto & match = *it;
+      replaced.append(result, previous, static_cast<size_t>(match.position()) - previous);
+      replaced += match.str(1);
+      if (match.str(2).rfind(prefix, 0) != 0)
+        replaced += prefix;
+      replaced += match.str(2);
+      replaced += match.str(3);
+      previous = static_cast<size_t>(match.position() + match.length());
+    }
+    if (previous != 0)
+    {
+      replaced.append(result, previous, std::string::npos);
+      result = std::move(replaced);
+    }
+  }
+  return result;
+}
+
+std::string applyPluginConfigReferencePrefix(
+  const std::string & xml, const std::string & prefix)
+{
+  static const std::vector<std::string> reference_keys = {
+    "depth_camera_name", "color_camera_name", "camera_name"
+  };
+
+  std::string result = xml;
+  for (const auto & key : reference_keys)
+  {
+    const std::string _pat_key =
+      "(<config\\s+key\\s*=\\s*[\"'])" + key +
+      "([\"']\\s+value\\s*=\\s*[\"'])([^\"']+)([\"'])";
+    MAKE_REGEX(pattern, _pat_key);
+    std::string replaced;
+    size_t previous = 0;
+    for (std::sregex_iterator it(result.begin(), result.end(), pattern), end;
+         it != end; ++it)
+    {
+      const auto & match = *it;
+      replaced.append(
+        result, previous, static_cast<size_t>(match.position()) - previous);
+      replaced += match.str(1) + key + match.str(2);
+      if (match.str(3).rfind(prefix, 0) != 0)
+        replaced += prefix;
+      replaced += match.str(3) + match.str(4);
+      previous = static_cast<size_t>(match.position() + match.length());
+    }
+    if (previous != 0)
+    {
+      replaced.append(result, previous, std::string::npos);
+      result = std::move(replaced);
+    }
+  }
+  return result;
+}
+
+std::string resolveResourcePaths(
+  const std::string & xml, const std::string & source_directory)
+{
+  if (source_directory.empty())
+    return xml;
+
+  const fs::path source_dir(source_directory);
+  MAKE_REGEX(file_pattern, std::string(R"((\sfile\s*=\s*["'])([^"']+)(["']))"));
+  std::string result;
+  size_t previous = 0;
+  for (std::sregex_iterator it(xml.begin(), xml.end(), file_pattern), end;
+       it != end; ++it)
+  {
+    const auto & match = *it;
+    result.append(
+      xml, previous, static_cast<size_t>(match.position()) - previous);
+    fs::path resource(match.str(2));
+    if (resource.is_relative())
+    {
+      const fs::path direct = source_dir / resource;
+      const fs::path asset = source_dir / "assets" / resource;
+      resource = fs::exists(direct) ? direct : asset;
+    }
+    result += match.str(1) + resource.lexically_normal().string() + match.str(3);
+    previous = static_cast<size_t>(match.position() + match.length());
+  }
+  if (previous == 0)
+    return xml;
+  result.append(xml, previous, std::string::npos);
+  return result;
+}
+
+std::string mergeMissingPluginDeclarations(
+  const std::string & main_xml, const std::string & child_extension)
+{
+  MAKE_REGEX(plugin_pattern, std::string(
+    R"(<plugin\s+plugin\s*=\s*["']([^"']+)["'][^>]*(?:/>|>[\s\S]*?</plugin>))"));
+  std::string result;
+  for (std::sregex_iterator it(
+         child_extension.begin(), child_extension.end(), plugin_pattern), end;
+       it != end; ++it)
+  {
+    const std::string plugin_name = (*it).str(1);
+    const std::string _pat_existing =
+      "plugin\\s*=\\s*[\"']" + plugin_name + "[\"']";
+    MAKE_REGEX(existing, _pat_existing);
+    if (!std::regex_search(main_xml, existing))
+      result += (*it).str(0) + "\n";
+  }
+  return result;
+}
+
+bool mergeSection(
+  std::string & main_xml, const std::string & section,
+  const std::string & content)
+{
+  if (content.empty())
+    return true;
+
+  const std::string close = "</" + section + ">";
+  size_t insertion = main_xml.rfind(close);
+  if (insertion != std::string::npos)
+  {
+    main_xml.insert(insertion, "\n" + content + "\n");
+    return true;
+  }
+
+  insertion = main_xml.rfind("</mujoco>");
+  if (insertion == std::string::npos)
+    return false;
+  main_xml.insert(
+    insertion,
+    "\n<" + section + ">\n" + content + "\n</" + section + ">\n");
+  return true;
+}
+
 std::string setFirstBodyPose(const std::string & xml,
                              const double pos[3], const double quat[4])
 {
-  size_t tag_start = xml.find("<body");
-  if (tag_start == std::string::npos)
+  const size_t start = xml.find("<body");
+  const size_t end = start == std::string::npos ? std::string::npos
+                                                 : xml.find('>', start);
+  if (end == std::string::npos)
     return xml;
 
-  size_t tag_end = xml.find('>', tag_start);
-  if (tag_end == std::string::npos)
-    return xml;
-
-  // Build pos/quat attribute strings.
-  auto to_s = [](double v) {
-    char buf[32]; std::snprintf(buf, sizeof(buf), "%.6g", v); return std::string(buf);
+  auto format = [](double value) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.6g", value);
+    return std::string(buffer);
   };
-  const std::string pos_str =
-    to_s(pos[0]) + " " + to_s(pos[1]) + " " + to_s(pos[2]);
-
-  std::string tag = xml.substr(tag_start, tag_end - tag_start);
-
-  // Remove any existing pos/quat attributes then inject ours.
-  tag = std::regex_replace(tag, std::regex(R"(\s+pos\s*=\s*["'][^"']*["'])"), "");
-  tag = std::regex_replace(tag, std::regex(R"(\s+quat\s*=\s*["'][^"']*["'])"), "");
-  tag += " pos=\"" + pos_str + "\"";
-
-  const bool has_orientation =
-    (quat[0] != 1.0 || quat[1] != 0.0 || quat[2] != 0.0 || quat[3] != 0.0);
-  if (has_orientation)
-    tag += " quat=\"" + to_s(quat[0]) + " " + to_s(quat[1]) +
-           " "        + to_s(quat[2]) + " " + to_s(quat[3]) + "\"";
-
-  return xml.substr(0, tag_start) + tag + xml.substr(tag_end);
+  std::string tag = xml.substr(start, end - start);
+  MAKE_REGEX(_re_pos,  std::string(R"(\s+pos\s*=\s*["'][^"']*["'])"));
+  MAKE_REGEX(_re_quat, std::string(R"(\s+quat\s*=\s*["'][^"']*["'])"));
+  tag = std::regex_replace(tag, _re_pos,  "");
+  tag = std::regex_replace(tag, _re_quat, "");
+  tag += " pos=\"" + format(pos[0]) + " " + format(pos[1]) + " "
+         + format(pos[2]) + "\"";
+  tag += " quat=\"" + format(quat[0]) + " " + format(quat[1]) + " "
+         + format(quat[2]) + " " + format(quat[3]) + "\"";
+  return xml.substr(0, start) + tag + xml.substr(end);
 }
 
-// Inject <freejoint/> as the first child of the first <body …> element.
 std::string injectFreeJoint(const std::string & xml)
 {
-  size_t tag_start = xml.find("<body");
-  if (tag_start == std::string::npos)
+  const size_t body = xml.find("<body");
+  const size_t end = body == std::string::npos ? std::string::npos
+                                                : xml.find('>', body);
+  if (end == std::string::npos)
     return xml;
-
-  size_t tag_close = xml.find('>', tag_start);
-  if (tag_close == std::string::npos)
-    return xml;
-
-  // Handle self-closing <body ... /> — convert to <body ...>…</body>.
-  if (xml[tag_close - 1] == '/')
-  {
-    // self-closing body without children: convert, inject freejoint, add closing tag
-    std::string tag = xml.substr(tag_start, tag_close - tag_start - 1) + ">";
-    size_t name_pos = tag.find("name=\"");
-    std::string body_name = "spawned";
-    if (name_pos != std::string::npos)
-    {
-      size_t val_start = name_pos + 6;
-      size_t val_end   = tag.find('"', val_start);
-      body_name = tag.substr(val_start, val_end - val_start);
-    }
-    return xml.substr(0, tag_start) + tag + "<freejoint/>" +
-           "</body>" + xml.substr(tag_close + 1);
-  }
-
-  // Regular opening tag.
-  return xml.substr(0, tag_close + 1) + "<freejoint/>" + xml.substr(tag_close + 1);
+  return xml.substr(0, end + 1) + "<freejoint/>" + xml.substr(end + 1);
 }
 
-} // anonymous namespace
+}  // namespace
 
 mjSpec * SceneManager::prepareSpawnSpec(mjModel * m, PendingOp & op,
                                          const std::shared_ptr<SharedState> & shared,
@@ -750,37 +1141,9 @@ mjSpec * SceneManager::prepareSpawnSpec(mjModel * m, PendingOp & op,
     err_msg = "URDF/MJCF conversion failed: " + err_msg;
     return nullptr;
   }
-  child_xml = wrapMjcf(child_xml);
+  child_xml = resolveResourcePaths(
+    wrapMjcf(child_xml), op.source_directory);
 
-  // ── Step 1: parse child XML to get the first body name ─────────────────
-  char parse_err[512] = {};
-  mjSpec * child_spec = mj_parseXMLString(child_xml.c_str(), nullptr,
-                                          parse_err, sizeof(parse_err));
-  if (!child_spec)
-  {
-    err_msg = std::string("child XML parse error: ") + parse_err;
-    return nullptr;
-  }
-
-  std::string first_child_name;
-  {
-    mjsBody * child_world = mjs_findBody(child_spec, "world");
-    if (child_world)
-    {
-      mjsElement * fe = mjs_firstChild(child_world, mjOBJ_BODY, 0);
-      if (fe)
-      {
-        const char * s = mjs_getString(mjs_getName(fe));
-        if (s && s[0])
-          first_child_name = s;
-      }
-    }
-  }
-  mj_deleteSpec(child_spec);
-
-  // ── Step 2: get current model XML ───────────────────────────────────────
-  // Use the running snapshot if available (updated after each recompile).
-  // Seed from mj_saveLastXML on the very first operation.
   std::string main_xml;
   {
     std::lock_guard<std::mutex> lk(shared->pending_mutex);
@@ -802,61 +1165,102 @@ mjSpec * SceneManager::prepareSpawnSpec(mjModel * m, PendingOp & op,
     }
 
     std::ifstream ifs(tmpfile);
-    if (!ifs.is_open()) { ::unlink(tmpfile); err_msg = "cannot open saved XML temp file"; return nullptr; }
+    if (!ifs.is_open()) {
+      ::unlink(tmpfile);
+      err_msg = "cannot open saved XML temp file";
+      return nullptr;
+    }
     main_xml.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
     ifs.close();
     ::unlink(tmpfile);
   }
 
-  // ── Step 3: verify attach-to body exists ────────────────────────────────
   const bool attach_to_world =
-    (op.attach_to == "world" || op.attach_to.empty());
-  if (!attach_to_world)
+    op.attach_to.empty() || op.attach_to == "world";
+  if (!attach_to_world &&
+      mj_name2id(m, mjOBJ_BODY, op.attach_to.c_str()) < 0)
   {
-    if (mj_name2id(m, mjOBJ_BODY, op.attach_to.c_str()) < 0)
-    {
-      err_msg = "attach_to body '" + op.attach_to + "' not found in model";
-      return nullptr;
-    }
+    err_msg = "attach_to body '" + op.attach_to + "' not found in model";
+    return nullptr;
   }
 
-  // ── Step 4: build prefixed + positioned child body XML ──────────────────
-  const std::string prefix    = op.name + "/";
-  std::string worldbody_inner = extractWorldbodyContent(child_xml);
-  if (worldbody_inner.empty())
+  const std::string prefix = op.name + "/";
+  const std::string asset_xml = applyReferencePrefix(
+    applyNamePrefix(joinSectionContents(child_xml, "asset"), prefix),
+    prefix);
+  std::string body_xml =
+    extractFirstBodyElement(extractWorldbodyContent(child_xml));
+  if (body_xml.empty())
   {
     err_msg = "child XML has no worldbody content";
     return nullptr;
   }
-
-  worldbody_inner = applyNamePrefix(worldbody_inner, prefix);
-  worldbody_inner = setFirstBodyPose(worldbody_inner, op.pos, op.quat);
+  const std::string first_child_name = extractElementName(body_xml);
+  if (first_child_name.empty())
+  {
+    err_msg = "child XML has no named top-level body";
+    return nullptr;
+  }
+  body_xml = applyReferencePrefix(applyNamePrefix(body_xml, prefix), prefix);
+  body_xml = setFirstBodyPose(body_xml, op.pos, op.quat);
   if (op.with_freejoint)
-    worldbody_inner = injectFreeJoint(worldbody_inner);
+    body_xml = injectFreeJoint(body_xml);
 
+  size_t insertion = std::string::npos;
   if (attach_to_world)
   {
-    size_t wpos = main_xml.rfind("</worldbody>");
-    if (wpos == std::string::npos) { err_msg = "main model XML has no </worldbody> tag"; return nullptr; }
-    main_xml.insert(wpos, "\n" + worldbody_inner + "\n");
+    insertion = main_xml.rfind("</worldbody>");
   }
   else
   {
-    const std::string close_search = "</" + op.attach_to + ">";
-    size_t cpos = main_xml.find(close_search);
-    if (cpos == std::string::npos)
+    insertion = main_xml.find("</" + op.attach_to + ">");
+    if (insertion == std::string::npos)
+      insertion = main_xml.rfind("</worldbody>");
+  }
+  if (insertion == std::string::npos)
+  {
+    err_msg = "current model XML has no worldbody";
+    return nullptr;
+  }
+  main_xml.insert(insertion, "\n" + body_xml + "\n");
+
+  if (!mergeSection(main_xml, "asset", asset_xml))
+  {
+    err_msg = "current model XML has no mujoco root";
+    return nullptr;
+  }
+
+  const std::string default_xml = applyReferencePrefix(
+    joinSectionContents(child_xml, "default"), prefix);
+  if (!mergeSection(main_xml, "default", default_xml))
+  {
+    err_msg = "failed to merge child default section";
+    return nullptr;
+  }
+
+  const std::string extension_xml = mergeMissingPluginDeclarations(
+    joinSectionContents(main_xml, "extension"),
+    joinSectionContents(child_xml, "extension"));
+  if (!mergeSection(main_xml, "extension", extension_xml))
+  {
+    err_msg = "failed to merge child extension section";
+    return nullptr;
+  }
+
+  for (const std::string section :
+       {"actuator", "contact", "equality", "sensor", "tendon"})
+  {
+    std::string content = joinSectionContents(child_xml, section);
+    content = applyNamePrefix(content, prefix);
+    content = applyReferencePrefix(content, prefix);
+    content = applyPluginConfigReferencePrefix(content, prefix);
+    if (!mergeSection(main_xml, section, content))
     {
-      size_t wpos = main_xml.rfind("</worldbody>");
-      if (wpos == std::string::npos) { err_msg = "no </worldbody>"; return nullptr; }
-      main_xml.insert(wpos, "\n" + worldbody_inner + "\n");
-    }
-    else
-    {
-      main_xml.insert(cpos, "\n" + worldbody_inner + "\n");
+      err_msg = "failed to merge child " + section + " section";
+      return nullptr;
     }
   }
 
-  // ── Step 5: parse the merged XML into a spec ────────────────────────────
   char merged_err[512] = {};
   mjSpec * spec = mj_parseXMLString(main_xml.c_str(), nullptr,
                                     merged_err, sizeof(merged_err));
@@ -866,8 +1270,8 @@ mjSpec * SceneManager::prepareSpawnSpec(mjModel * m, PendingOp & op,
     return nullptr;
   }
 
-  out_body       = prefix + first_child_name;
-  out_merged_xml = main_xml;   // caller stores this in SharedState after recompile
+  out_body = prefix + first_child_name;
+  out_merged_xml = main_xml;
   return spec;
 }
 
@@ -949,6 +1353,80 @@ std::string removeBodyFromXml(const std::string & xml, const std::string & body_
   return result;  // body not found — return unchanged
 }
 
+// Remove every child element inside the listed top-level sections whose opening
+// tag contains entity_prefix (e.g. "g1/").  Cleans up actuators, sensors,
+// tendons, equalities, and contacts that reference the deleted entity's joints.
+static std::string removeEntityRefsFromSections(
+    const std::string & xml, const std::string & entity_prefix)
+{
+  static const std::vector<std::string> kSections = {
+    "actuator", "sensor", "tendon", "equality", "contact", "asset"
+  };
+  std::string result = xml;
+
+  for (const auto & section : kSections) {
+    const std::string open_sec  = "<" + section;
+    const std::string close_sec = "</" + section + ">";
+    size_t sec_pos = 0;
+
+    while (true) {
+      size_t sec_start = result.find(open_sec, sec_pos);
+      if (sec_start == std::string::npos) break;
+
+      size_t sec_tag_end = result.find('>', sec_start);
+      if (sec_tag_end == std::string::npos) break;
+      if (sec_tag_end > 0 && result[sec_tag_end - 1] == '/') {
+        sec_pos = sec_tag_end + 1; continue;  // self-closing section, no children
+      }
+
+      size_t sec_end = result.find(close_sec, sec_tag_end);
+      if (sec_end == std::string::npos) break;
+
+      size_t pos = sec_tag_end + 1;
+      while (pos < sec_end) {
+        size_t elem_start = result.find('<', pos);
+        if (elem_start == std::string::npos || elem_start >= sec_end) break;
+
+        const char next = result[elem_start + 1];
+        if (next == '/' || next == '!') { pos = elem_start + 1; continue; }
+
+        size_t tag_end = result.find('>', elem_start);
+        if (tag_end == std::string::npos || tag_end > sec_end) break;
+
+        // Only inspect the opening tag for the entity prefix.
+        const std::string tag_content = result.substr(elem_start, tag_end - elem_start + 1);
+        if (tag_content.find(entity_prefix) == std::string::npos) {
+          pos = tag_end + 1; continue;
+        }
+
+        // Determine element extent (self-closing vs. paired tags).
+        size_t elem_end;
+        if (tag_end > 0 && result[tag_end - 1] == '/') {
+          elem_end = tag_end + 1;
+        } else {
+          size_t name_start = elem_start + 1;
+          size_t name_end   = name_start;
+          while (name_end < tag_end &&
+                 result[name_end] != ' ' && result[name_end] != '>' &&
+                 result[name_end] != '\n' && result[name_end] != '\t')
+            ++name_end;
+          const std::string close_tag = "</" + result.substr(name_start, name_end - name_start) + ">";
+          size_t close_pos = result.find(close_tag, tag_end);
+          if (close_pos == std::string::npos) { pos = tag_end + 1; continue; }
+          elem_end = close_pos + close_tag.size();
+        }
+
+        const size_t erased = elem_end - elem_start;
+        result.erase(elem_start, erased);
+        sec_end -= erased;
+        pos = elem_start;
+      }
+      sec_pos = sec_end;
+    }
+  }
+  return result;
+}
+
 } // anonymous namespace (extended)
 
 mjSpec * SceneManager::prepareDespawnSpec(mjModel * m,
@@ -1006,6 +1484,10 @@ mjSpec * SceneManager::prepareDespawnSpec(mjModel * m,
     err_msg = "Cannot find body '" + body_name + "' in current model XML";
     return nullptr;
   }
+
+  // Remove all actuators, sensors, tendons, etc. referencing this entity's joints.
+  const std::string entity_prefix = op.name + "/";
+  trimmed_xml = removeEntityRefsFromSections(trimmed_xml, entity_prefix);
 
   // Parse the trimmed XML into a new spec.
   char parse_err[512] = {};
@@ -1300,6 +1782,14 @@ bool SceneManager::applyGetBodyPose(const mjModel * m, const mjData * d, Pending
   r.quat[2] = d->xquat[4*bid + 2];   // y
   r.quat[3] = d->xquat[4*bid + 3];   // z
 
+  // World-frame velocity: cvel[0..2] angular, cvel[3..5] linear
+  r.angular_vel[0] = d->cvel[6*bid + 0];
+  r.angular_vel[1] = d->cvel[6*bid + 1];
+  r.angular_vel[2] = d->cvel[6*bid + 2];
+  r.linear_vel[0]  = d->cvel[6*bid + 3];
+  r.linear_vel[1]  = d->cvel[6*bid + 4];
+  r.linear_vel[2]  = d->cvel[6*bid + 5];
+
   // Parent body name
   const int    parent_id   = m->body_parentid[bid];
   const char * parent_name = mj_id2name(m, mjOBJ_BODY, parent_id);
@@ -1385,6 +1875,143 @@ bool SceneManager::applyGetModelInfo(const mjModel * m, PendingOp & op)
   return true;
 }
 
+// ── applySetJointPositions ──────────────────────────────────────────────────
+
+bool SceneManager::applySetJointPositions(mjModel * m, mjData * d, PendingOp & op,
+                                           std::string & err_msg)
+{
+  for (size_t i = 0; i < op.joint_names.size(); ++i)
+  {
+    const int jid = mj_name2id(m, mjOBJ_JOINT, op.joint_names[i].c_str());
+    if (jid < 0)
+    {
+      err_msg = "Joint '" + op.joint_names[i] + "' not found in model";
+      return false;
+    }
+
+    // Only support 1-DOF joints (hinge, slide) for position teleport.
+    // Ball and free joints have multi-DOF qpos — use SetBodyPose instead.
+    const int nq = (m->jnt_type[jid] == mjJNT_FREE) ? 7
+                 : (m->jnt_type[jid] == mjJNT_BALL) ? 4 : 1;
+    if (nq != 1)
+    {
+      err_msg = "Joint '" + op.joint_names[i] + "' has " + std::to_string(nq)
+              + " position coordinates. Use SetBodyPose for multi-DOF joints.";
+      return false;
+    }
+
+    const int qpos_adr = m->jnt_qposadr[jid];
+    d->qpos[qpos_adr] = op.joint_positions[i];
+  }
+
+  print_confirm("[SceneManager] %zu joint positions updated.\n", op.joint_names.size());
+  return true;
+}
+
+// ── applyBodyWrench ─────────────────────────────────────────────────────────
+
+bool SceneManager::applyBodyWrench(mjModel * m, mjData * d, PendingOp & op,
+                                    std::string & err_msg)
+{
+  const int bid = mj_name2id(m, mjOBJ_BODY, op.name.c_str());
+  if (bid < 0)
+  {
+    err_msg = "Body '" + op.name + "' not found in model";
+    return false;
+  }
+
+  // d->xfrc_applied layout (body-local frame):
+  //   [0..2] torque,  [3..5] force
+  mjtNum * xfrc = d->xfrc_applied + 6 * bid;
+
+  if (op.reference_frame == "world")
+  {
+    // Rotate world-frame force/torque into body-local frame.
+    // R_body_to_world is stored in d->xmat[9*bid] in column-major order.
+    mjtNum R[9], RT[9];
+    mju_quat2Mat(R, d->xquat + 4 * bid);
+    mju_transpose(RT, R, 3, 3);
+
+    mjtNum force_body[3], torque_body[3];
+    mjtNum f_world[3] = {op.force[0],  op.force[1],  op.force[2]};
+    mjtNum t_world[3] = {op.torque[0], op.torque[1], op.torque[2]};
+    mju_mulMatVec(torque_body, RT, t_world, 3, 3);
+    mju_mulMatVec(force_body,  RT, f_world, 3, 3);
+
+    xfrc[0] = torque_body[0]; xfrc[1] = torque_body[1]; xfrc[2] = torque_body[2];
+    xfrc[3] = force_body[0];  xfrc[4] = force_body[1];  xfrc[5] = force_body[2];
+  }
+  else  // "body" frame — write directly
+  {
+    xfrc[0] = op.torque[0]; xfrc[1] = op.torque[1]; xfrc[2] = op.torque[2];
+    xfrc[3] = op.force[0];  xfrc[4] = op.force[1];  xfrc[5] = op.force[2];
+  }
+
+  print_confirm("[SceneManager] Wrench applied to body '%s' (frame=%s): "
+                "force=(%.2f,%.2f,%.2f) torque=(%.2f,%.2f,%.2f).\n",
+                op.name.c_str(), op.reference_frame.c_str(),
+                op.force[0], op.force[1], op.force[2],
+                op.torque[0], op.torque[1], op.torque[2]);
+  return true;
+}
+
+// ── applyGetJointState ──────────────────────────────────────────────────────
+
+bool SceneManager::applyGetJointState(const mjModel * m, const mjData * d,
+                                       PendingOp & op, std::string & err_msg)
+{
+  auto & r = *op.joint_state_data;
+
+  // Build a set of names to query, or query all if none specified.
+  std::unordered_set<std::string> name_filter;
+  bool filter_all = op.joint_names.empty();
+  if (!filter_all)
+  {
+    for (const auto & n : op.joint_names)
+      name_filter.insert(n);
+  }
+
+  for (int j = 0; j < m->njnt; ++j)
+  {
+    const char * name = mj_id2name(m, mjOBJ_JOINT, j);
+    const std::string jname = name ? name : "(unnamed)";
+
+    if (!filter_all && !name_filter.count(jname))
+      continue;
+
+    const int nq = (m->jnt_type[j] == mjJNT_FREE)   ? 7
+                 : (m->jnt_type[j] == mjJNT_BALL)   ? 4 : 1;
+    const int nv = (m->jnt_type[j] == mjJNT_FREE)   ? 6
+                 : (m->jnt_type[j] == mjJNT_BALL)   ? 3 : 1;
+
+    const int qpos_adr = m->jnt_qposadr[j];
+    const int dof_adr  = m->jnt_dofadr[j];
+
+    // Position
+    int32_t pos_start = static_cast<int32_t>(r.positions.size());
+    for (int k = 0; k < nq; ++k)
+      r.positions.push_back(d->qpos[qpos_adr + k]);
+
+    // Velocity
+    int32_t vel_start = static_cast<int32_t>(r.velocities.size());
+    for (int k = 0; k < nv; ++k)
+      r.velocities.push_back(d->qvel[dof_adr + k]);
+
+    // Effort: actuator force in joint space from qfrc_actuator
+    int32_t eff_start = static_cast<int32_t>(r.efforts.size());
+    for (int k = 0; k < nv; ++k)
+      r.efforts.push_back(d->qfrc_actuator[dof_adr + k]);
+
+    r.joint_names.push_back(jname);
+    r.pos_starts.push_back(pos_start);
+    r.pos_lengths.push_back(nq);
+    r.vel_starts.push_back(vel_start);
+    r.vel_lengths.push_back(nv);
+  }
+
+  return true;
+}
+
 // ── geomTypeToString ─────────────────────────────────────────────────────────
 
 std::string SceneManager::geomTypeToString(int type)
@@ -1421,49 +2048,89 @@ std::string SceneManager::maybeConvertUrdf(const std::string & xml, std::string 
   if (trimmed.compare(tag_start + 1, 5, "robot") != 0)
     return xml;  // not URDF — pass through
 
-  // Write URDF to a temp file and run urdf2mjcf.
-  const std::string tmp_urdf = "/tmp/scene_manager_spawn.urdf";
-  const std::string tmp_mjcf = "/tmp/scene_manager_spawn.xml";
+  // urdf2mjcf writes a model directory containing both XML and converted
+  // assets. Use a unique location so concurrent spawns cannot overwrite each
+  // other and keep it alive for the lifetime of the running MuJoCo model.
+  char temp_template[] = "/tmp/scene_manager_spawn_XXXXXX";
+  const char * temp_path = mkdtemp(temp_template);
+  if (!temp_path)
+  {
+    err_msg = "mkdtemp failed for URDF conversion";
+    return {};
+  }
+  const fs::path temp_dir(temp_path);
+  const fs::path tmp_urdf = temp_dir / "entity.urdf";
+  const fs::path output_dir = temp_dir / "output";
   {
     std::ofstream f(tmp_urdf);
     f << xml;
   }
 
-  // Try urdf2mjcf first (pip install urdf2mjcf).
-  int rc = std::system(("urdf2mjcf " + tmp_urdf + " -o " + tmp_mjcf + " 2>/tmp/sm_urdf2mjcf.log").c_str());
+  const std::string command =
+    "urdf2mjcf '" + tmp_urdf.string() + "' -o '" + output_dir.string() +
+    "' --no-clock-publisher --log-level ERROR >'" +
+    (temp_dir / "urdf2mjcf.log").string() + "' 2>&1";
+  int rc = std::system(command.c_str());
   if (rc != 0)
   {
-    // Fallback: try python3 -m urdf2mjcf
-    rc = std::system(("python3 -m urdf2mjcf " + tmp_urdf + " -o " + tmp_mjcf +
-                      " 2>/tmp/sm_urdf2mjcf.log").c_str());
+    const std::string fallback =
+      "python3 -m urdf2mjcf '" + tmp_urdf.string() + "' -o '" +
+      output_dir.string() + "' --no-clock-publisher --log-level ERROR >'" +
+      (temp_dir / "urdf2mjcf.log").string() + "' 2>&1";
+    rc = std::system(fallback.c_str());
   }
   if (rc != 0)
   {
     err_msg = "urdf2mjcf failed (exit " + std::to_string(rc) +
-              "). See /tmp/sm_urdf2mjcf.log";
+              "). See " + (temp_dir / "urdf2mjcf.log").string();
     return {};
   }
 
+  const fs::path model_dir = output_dir / "entity";
+  const fs::path tmp_mjcf = model_dir / "entity.xml";
   std::ifstream f(tmp_mjcf);
   if (!f)
   {
-    err_msg = "urdf2mjcf did not produce output at " + tmp_mjcf;
+    err_msg = "urdf2mjcf did not produce output at " + tmp_mjcf.string();
     return {};
   }
-  return std::string((std::istreambuf_iterator<char>(f)), {});
+  std::string mjcf((std::istreambuf_iterator<char>(f)), {});
+
+  // String-based mjSpec parsing has no source filename from which to resolve
+  // resource paths. Make converted asset paths absolute before merging them
+  // into the running model.
+  MAKE_REGEX(file_pattern, std::string(R"((\sfile\s*=\s*["'])([^"']+)(["']))"));
+  std::string resolved;
+  size_t previous = 0;
+  for (std::sregex_iterator it(mjcf.begin(), mjcf.end(), file_pattern), end;
+       it != end; ++it)
+  {
+    const auto & match = *it;
+    resolved.append(mjcf, previous, static_cast<size_t>(match.position()) - previous);
+    fs::path resource(match.str(2));
+    if (resource.is_relative())
+    {
+      const fs::path asset_resource = model_dir / "assets" / resource;
+      resource = fs::exists(asset_resource)
+                   ? asset_resource
+                   : model_dir / resource;
+    }
+    resolved += match.str(1) + resource.string() + match.str(3);
+    previous = static_cast<size_t>(match.position() + match.length());
+  }
+  if (previous != 0)
+  {
+    resolved.append(mjcf, previous, std::string::npos);
+    mjcf = std::move(resolved);
+  }
+  return mjcf;
 }
 
 std::string SceneManager::wrapMjcf(const std::string & xml)
 {
-  // If the XML already has a <mujoco> root element, return as-is.
-  const auto first = xml.find_first_not_of(" \t\n\r");
-  if (first != std::string::npos)
-  {
-    // Find the tag name after '<'
-    const auto tag_pos = xml.find('<', first);
-    if (tag_pos != std::string::npos && xml.compare(tag_pos + 1, 6, "mujoco") == 0)
-      return xml;
-  }
+  // XML declarations and comments may precede the root element.
+  if (xml.find("<mujoco") != std::string::npos)
+    return xml;
 
   // Otherwise, wrap in a minimal <mujoco><worldbody> shell.
   return "<mujoco>\n  <worldbody>\n" + xml + "\n  </worldbody>\n</mujoco>\n";

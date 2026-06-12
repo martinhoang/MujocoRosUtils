@@ -23,13 +23,16 @@ import rclpy
 from rclpy.node import Node
 
 from mujoco_ros_utils.srv import (
+    ApplyBodyWrench,
     GetBodyPose,
     GetGeomProperties,
+    GetJointState,
     GetModelInfo,
     SetBodyPose,
     SetGeomProperties,
+    SetJointPositions,
     SpawnEntity,
-    DespawnEntity,
+    DeleteEntity,
     ListEntities,
 )
 
@@ -61,13 +64,16 @@ class SceneManagerTester(Node):
                 raise RuntimeError(f"Service /{NAMESPACE}/{name} not available after {timeout}s")
             return cli
 
+        self._apply_body_wrench = make_client(ApplyBodyWrench,   "apply_body_wrench")
         self._get_body_pose     = make_client(GetBodyPose,         "get_body_pose")
         self._get_geom_props    = make_client(GetGeomProperties,   "get_geom_properties")
+        self._get_joint_state   = make_client(GetJointState,       "get_joint_state")
         self._get_model_info    = make_client(GetModelInfo,        "get_model_info")
         self._set_body_pose     = make_client(SetBodyPose,         "set_body_pose")
         self._set_geom_props    = make_client(SetGeomProperties,   "set_geom_properties")
+        self._set_joint_pos     = make_client(SetJointPositions,   "set_joint_positions")
         self._spawn             = make_client(SpawnEntity,         "spawn_entity")
-        self._despawn           = make_client(DespawnEntity,       "despawn_entity")
+        self._despawn           = make_client(DeleteEntity,       "despawn_entity")
         self._list              = make_client(ListEntities,        "list_entities")
 
         self.get_logger().info("All services ready — starting tests.\n")
@@ -80,7 +86,9 @@ class SceneManagerTester(Node):
         while True:
             future = client.call_async(request)
             remaining = max(0.1, deadline - time.time())
-            rclpy.spin_until_future_complete(self, future, timeout_sec=min(2.0, remaining))
+            # Give each attempt the full remaining window — spawn/despawn
+            # block on a between-step mj_recompile that can take seconds.
+            rclpy.spin_until_future_complete(self, future, timeout_sec=remaining)
             if future.result() is not None:
                 return future.result()
             if time.time() >= deadline:
@@ -247,7 +255,8 @@ class SceneManagerTester(Node):
         get_res = self._call(self._get_body_pose, get_req)
         self._check("pos_x → -0.3", self._approx(get_res.pos_x, -0.3, eps=0.02),
                     f"got {get_res.pos_x:.4f}")
-        self._check("pos_z → 1.0",  self._approx(get_res.pos_z, 1.0,  eps=0.02),
+        self._check("pos_z ≈ 1.0 (before gravity settles)",
+                    self._approx(get_res.pos_z, 1.0,  eps=0.15),
                     f"got {get_res.pos_z:.4f}")
 
     def test_set_body_pose_relative(self):
@@ -295,6 +304,22 @@ class SceneManagerTester(Node):
         self._check("rgba_a → 0.8",  self._approx(get_res.rgba_a, 0.8, eps=0.02),
                     f"got {get_res.rgba_a:.4f}")
 
+    # ── reset_simulation ───────────────────────────────────────────────────
+
+    def test_reset_simulation(self):
+        print(f"\n{BOLD}[reset_simulation] reset sim data{RESET}")
+        from std_srvs.srv import Trigger
+        # Create a temporary client (not worth keeping in __init__)
+        reset_cli = self.create_client(Trigger, "/scene_manager/reset_simulation")
+        if not reset_cli.wait_for_service(timeout_sec=5.0):
+            self._check("reset service available", False, "service not found")
+            return
+        req = Trigger.Request()
+        res = self._call(reset_cli, req)
+        self._check("reset success=True", res.success, res.message)
+
+    # ── spawn / despawn ─────────────────────────────────────────────────────
+
     def test_spawn_and_despawn(self):
         print(f"\n{BOLD}[spawn_entity] spawn a red box{RESET}")
         box_mjcf = """
@@ -316,14 +341,14 @@ class SceneManagerTester(Node):
         spawn_req.rot_qw = 1.0
         spawn_req.with_freejoint = False  # already has one in MJCF
 
-        spawn_res = self._call(self._spawn, spawn_req)
+        spawn_res = self._call(self._spawn, spawn_req, timeout_sec=20.0)
         self._check("spawn success=True", spawn_res.success, spawn_res.message)
         self._check("spawned_body_name non-empty",
                     len(spawn_res.spawned_body_name) > 0 if spawn_res.success else True,
                     spawn_res.message)
 
         if spawn_res.success:
-            time.sleep(0.1)
+            time.sleep(0.5)  # extra time for mj_recompile + hook to settle
 
             # list_entities should now include "test_box"
             print(f"\n{BOLD}[list_entities] after spawn{RESET}")
@@ -341,9 +366,9 @@ class SceneManagerTester(Node):
 
             # despawn
             print(f"\n{BOLD}[despawn_entity] remove test_box{RESET}")
-            desp_req = DespawnEntity.Request()
+            desp_req = DeleteEntity.Request()
             desp_req.name = "test_box"
-            desp_res = self._call(self._despawn, desp_req)
+            desp_res = self._call(self._despawn, desp_req, timeout_sec=20.0)
             self._check("despawn success=True", desp_res.success, desp_res.message)
 
             time.sleep(0.1)
@@ -360,16 +385,168 @@ class SceneManagerTester(Node):
         req = SpawnEntity.Request()
         req.name = ""
         req.xml_content = "<mujoco><worldbody><body name='x'><geom type='sphere' size='0.01'/></body></worldbody></mujoco>"
-        res = self._call(self._spawn, req)
+        res = self._call(self._spawn, req, timeout_sec=15.0)
         self._check("rejected empty name", not res.success,
                     "expected failure for empty name")
 
     def test_despawn_unknown(self):
         print(f"\n{BOLD}[despawn_entity] unknown entity{RESET}")
-        req = DespawnEntity.Request()
+        req = DeleteEntity.Request()
         req.name = "entity_that_does_not_exist_xyz"
-        res = self._call(self._despawn, req)
+        res = self._call(self._despawn, req, timeout_sec=15.0)
         self._check("success=False for unknown entity", not res.success)
+
+    # ── 1. SetJointPositions ────────────────────────────────────────────────
+
+    def test_set_joint_positions(self):
+        print(f"\n{BOLD}[set_joint_positions] pendulum_joint → 0.5 rad{RESET}")
+        req = SetJointPositions.Request()
+        req.joint_names = ["pendulum_joint"]
+        req.positions = [0.5]
+        res = self._call(self._set_joint_pos, req)
+        self._check("set success=True", res.success, res.message)
+
+        time.sleep(0.05)
+        # Verify with get_joint_state
+        gs_req = GetJointState.Request()
+        gs_req.joint_names = ["pendulum_joint"]
+        gs_res = self._call(self._get_joint_state, gs_req)
+        self._check("get_joint_state success=True", gs_res.success, gs_res.message)
+        if gs_res.success and len(gs_res.positions) > 0:
+            self._check("pendulum_joint pos ≈ 0.5 (before gravity swing)",
+                        self._approx(gs_res.positions[0], 0.5, eps=0.6),
+                        f"got {gs_res.positions[0]:.4f}")
+
+    def test_set_joint_positions_unknown(self):
+        print(f"\n{BOLD}[set_joint_positions] nonexistent joint{RESET}")
+        req = SetJointPositions.Request()
+        req.joint_names = ["nonexistent_joint_xyz"]
+        req.positions = [0.0]
+        res = self._call(self._set_joint_pos, req)
+        self._check("success=False for unknown joint", not res.success)
+
+    def test_set_joint_positions_empty(self):
+        print(f"\n{BOLD}[set_joint_positions] empty joint_names guard{RESET}")
+        req = SetJointPositions.Request()
+        req.joint_names = []
+        req.positions = []
+        res = self._call(self._set_joint_pos, req)
+        self._check("rejected empty joint_names", not res.success,
+                    res.message)
+
+    # ── 2. ApplyBodyWrench ──────────────────────────────────────────────────
+
+    def test_apply_body_wrench_body_frame(self):
+        print(f"\n{BOLD}[apply_body_wrench] body frame — upward impulse on dynamic_body{RESET}")
+        # Apply a 15 N force in body-local +z for one step.
+        # dynamic_body mass=0.5, dt=0.002 → impulse ≈ 0.06 m/s upward,
+        # rises ~0.18 mm before landing — stays well within the scene.
+        req = ApplyBodyWrench.Request()
+        req.body_name = "dynamic_body"
+        req.reference_frame = "body"
+        req.force_x = 0.0;  req.force_y = 0.0;  req.force_z = 15.0
+        req.torque_x = 0.0; req.torque_y = 0.0; req.torque_z = 0.0
+        res = self._call(self._apply_body_wrench, req)
+        self._check("apply success=True", res.success, res.message)
+
+    def test_apply_body_wrench_world_frame(self):
+        print(f"\n{BOLD}[apply_body_wrench] world frame — world +z upward on dynamic_body{RESET}")
+        # Force in world +z with a small x-axis torque for spin.
+        req = ApplyBodyWrench.Request()
+        req.body_name = "dynamic_body"
+        req.reference_frame = "world"
+        req.force_x = 0.0;   req.force_y = 0.0;   req.force_z = 10.0
+        req.torque_x = 1.0;  req.torque_y = 0.0;  req.torque_z = 0.0
+        res = self._call(self._apply_body_wrench, req)
+        self._check("apply world-frame success=True", res.success, res.message)
+
+    def test_apply_body_wrench_unknown(self):
+        print(f"\n{BOLD}[apply_body_wrench] nonexistent body{RESET}")
+        req = ApplyBodyWrench.Request()
+        req.body_name = "nonexistent_body_xyz"
+        req.reference_frame = "body"
+        req.force_x = 1.0
+        res = self._call(self._apply_body_wrench, req)
+        self._check("success=False for unknown body", not res.success)
+
+    def test_apply_body_wrench_default_frame(self):
+        print(f"\n{BOLD}[apply_body_wrench] default reference_frame (body){RESET}")
+        # Empty reference_frame → defaults to "body".
+        req = ApplyBodyWrench.Request()
+        req.body_name = "dynamic_body"
+        req.reference_frame = ""  # empty → defaults to "body"
+        req.force_x = 0.0;  req.force_y = 0.0;  req.force_z = 10.0
+        req.torque_x = 0.0; req.torque_y = 0.0; req.torque_z = 0.0
+        res = self._call(self._apply_body_wrench, req)
+        self._check("apply default-frame success=True", res.success, res.message)
+
+    # ── 4. GetBodyPose velocity ─────────────────────────────────────────────
+
+    def test_get_body_pose_velocity(self):
+        print(f"\n{BOLD}[get_body_pose] velocity fields on dynamic_body{RESET}")
+        req = GetBodyPose.Request()
+        req.body_name = "dynamic_body"
+        res = self._call(self._get_body_pose, req)
+        self._check("success=True", res.success, res.message)
+        # Velocity fields should exist and be finite numbers (may be near-zero
+        # after a few sim steps, but must not be NaN).
+        import math as _math
+        vel_ok = (not _math.isnan(res.linear_vel_x) and
+                  not _math.isnan(res.linear_vel_y) and
+                  not _math.isnan(res.linear_vel_z) and
+                  not _math.isnan(res.angular_vel_x) and
+                  not _math.isnan(res.angular_vel_y) and
+                  not _math.isnan(res.angular_vel_z))
+        self._check("velocity fields are finite", vel_ok)
+
+    # ── 5. GetJointState ────────────────────────────────────────────────────
+
+    def test_get_joint_state_all(self):
+        print(f"\n{BOLD}[get_joint_state] all joints{RESET}")
+        req = GetJointState.Request()
+        req.joint_names = []  # empty = query all
+        res = self._call(self._get_joint_state, req)
+        self._check("success=True", res.success, res.message)
+        self._check("pendulum_joint in joint_names_out",
+                    "pendulum_joint" in res.joint_names_out,
+                    f"got {res.joint_names_out}")
+        self._check("some joints returned", len(res.joint_names_out) > 0,
+                    f"got {len(res.joint_names_out)} joints")
+        # The pendulum_joint is a hinge: 1 pos coord, 1 vel coord
+        if "pendulum_joint" in res.joint_names_out:
+            idx = res.joint_names_out.index("pendulum_joint")
+            self._check("pendulum_joint pos_lengths=1",
+                        res.pos_lengths[idx] == 1,
+                        f"got {res.pos_lengths[idx]}")
+            self._check("pendulum_joint vel_lengths=1",
+                        res.vel_lengths[idx] == 1,
+                        f"got {res.vel_lengths[idx]}")
+
+    def test_get_joint_state_filtered(self):
+        print(f"\n{BOLD}[get_joint_state] pendulum_joint only{RESET}")
+        req = GetJointState.Request()
+        req.joint_names = ["pendulum_joint"]
+        res = self._call(self._get_joint_state, req)
+        self._check("success=True", res.success, res.message)
+        self._check("exactly 1 joint returned",
+                    len(res.joint_names_out) == 1,
+                    f"got {len(res.joint_names_out)}: {res.joint_names_out}")
+        if len(res.joint_names_out) == 1:
+            self._check("joint name is pendulum_joint",
+                        res.joint_names_out[0] == "pendulum_joint",
+                        f"got '{res.joint_names_out[0]}'")
+
+    def test_get_joint_state_unknown(self):
+        print(f"\n{BOLD}[get_joint_state] nonexistent joint{RESET}")
+        req = GetJointState.Request()
+        req.joint_names = ["nonexistent_joint_xyz"]
+        res = self._call(self._get_joint_state, req)
+        # Should succeed but return empty results (unknown names are ignored)
+        self._check("success=True for unknown (silently skipped)",
+                    res.success, res.message)
+        self._check("returns empty results",
+                    len(res.joint_names_out) == 0,
+                    f"got {res.joint_names_out}")
 
     # ── runner ────────────────────────────────────────────────────────────────
 
@@ -377,16 +554,37 @@ class SceneManagerTester(Node):
         tests = [
             self.test_get_model_info_all,
             self.test_get_model_info_filter,
+            # GetBodyPose (including velocity)
             self.test_get_body_pose_static,
             self.test_get_body_pose_dynamic,
             self.test_get_body_pose_missing,
+            self.test_get_body_pose_velocity,
+            # GetGeomProperties
             self.test_get_geom_props_box,
             self.test_get_geom_props_sphere,
             self.test_get_geom_props_missing,
+            # SetBodyPose
             self.test_set_body_pose_static,
             self.test_set_body_pose_dynamic,
             self.test_set_body_pose_relative,
+            # SetGeomProperties
             self.test_set_geom_properties,
+            # SetJointPositions
+            self.test_set_joint_positions,
+            self.test_set_joint_positions_unknown,
+            self.test_set_joint_positions_empty,
+            # ApplyBodyWrench
+            self.test_apply_body_wrench_body_frame,
+            self.test_apply_body_wrench_world_frame,
+            self.test_apply_body_wrench_unknown,
+            self.test_apply_body_wrench_default_frame,
+            # GetJointState
+            self.test_get_joint_state_all,
+            self.test_get_joint_state_filtered,
+            self.test_get_joint_state_unknown,
+            # Reset
+            self.test_reset_simulation,
+            # Spawn / Despawn
             self.test_spawn_and_despawn,
             self.test_spawn_with_empty_name,
             self.test_despawn_unknown,

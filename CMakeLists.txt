@@ -129,6 +129,8 @@ find_mujoco()
 
 set(AMENT_CMAKE_UNINSTALL_TARGET OFF)
 find_package(ament_cmake REQUIRED)
+find_package(glfw3 REQUIRED)
+find_package(PNG REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -148,7 +150,7 @@ rosidl_generate_interfaces(
   "srv/StopRecording.srv"
   "srv/PlotCommand.srv"
   "srv/SpawnEntity.srv"
-  "srv/DespawnEntity.srv"
+  "srv/DeleteEntity.srv"
   "srv/ListEntities.srv"
   "srv/SetBodyPose.srv"
   "srv/SetGeomProperties.srv"
@@ -156,6 +158,9 @@ rosidl_generate_interfaces(
   "srv/GetGeomProperties.srv"
   "srv/GetModelInfo.srv"
   "srv/SetEqualityActive.srv"
+  "srv/SetJointPositions.srv"
+  "srv/ApplyBodyWrench.srv"
+  "srv/GetJointState.srv"
   DEPENDENCIES
   std_msgs
   geometry_msgs
@@ -163,6 +168,9 @@ rosidl_generate_interfaces(
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY scripts DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/simulate DESTINATION bin)
+install(PROGRAMS scripts/spawn_entity.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/delete_entity.py DESTINATION lib/${PROJECT_NAME})
 
 # Do this to allow for loading xml according to the instructions in the README
 # However, it is normally not done that way.
@@ -206,6 +214,35 @@ pluginlib_export_plugin_description_file(mujoco_ros_utils
 ament_environment_hooks(cmake/mujoco_plugin_path.dsv)
 
 add_subdirectory(plugin)
+
+get_filename_component(MUJOCO_ROOT_FROM_BIN "${MUJOCO_BIN_DIR}" DIRECTORY)
+set(MUJOCO_SIMULATE_DIR "${MUJOCO_ROOT_FROM_BIN}/simulate")
+add_executable(
+  mujoco_ros_simulate
+  simulate/main.cc
+  simulate/lodepng_compat.cpp
+  "${MUJOCO_SIMULATE_DIR}/simulate.cc"
+  "${MUJOCO_SIMULATE_DIR}/platform_ui_adapter.cc"
+  "${MUJOCO_SIMULATE_DIR}/glfw_adapter.cc"
+  "${MUJOCO_SIMULATE_DIR}/glfw_dispatch.cc")
+target_include_directories(
+  mujoco_ros_simulate
+  PRIVATE
+    "${MUJOCO_SIMULATE_DIR}"
+    "${MUJOCO_INCLUDE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/simulate")
+target_compile_definitions(
+  mujoco_ros_simulate
+  PRIVATE MUJOCO_PLUGIN_DIR="${MUJOCO_BIN_DIR}/mujoco_plugin")
+target_link_libraries(
+  mujoco_ros_simulate
+  MujocoRosUtilsCore
+  ${LIB_MUJOCO}
+  glfw
+  PNG::PNG
+  ${CMAKE_DL_LIBS})
+install(TARGETS mujoco_ros_simulate RUNTIME DESTINATION lib/${PROJECT_NAME})
+
 add_subdirectory(test)
 
 if(INSTALL_DOCUMENTATION)

@@ -274,6 +274,7 @@
     </p>
     <div class="metadata">
       <span class="badge">Document date: 7 June 2026</span>
+      <span class="badge">Last reviewed: 13 June 2026</span>
       <span class="badge">ROS 2 targets: Humble and Jazzy</span>
       <span class="badge">Default build: modular plugins</span>
       <span class="badge">Initial I/O scope: numeric and semantic profiles</span>
@@ -295,6 +296,13 @@
       in-process consumers must reuse shared bindings instead of independently resolving MuJoCo
       objects or interpreting <code>mjData</code>.
     </p>
+    <p>
+      The three core iterations are implemented. Iteration 4 extends the same reuse, validation, and
+      portability rules to the runtime scene, dataset-recording, and visualization subsystems
+      (<code>SceneManager</code>, <code>SimDataAggregator</code>, <code>SimPlotter</code>, and
+      <code>LidarPublisher</code>) that have grown alongside the original scope but were previously
+      tracked only in the README.
+    </p>
   </section>
 
   <nav class="panel" aria-label="Table of contents">
@@ -306,6 +314,7 @@
       <li><a href="#iteration-1">Iteration 1: modular builds</a></li>
       <li><a href="#iteration-2">Iteration 2: sensor and GPIO</a></li>
       <li><a href="#iteration-3">Iteration 3: quality and performance</a></li>
+      <li><a href="#iteration-4">Iteration 4: scene, recording, and visualization</a></li>
       <li><a href="#testing">Test and CI strategy</a></li>
       <li><a href="#compatibility">Compatibility policy</a></li>
       <li><a href="#risks">Risks and mitigations</a></li>
@@ -330,8 +339,8 @@
   <section id="current-state">
     <h2>Implementation Status</h2>
     <p>
-      This section records the implementation state as of 7 June 2026. The detailed sections
-      below remain the design contract and acceptance criteria.
+      This section records the implementation state as of 7 June 2026 and was last reviewed on
+      13 June 2026. The detailed sections below remain the design contract and acceptance criteria.
     </p>
 
     <table>
@@ -380,13 +389,21 @@
           <td>Imported HDF5 target, package-owned plugin directory, relocatable local RPATH, <code>MUJOCO_PLUGIN_PATH</code> environment hook, and explicit CUDA selection.</td>
           <td>System or pre-vendored ImGui/ImPlot selection and installed-tree relocation tests.</td>
         </tr>
+        <tr>
+          <td>Iteration 4: scene, recording, visualization</td>
+          <td class="priority-essential">Shipped, not yet roadmapped</td>
+          <td>Runtime scene spawn/delete/query (spec API + <code>mj_recompile</code>), in-process data aggregation, HDF5/MCAP/LeRobot recording, real-time ImPlot plotting, and ray-cast lidar are all implemented and shipping.</td>
+          <td>Bring these subsystems under the same reuse, validation, diagnostics, and CI rules as the core iterations. See Iteration 4 below.</td>
+        </tr>
       </tbody>
     </table>
 
     <div class="panel success">
       <strong>Current baseline:</strong> Iterations 1 and 2 are implemented. Iteration 3 has completed
       its critical correctness and ownership work; remaining work is concentrated in broader
-      diagnostics, performance coverage, and dependency portability.
+      diagnostics, performance coverage, and dependency portability. The scene, recording, and
+      visualization subsystems (Iteration 4) ship today but are not yet held to the roadmap's reuse,
+      validation, and CI contract.
     </div>
   </section>
 
@@ -407,6 +424,11 @@
         <span class="iteration-number">Iteration 3</span>
         <h3>Quality and Performance</h3>
         <p>Explicit mappings, mode switching, lifecycle safety, diagnostics, optimization, and expanded CI.</p>
+      </article>
+      <article class="iteration">
+        <span class="iteration-number">Iteration 4</span>
+        <h3>Scene, Recording, and Visualization</h3>
+        <p>Bring runtime scene editing, dataset recording, plotting, and lidar under the shared bindings, validation, diagnostics, and CI contract.</p>
       </article>
     </div>
 
@@ -992,6 +1014,85 @@ mujoco_ros_utils_scene_manager</code></pre>
     </ul>
   </section>
 
+  <section id="iteration-4">
+    <h2>Iteration 4: Scene, Recording, and Visualization Subsystems</h2>
+
+    <h3>Objective</h3>
+    <p>
+      The runtime scene, in-process recording, plotting, and lidar subsystems are already shipping
+      and documented in the README, but they predate or sit outside the original three-iteration
+      contract. This iteration brings them under the same rules the rest of the roadmap enforces:
+      reuse of shared MuJoCo bindings, explicit validation, opt-in diagnostics, and registered CI
+      coverage. No new plugin is required; the work is consolidation and hardening.
+    </p>
+
+    <div class="panel warning">
+      <strong>Reuse constraint:</strong> recorders and plotters must read MuJoCo state through
+      <code>MujocoSensorBinding</code>, <code>MujocoActuatorBinding</code>, and the process-local
+      registry, never by independently resolving names or indexing <code>mjData</code>. This keeps
+      Iteration 4 aligned with the single data-access principle in the executive summary.
+    </div>
+
+    <h3>Scene management (<code>SceneManager</code>)</h3>
+    <ul>
+      <li>Run every <code>mjData</code> mutation and <code>mj_recompile</code> on the simulation thread through the between-step hook, and document the requirement that scene edits are unsafe mid-step.</li>
+      <li>Validate spawned MJCF/URDF (name collisions, free-joint requirements, mass/inertia sanity) before recompilation rather than failing inside the physics step.</li>
+      <li>Make spawn/despawn transactional so a failed recompile restores the prior model and simulation state instead of leaving a partially mutated scene.</li>
+      <li>Preserve <code>qpos</code>/<code>qvel</code> for unaffected bodies across recompilation and add a regression test asserting state continuity.</li>
+      <li>Add services for attach/detach (weld) and equality-constraint introspection that complement the existing <code>SetEqualityActive</code>.</li>
+      <li>Optionally serialize the accumulated runtime edits back to an MJCF snapshot for reproducibility.</li>
+    </ul>
+
+    <h3>Recording (<code>SimDataAggregator</code> and <code>SimRecorder</code>)</h3>
+    <ul>
+      <li>Read joint, actuator, and sensor streams through the shared bindings so recorded values match publisher and ros2_control values exactly.</li>
+      <li>Version the HDF5 and LeRobot layouts and write a schema/version attribute so downstream loaders can detect format changes.</li>
+      <li>Support segmented or resumable episodes and bound memory for long recordings instead of growing unboundedly.</li>
+      <li>Expose recording health (queued frames, dropped frames, encoder backlog, async-video status) through the same diagnostics snapshot used by the hardware interface.</li>
+      <li>Provide a single trigger that starts and stops recording across multiple aggregator instances atomically.</li>
+      <li>Keep the NVENC-to-software encoder fallback covered by a CI path that exercises the software encoder.</li>
+    </ul>
+
+    <h3>Visualization (<code>SimPlotter</code>)</h3>
+    <ul>
+      <li>Allow plotting of ros2_control interfaces and diagnostics counters, not only raw <code>qpos</code>/<code>qvel</code>/sensor sources.</li>
+      <li>Add a headless/offscreen capture mode so plotting can be smoke-tested in CI without a display server.</li>
+      <li>Persist and reload plot configurations so layouts survive simulator restarts.</li>
+      <li>Keep the SDL/OpenGL thread isolated from the physics thread and document the GPU (EGL/GLX) versus software fallback selection.</li>
+    </ul>
+
+    <h3>Lidar (<code>LidarPublisher</code>)</h3>
+    <ul>
+      <li>Optionally accelerate ray casting (OpenMP already; evaluate a CUDA path that reuses the image plugin's CUDA selection).</li>
+      <li>Add intensity and ring channels and a configurable point type for VLP-style output.</li>
+      <li>Provide benchmark fixtures for high-ray-count, high-rate configurations under the existing benchmark flag.</li>
+    </ul>
+
+    <h3>Cross-cutting manifest</h3>
+    <ul>
+      <li>Complete the machine-readable plugin manifest carried over from Iteration 1 and extend it to advertise each plugin's ROS topics, services, and parameters.</li>
+      <li>Expose a runtime discovery service that lists active plugin instances and their resolved node and service names, replacing <code>ros2 service list | grep</code> guidance in the README.</li>
+    </ul>
+
+    <h3>Deliverables</h3>
+    <ul class="checklist">
+      <li>Scene mutation validation, transactional recompile, and state-continuity tests.</li>
+      <li>Recorder format versioning, bounded buffering, and recording-health diagnostics.</li>
+      <li>Plotter headless-capture mode and configuration persistence.</li>
+      <li>Lidar channel extensions and benchmark fixtures.</li>
+      <li>Completed plugin manifest and runtime discovery service.</li>
+    </ul>
+
+    <h3>Acceptance criteria</h3>
+    <ul>
+      <li>A recorder and a publisher backed by the same source report identical values.</li>
+      <li>A failed spawn leaves the model and simulation state unchanged.</li>
+      <li>Scene edits preserve the state of unaffected bodies across recompilation.</li>
+      <li>Recording-health and plotter state are observable without a debugger.</li>
+      <li>The plotter and a minimal scene/recording scenario run in CI without a physical display.</li>
+    </ul>
+  </section>
+
   <section id="testing">
     <h2>Test and CI Strategy</h2>
 
@@ -1050,6 +1151,8 @@ mujoco_ros_utils_scene_manager</code></pre>
       <li>Reset during active control with no stale command reapplication.</li>
       <li>AddressSanitizer, UndefinedBehaviorSanitizer, and ThreadSanitizer jobs where supported.</li>
       <li>Installed-tree plugin discovery with no source-tree paths.</li>
+      <li>Runtime scene spawn/despawn with state continuity for unaffected bodies and rollback on failed recompile.</li>
+      <li>Recorder/publisher value parity and a headless plotter/recording smoke test without a display server.</li>
     </ul>
   </section>
 
@@ -1174,6 +1277,11 @@ mujoco_ros_utils_scene_manager</code></pre>
       <li><a href="../plugin/ActuatorCommand.cpp"><code>../plugin/ActuatorCommand.cpp</code></a></li>
       <li><a href="../plugin/SimDataRegistry.hpp"><code>../plugin/SimDataRegistry.hpp</code></a></li>
       <li><a href="../plugin/RosControl.cpp"><code>../plugin/RosControl.cpp</code></a></li>
+      <li><a href="../plugin/SceneManager.cpp"><code>../plugin/SceneManager.cpp</code></a></li>
+      <li><a href="../plugin/SimDataAggregator.cpp"><code>../plugin/SimDataAggregator.cpp</code></a></li>
+      <li><a href="../plugin/SimRecorder.cpp"><code>../plugin/SimRecorder.cpp</code></a></li>
+      <li><a href="../plugin/SimPlotter.cpp"><code>../plugin/SimPlotter.cpp</code></a></li>
+      <li><a href="../plugin/LidarPublisher.cpp"><code>../plugin/LidarPublisher.cpp</code></a></li>
       <li><a href="../test/CMakeLists.txt"><code>../test/CMakeLists.txt</code></a></li>
     </ul>
 

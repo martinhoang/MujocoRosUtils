@@ -1,19 +1,23 @@
 #pragma once
 
 #include "mujoco_ros_utils/srv/spawn_entity.hpp"
-#include "mujoco_ros_utils/srv/despawn_entity.hpp"
+#include "mujoco_ros_utils/srv/delete_entity.hpp"
 #include "mujoco_ros_utils/srv/list_entities.hpp"
 #include "mujoco_ros_utils/srv/set_equality_active.hpp"
 #include "mujoco_ros_utils/srv/set_body_pose.hpp"
 #include "mujoco_ros_utils/srv/set_geom_properties.hpp"
+#include "mujoco_ros_utils/srv/set_joint_positions.hpp"
+#include "mujoco_ros_utils/srv/apply_body_wrench.hpp"
 #include "mujoco_ros_utils/srv/get_body_pose.hpp"
 #include "mujoco_ros_utils/srv/get_geom_properties.hpp"
+#include "mujoco_ros_utils/srv/get_joint_state.hpp"
 #include "mujoco_ros_utils/srv/get_model_info.hpp"
 
 #include <mujoco/mjdata.h>
 #include <mujoco/mjmodel.h>
 #include <mujoco/mjspec.h>
 #include <rclcpp/rclcpp.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include <atomic>
 #include <atomic>
@@ -93,10 +97,11 @@ private:
   };
 
   enum class OpType {
-    SPAWN, DESPAWN,
+    SPAWN, DESPAWN, RESET_SIMULATION,
     SET_BODY_POSE, SET_GEOM_PROPERTIES,
-    SET_EQUALITY_ACTIVE,
-    GET_BODY_POSE, GET_GEOM_PROPERTIES, GET_MODEL_INFO
+    SET_EQUALITY_ACTIVE, SET_JOINT_POSITIONS,
+    APPLY_BODY_WRENCH,
+    GET_BODY_POSE, GET_GEOM_PROPERTIES, GET_JOINT_STATE, GET_MODEL_INFO
   };
 
   // ── Result structs for GET ops (filled by sim thread) ────────────────────
@@ -104,6 +109,8 @@ private:
   {
     double pos[3]  = {};
     double quat[4] = {1, 0, 0, 0};   ///< w x y z
+    double angular_vel[3] = {};      ///< world-frame angular velocity (rad/s)
+    double linear_vel[3]  = {};      ///< world-frame linear  velocity (m/s)
     std::string parent_body;
     bool is_dynamic = false;
   };
@@ -125,11 +132,24 @@ private:
     int nbody = 0, ngeom = 0, njnt = 0, nu = 0;
   };
 
+  struct JointStateData
+  {
+    std::vector<std::string> joint_names;
+    std::vector<int32_t>     pos_starts;    ///< start index of joint i in positions[]
+    std::vector<int32_t>     pos_lengths;   ///< number of pos coords for joint i
+    std::vector<int32_t>     vel_starts;    ///< start index of joint i in velocities[]
+    std::vector<int32_t>     vel_lengths;   ///< number of vel coords for joint i
+    std::vector<double>      positions;     ///< flat qpos values
+    std::vector<double>      velocities;    ///< flat qvel values
+    std::vector<double>      efforts;       ///< flat qfrc_actuator values
+  };
+
   struct PendingOp
   {
     OpType      type;
     std::string name;        ///< user label (SPAWN/DESPAWN) or body/geom name (SET_/GET_*)
     std::string xml;         ///< MJCF string for spawn
+    std::string source_directory;  ///< base directory for relative MJCF resources
     std::string attach_to;   ///< target body name (spawn)
     double      pos[3]   = {0, 0, 0};
     double      quat[4]  = {1, 0, 0, 0};  ///< w x y z
@@ -137,6 +157,15 @@ private:
     bool        relative       = false;    ///< SET_BODY_POSE: delta from current
     bool        eq_active      = false;    ///< SET_EQUALITY_ACTIVE: desired state
     bool        use_current_pose = false;  ///< SET_EQUALITY_ACTIVE: snap relpose to current
+    std::string reference_frame = "body";  ///< APPLY_BODY_WRENCH: "world" or "body"
+
+    // SET_JOINT_POSITIONS — parallel 1:1 arrays
+    std::vector<std::string> joint_names;
+    std::vector<double>      joint_positions;
+
+    // APPLY_BODY_WRENCH
+    double      force[3]   = {0, 0, 0};
+    double      torque[3]  = {0, 0, 0};
 
     // SET_GEOM_PROPERTIES — NaN means "keep current"
     double geom_size[3] = {std::numeric_limits<double>::quiet_NaN(),
@@ -150,6 +179,7 @@ private:
     // GET op results — allocated by service callback, filled by sim thread
     std::shared_ptr<BodyPoseData>   body_pose_data;
     std::shared_ptr<GeomPropsData>  geom_props_data;
+    std::shared_ptr<JointStateData> joint_state_data;
     std::shared_ptr<ModelInfoData>  model_info_data;
 
     // Result: written by sim thread, polled by service callback.
@@ -190,13 +220,17 @@ private:
 
     // Service handles — kept alive by this struct
     rclcpp::Service<mujoco_ros_utils::srv::SpawnEntity>::SharedPtr         spawn_srv;
-    rclcpp::Service<mujoco_ros_utils::srv::DespawnEntity>::SharedPtr       despawn_srv;
+    rclcpp::Service<mujoco_ros_utils::srv::DeleteEntity>::SharedPtr       despawn_srv;
     rclcpp::Service<mujoco_ros_utils::srv::ListEntities>::SharedPtr        list_srv;
     rclcpp::Service<mujoco_ros_utils::srv::SetBodyPose>::SharedPtr         set_body_pose_srv;
     rclcpp::Service<mujoco_ros_utils::srv::SetGeomProperties>::SharedPtr   set_geom_props_srv;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr                     reset_simulation_srv;
     rclcpp::Service<mujoco_ros_utils::srv::SetEqualityActive>::SharedPtr   set_equality_active_srv;
+    rclcpp::Service<mujoco_ros_utils::srv::SetJointPositions>::SharedPtr   set_joint_positions_srv;
+    rclcpp::Service<mujoco_ros_utils::srv::ApplyBodyWrench>::SharedPtr     apply_body_wrench_srv;
     rclcpp::Service<mujoco_ros_utils::srv::GetBodyPose>::SharedPtr         get_body_pose_srv;
     rclcpp::Service<mujoco_ros_utils::srv::GetGeomProperties>::SharedPtr   get_geom_props_srv;
+    rclcpp::Service<mujoco_ros_utils::srv::GetJointState>::SharedPtr       get_joint_state_srv;
     rclcpp::Service<mujoco_ros_utils::srv::GetModelInfo>::SharedPtr        get_model_info_srv;
 
     /// Create the ROS2 node, register all services, and start the executor thread.
@@ -236,8 +270,11 @@ private:
   bool applySetBodyPose(mjModel * m, mjData * d, PendingOp & op, std::string & err_msg);
   bool applySetGeomProperties(mjModel * m, mjData * d, PendingOp & op, std::string & err_msg);
   bool applySetEqualityActive(mjModel * m, mjData * d, PendingOp & op, std::string & err_msg);
+  bool applySetJointPositions(mjModel * m, mjData * d, PendingOp & op, std::string & err_msg);
+  bool applyBodyWrench(mjModel * m, mjData * d, PendingOp & op, std::string & err_msg);
   bool applyGetBodyPose(const mjModel * m, const mjData * d, PendingOp & op, std::string & err_msg);
   bool applyGetGeomProperties(const mjModel * m, PendingOp & op, std::string & err_msg);
+  bool applyGetJointState(const mjModel * m, const mjData * d, PendingOp & op, std::string & err_msg);
   bool applyGetModelInfo(const mjModel * m, PendingOp & op);
 
   /// Convert a URDF/Xacro string to MJCF using urdf2mjcf, if the input looks

@@ -891,6 +891,8 @@ ImagePublisher::ImagePublisher(const mjModel *m,
   node_options.automatically_declare_parameters_from_overrides(true);
 
   std::string node_name = mj_id2name(m, mjOBJ_SENSOR, sensor_id);
+  // Sanitize for ROS2 node name: replace '/' (from spawn prefix) with '_'
+  std::replace(node_name.begin(), node_name.end(), '/', '_');
   print_debug("[ImagePublisher] Constructor: Creating ROS2 node '%s'\n", node_name.c_str());
 
   nh_ = rclcpp::Node::make_shared(node_name, node_options);

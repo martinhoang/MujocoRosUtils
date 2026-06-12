@@ -9,8 +9,8 @@
 
   Geoms
   =====
-  static_box_geom     – box  size="0.1 0.1 0.1"  rgba="1 0 0 1" (red)
-  dynamic_sphere_geom – sphere size="0.08"         rgba="0 1 0 1" (green)
+  static_box_geom     – box size="0.1 0.1 0.1" rgba="1 0 0 1" (red)
+  dynamic_sphere_geom – sphere size="0.08" rgba="0 1 0 1" (green)
   floor               – plane
 
   Plugin patterns (MuJoCo 3.8.1):
@@ -31,9 +31,7 @@
   </visual>
 
   <asset>
-    <texture name="floor_tex" type="2d" builtin="checker"
-             rgb1="0.15 0.2 0.25" rgb2="0.25 0.3 0.35"
-             width="200" height="200"/>
+    <texture name="floor_tex" type="2d" builtin="checker" rgb1="0.15 0.2 0.25" rgb2="0.25 0.3 0.35" width="200" height="200"/>
     <material name="floor_mat" texture="floor_tex" texrepeat="8 8"/>
   </asset>
 
@@ -43,7 +41,7 @@
     <plugin plugin="MujocoRosUtils::SceneManager">
       <instance name="scene_manager_inst">
         <config key="node_name" value="scene_manager"/>
-        <config key="namespace"  value=""/>
+        <config key="namespace" value=""/>
       </instance>
     </plugin>
   </extension>
@@ -59,27 +57,42 @@
     <light pos="0 0 2" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
 
     <!-- Ground plane -->
-    <geom name="floor" type="plane" material="floor_mat"
-          size="5 5 0.01" pos="0 0 -0.01"/>
+    <geom name="floor" type="plane" material="floor_mat" size="5 5 0.01" pos="0 0 -0.01"/>
 
     <!-- Static (welded) body -->
     <body name="static_body" pos="0.3 0.0 0.5">
-      <geom name="static_box_geom" type="box" size="0.1 0.1 0.1"
-            mass="1.0" rgba="1.0 0.0 0.0 1.0"/>
+      <geom name="static_box_geom" type="box" size="0.1 0.1 0.1" mass="1.0" rgba="1.0 0.0 0.0 1.0"/>
     </body>
 
     <!-- Dynamic (freejoint) body -->
     <body name="dynamic_body" pos="0.0 0.5 0.5">
       <freejoint/>
-      <geom name="dynamic_sphere_geom" type="sphere" size="0.08"
-            mass="0.5" rgba="0.0 1.0 0.0 1.0"/>
+      <geom name="dynamic_sphere_geom" type="sphere" size="0.08" mass="0.5" rgba="0.0 1.0 0.0 1.0"/>
     </body>
 
     <!-- Extra body for relative pose test -->
     <body name="ref_body" pos="-0.4 -0.4 0.3">
-      <geom name="ref_geom" type="cylinder" size="0.05 0.1"
-            mass="0.5" rgba="0.2 0.2 1.0 1.0"/>
+      <geom name="ref_geom" type="cylinder" size="0.05 0.1" mass="0.5" rgba="0.2 0.2 1.0 1.0"/>
+    </body>
+
+    <!-- Pendulum with hinge joint for SetJointPositions / GetJointState tests -->
+    <body name="pendulum_base" pos="-0.3 0.3 0.8">
+      <geom name="pendulum_base_geom" type="cylinder" size="0.02 0.05" rgba="0.5 0.5 0.5 1.0" euler="0 90 0"/>
+      <body name="pendulum_arm">
+        <geom name="pendulum_geom" type="box" size="0.02 0.02 0.08" pos="0 0 0.1" mass="0.2" rgba="0.2 0.8 0.2 1.0"/>
+        <joint name="pendulum_joint" type="hinge" axis="1 0 0" />
+      </body>
     </body>
 
   </worldbody>
+
+  <contact>
+    <exclude body1="pendulum_base" body2="pendulum_arm"/>
+  </contact>
+
+  <!-- Named weld constraint for SetEqualityActive tests -->
+  <equality>
+    <weld name="test_weld" body1="static_body" body2="ref_body" active="false" relpose="0 0 0 1 0 0 0"/>
+  </equality>
+
 </mujoco>

@@ -1,0 +1,24 @@
+# ApplyBodyWrench.srv — apply a force + torque to a body for one simulation step
+#
+# Writes to d->xfrc_applied, which MuJoCo clears at the beginning of each
+# mj_step.  To apply a continuous wrench, call this service at your control
+# rate (e.g., every timestep).
+#
+# The reference_frame parameter controls how force/torque are interpreted:
+#   "world" — force and torque vectors are in the world frame
+#   "body"  — force and torque vectors are in the body-local frame
+#
+# xfrc_applied layout (body-local frame): [torque_x, torque_y, torque_z,
+#                                          force_x,  force_y,  force_z]
+
+string   body_name        # MuJoCo body name (exact, case-sensitive)
+string   reference_frame   # "world" or "body" (default: "body")
+float64  force_x           # linear force (N) in the chosen frame
+float64  force_y
+float64  force_z
+float64  torque_x          # torque (N·m) in the chosen frame
+float64  torque_y
+float64  torque_z
+---
+bool    success
+string  message

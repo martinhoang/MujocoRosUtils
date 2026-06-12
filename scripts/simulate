@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${MUJOCO_PATH:-}" ]]; then
+  echo "simulate: MUJOCO_PATH is not set" >&2
+  exit 1
+fi
+
+package_prefix="$(ros2 pkg prefix mujoco_ros_utils)"
+ros_simulate="${package_prefix}/lib/mujoco_ros_utils/mujoco_ros_simulate"
+if [[ ! -x "${ros_simulate}" ]]; then
+  echo "simulate: custom MuJoCo executable not found: ${ros_simulate}" >&2
+  exit 1
+fi
+
+exec "${ros_simulate}" "$@"

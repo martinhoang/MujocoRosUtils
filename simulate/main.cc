@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <signal.h>
 #include <string>
 #include <thread>
 
@@ -32,7 +33,9 @@
 #include "simulate.h"
 #include "array_safety.h"
 
+#ifndef MUJOCO_PLUGIN_DIR
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
+#endif
 
 extern "C" {
 #if defined(_WIN32) || defined(__CYGWIN__)
@@ -49,6 +52,23 @@ extern "C" {
 namespace {
 namespace mj = ::mujoco;
 namespace mju = ::mujoco::sample_util;
+
+class RecompileAwareGlfwAdapter final : public mj::GlfwAdapter {
+ public:
+  bool RefreshMjrContext(const mjModel* model, int fontscale) override {
+    if (!model) {
+      return mj::GlfwAdapter::RefreshMjrContext(model, fontscale);
+    }
+
+    // mj_recompile updates an mjModel in place. MuJoCo's default adapter
+    // refreshes only when the pointer changes, leaving stale GPU mesh buffers
+    // after SceneManager spawn/despawn operations.
+    mjr_makeContext(model, &mjr_context(), fontscale);
+    std::fprintf(
+        stderr, "[simulate] Render context rebuilt for recompiled model.\n");
+    return true;
+  }
+};
 
 // constants
 const double syncMisalign = 0.1;        // maximum mis-alignment before re-sync (simulation seconds)
@@ -175,8 +195,10 @@ void scanPluginLibraries() {
   // define platform-specific strings
 #if defined(_WIN32) || defined(__CYGWIN__)
   const std::string sep = "\\";
+  constexpr char kPathSep = '\\';
 #else
   const std::string sep = "/";
+  constexpr char kPathSep = '/';
 #endif
 
 
@@ -188,7 +210,11 @@ void scanPluginLibraries() {
     return;
   }
 
-  const std::string plugin_dir = getExecutableDir() + sep + MUJOCO_PLUGIN_DIR;
+  const std::string configured_plugin_dir = MUJOCO_PLUGIN_DIR;
+  const std::string plugin_dir =
+      configured_plugin_dir.empty() || configured_plugin_dir.front() != kPathSep
+          ? getExecutableDir() + sep + configured_plugin_dir
+          : configured_plugin_dir;
   mj_loadAllPluginLibraries(
       plugin_dir.c_str(), +[](const char* filename, int first, int count) {
         std::printf("Plugins registered by library '%s':\n", filename);
@@ -351,15 +377,23 @@ void PhysicsLoop(mj::Simulate& sim) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+    bool model_changed = false;
     {
       // lock the sim mutex
-      const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
+      std::unique_lock<std::recursive_mutex> lock(sim.mtx);
 
       // Run any between-step model modifications registered by plugins (e.g. mj_recompile).
       // This runs while sim.mtx is held, so no concurrent mj_step can interfere.
       if (m && mujoco_ros_utils::CheckBetweenStepHook(m, d)) {
+        model_changed = true;
         sim.speed_changed = true;  // re-sync CPU/sim timing after potential model change
         mj_forward(m, d);          // update derived quantities (xpos, contact, etc.)
+        sim.mnew_ = m;
+        sim.dnew_ = d;
+        // Skip Simulate's loading-label frame. mj_recompile changes the model
+        // behind the same pointer, so Sync() cannot safely run once with the
+        // old cache vectors as it can during a normal pointer-swapping load.
+        sim.loadrequest = 1;
       }
 
       // run only if model is present
@@ -458,6 +492,17 @@ void PhysicsLoop(mj::Simulate& sim) {
         }
       }
     }  // release std::lock_guard<std::mutex>
+
+    // mj_recompile updates the model in place, but Simulate caches body, joint,
+    // actuator, history, and rendering data. The reload request is published
+    // while holding sim.mtx so the render thread cannot observe the resized
+    // model first. Wait here until it has rebuilt all model-dependent caches.
+    if (model_changed) {
+      std::unique_lock<std::recursive_mutex> lock(sim.mtx);
+      sim.cond_loadrequest.wait(lock, [&sim]() {
+        return sim.loadrequest == 0 || sim.exitrequest.load();
+      });
+    }
   }
 }
 }  // namespace
@@ -526,6 +571,15 @@ int main(int argc, char** argv) {
   // scan for libraries in the plugin directory to load additional plugins
   scanPluginLibraries();
 
+  // Keep SIGINT/SIGTERM out of plugin-owned ROS signal handlers. A dedicated
+  // waiter converts either signal into Simulate's normal exit request so the
+  // physics thread joins and MuJoCo destroys data/model/plugins in order.
+  sigset_t shutdown_signals;
+  sigemptyset(&shutdown_signals);
+  sigaddset(&shutdown_signals, SIGINT);
+  sigaddset(&shutdown_signals, SIGTERM);
+  pthread_sigmask(SIG_BLOCK, &shutdown_signals, nullptr);
+
   mjvCamera cam;
   mjv_defaultCamera(&cam);
 
@@ -537,7 +591,7 @@ int main(int argc, char** argv) {
 
   // simulate object encapsulates the UI
   auto sim = std::make_unique<mj::Simulate>(
-      std::make_unique<mj::GlfwAdapter>(),
+      std::make_unique<RecompileAwareGlfwAdapter>(),
       &cam, &opt, &pert, /* is_passive = */ false
   );
 
@@ -548,10 +602,19 @@ int main(int argc, char** argv) {
 
   // start physics thread
   std::thread physicsthreadhandle(&PhysicsThread, sim.get(), filename);
+  std::thread signalthreadhandle([&sim, &shutdown_signals]() {
+    int signal_number = 0;
+    if (sigwait(&shutdown_signals, &signal_number) == 0) {
+      sim->exitrequest.store(1);
+    }
+  });
 
   // start simulation UI loop (blocking call)
   sim->RenderLoop();
+  sim->exitrequest.store(1);
   physicsthreadhandle.join();
+  pthread_kill(signalthreadhandle.native_handle(), SIGTERM);
+  signalthreadhandle.join();
 
   return 0;
 }

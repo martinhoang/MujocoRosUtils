@@ -1,0 +1,33 @@
+# GetJointState.srv — query joint positions, velocities, and actuator efforts
+#
+# If joint_names is empty, ALL joints in the model are returned.
+# Otherwise, only the named joints are returned (order preserved).
+#
+# positions[]  — one float64 per joint position coordinate.  For 1-DOF joints
+#                (hinge, slide) this is the angle/displacement.  For multi-DOF
+#                joints (ball=4, free=7) it is the full qpos slice.
+# velocities[] — one float64 per joint velocity DOF (hinge/slide=1, ball=3, free=6).
+# efforts[]    — one float64 per joint velocity DOF, from qfrc_actuator.
+#
+# The three arrays are parallel in DOF space, NOT in joint-name space.
+# Use joint_dof_indices to partition the flat arrays back into per-joint slices:
+#   joint i spans positions[joint_dof_indices[i].pos_start .. joint_dof_indices[i].pos_end]
+#   and velocities[joint_dof_indices[i].vel_start .. joint_dof_indices[i].vel_end]
+#   and efforts[joint_dof_indices[i].vel_start .. joint_dof_indices[i].vel_end]
+
+string[]  joint_names       # names to query; empty = return all
+---
+bool      success
+string    message
+string[]  joint_names_out   # names of returned joints (same length as joint_dof_indices)
+
+# Per-joint degree-of-freedom indexing
+int32[]   pos_starts        # start index of joint i's position data into positions[]
+int32[]   pos_lengths       # number of position values for joint i (1, 4, or 7)
+int32[]   vel_starts        # start index of joint i's velocity data into velocities[]
+int32[]   vel_lengths       # number of velocity values for joint i (1, 3, or 6)
+
+# Flat arrays of position, velocity, and effort across all returned joints
+float64[] positions          # qpos values for all returned joints, flattened
+float64[] velocities         # qvel values for all returned joints, flattened
+float64[] efforts            # actuator force per DOF from qfrc_actuator, flattened
